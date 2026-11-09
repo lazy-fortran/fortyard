@@ -5,7 +5,7 @@ module fy_time
     implicit none
     private
 
-    public :: ago, when, epoch, day_of
+    public :: ago, when, epoch, day_of, seconds_since, seconds_between, duration
 
 contains
 
@@ -51,6 +51,46 @@ contains
             s = 'on '//day_of(stamp)
         end if
     end function ago
+
+    integer function seconds_since(stamp) result(d)
+        !! Seconds from the UTC time `stamp` (YYYY-MM-DDTHH:MM:SSZ) until now.
+        character(len=*), intent(in) :: stamp
+        integer :: v(8)
+        integer(int64) :: now
+        d = 0
+        if (len(stamp) < 19) return
+        call date_and_time(values=v)
+        now = epoch(v(1), v(2), v(3), v(5), v(6), v(7))
+        if (abs(v(4)) <= 1440) now = now - 60_int64 * v(4)
+        d = int(max(0_int64, now - utc(stamp)))
+    end function seconds_since
+
+    integer function seconds_between(a, b) result(d)
+        !! Seconds from UTC time `a` to UTC time `b`.
+        character(len=*), intent(in) :: a, b
+        d = 0
+        if (len(a) < 19 .or. len(b) < 19) return
+        d = int(max(0_int64, utc(b) - utc(a)))
+    end function seconds_between
+
+    function duration(seconds) result(s)
+        !! "45 s", "3 min 20 s", "2 h 5 min".
+        integer, intent(in) :: seconds
+        character(len=:), allocatable :: s
+        if (seconds < 60) then
+            s = ui_str(seconds)//' s'
+        else if (seconds < 3600) then
+            s = ui_str(seconds / 60)//' min '//ui_str(mod(seconds, 60))//' s'
+        else
+            s = ui_str(seconds / 3600)//' h '//ui_str(mod(seconds, 3600) / 60)//' min'
+        end if
+    end function duration
+
+    integer(int64) function utc(stamp)
+        character(len=*), intent(in) :: stamp
+        utc = epoch(digits(stamp(1:4)), digits(stamp(6:7)), digits(stamp(9:10)), &
+            digits(stamp(12:13)), digits(stamp(15:16)), digits(stamp(18:19)))
+    end function utc
 
     pure integer(int64) function epoch(y, mo, d, h, mi, se)
         !! Seconds since 1970-01-01 of a UTC time (civil-from-days, Howard Hinnant).

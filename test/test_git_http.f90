@@ -80,6 +80,12 @@ program test_git_http
         '"$(git --git-dir='//data//'/repos/demo.git rev-parse main)" && ! git --git-dir='// &
         data//'/repos/demo.git rev-parse -q --verify first', exitstat=stat)
     call check(stat == 0, 'main went to the mirror target and the branch is gone')
+    reply = get('/api/v1/jobs')
+    call check(index(reply, '"totals":{"running":0,"queued":0,"landed":1,"failed":0}') > 0 .and. &
+        index(reply, '"id":1,"kind":"landing","repo":"demo","branch":"first"') > 0 .and. &
+        index(reply, '"started":"20') > 0, 'the jobs list the landing with totals and start time')
+    reply = get('/api/v1/jobs/1')
+    call check(index(reply, '"log":"') > 0 .and. index(reply, 'Landed as') > 0, 'a job shows its log')
     ! A restart during a landing runs it again; it must find its own result.
     call store_open(data//'/fortyard.db', db, stat)
     call db_exec(db, "UPDATE landings SET state = 'queued' WHERE id = 1;", stat)
@@ -115,8 +121,15 @@ program test_git_http
         '-clone commit -q -m "Remove README" && '//git//'-C '//work//'-clone push -q '//url// &
         ' HEAD:broken', exitstat=stat)
     call check(stat == 0, 'a branch with a failing check is pushed')
+    ! A page learns of the change from the event stream, without asking.
+    call execute_command_line('curl -sN -H "Authorization: Bearer '//admin//'" '// &
+        'http://'//base//'/api/v1/events?topic=jobs > '//work//'-events & echo $! > '// &
+        work//'-events.pid; sleep 0.5', exitstat=stat)
     reply = post('/api/v1/repos/demo/land', '{"branch":"broken"}')
     call wait_landing(2, 'failed')
+    call execute_command_line('sleep 0.5; kill $(cat '//work//'-events.pid); grep -q "^data: now" '// &
+        work//'-events && grep -q "^data: changed" '//work//'-events', exitstat=stat)
+    call check(stat == 0, 'the event stream announces the change of the jobs')
     reply = get('/api/v1/repos/demo/log?ref=main')
     call check(index(reply, 'Remove README') == 0, 'main stays where it was')
 

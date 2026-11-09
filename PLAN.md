@@ -147,6 +147,10 @@ In order:
 - [x] Every page has its own address (repositories at /GROUP/.../REPO, their
       pages after /-/ as in GitLab), Back and Forward, and server-rendered
       HTML for every address, so links can be bookmarked and opened in new tabs.
+- [x] Jobs page (`/jobs`, `/jobs?repo=NAME`): running and waiting jobs, totals and
+      counts per repository, recent results with their logs; live through a
+      server-sent event stream (inotify and poll(2) on the server, EventSource in
+      the browser) and fortui timers, without polling.
 - [ ] CI logs and test history, with their own addresses.
 
 **Inspection gate:** the instance is reviewed before anything is hosted
