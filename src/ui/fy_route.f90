@@ -8,7 +8,7 @@ module fy_route
     private
 
     public :: route_t, route_parse, route_is_page, route_href, url_encode, url_decode
-    public :: go, go_take
+    public :: go, go_take, route_set_base, at
 
     integer, parameter, public :: R_REPOS = 1, R_TOKENS = 2, R_SERVER = 3, R_TREE = 4, &
         R_BLOB = 5, R_COMMITS = 6, R_COMMIT = 7, R_MISSING = 8
@@ -25,6 +25,9 @@ module fy_route
     end type route_t
 
     character(len=:), allocatable :: pending
+    !! Where the application lives below the host, e.g. "/yard"; empty at the root.
+    !! Paths inside the application never carry it; rendered links do.
+    character(len=:), allocatable :: base
 
 contains
 
@@ -33,14 +36,14 @@ contains
         character(len=*), intent(in) :: location
         type(route_t), intent(out) :: r
         character(len=:), allocatable :: p, q, first, rest
-        integer :: at
+        integer :: qpos
 
         r%repo = ''
         r%path = ''
-        at = index(location, '?')
-        if (at > 0) then
-            p = location(1:at - 1)
-            q = location(at + 1:)
+        qpos = index(location, '?')
+        if (qpos > 0) then
+            p = location(1:qpos - 1)
+            q = location(qpos + 1:)
         else
             p = location
             q = ''
@@ -56,23 +59,23 @@ contains
         end if
         r%kind = R_MISSING
         if (p(1:1) /= '/') return
-        at = index(p(2:), '/')
-        if (at == 0) then
+        qpos = index(p(2:), '/')
+        if (qpos == 0) then
             first = p(2:)
         else
-            first = p(2:at)
+            first = p(2:qpos)
         end if
-        if (first == 'tokens' .and. at == 0) r%kind = R_TOKENS
-        if (first == 'server' .and. at == 0) r%kind = R_SERVER
+        if (first == 'tokens' .and. qpos == 0) r%kind = R_TOKENS
+        if (first == 'server' .and. qpos == 0) r%kind = R_SERVER
         if (is_reserved(first)) return
 
-        at = index(p, '/-/')
-        if (at == 0) then
+        qpos = index(p, '/-/')
+        if (qpos == 0) then
             r%repo = p(2:)
             rest = 'tree'
         else
-            r%repo = p(2:at - 1)
-            rest = p(at + 3:)
+            r%repo = p(2:qpos - 1)
+            rest = p(qpos + 3:)
         end if
         if (len(r%repo) == 0 .or. index(r%repo, '//') > 0) return
         r%repo = url_decode(r%repo)
@@ -105,8 +108,36 @@ contains
         route_is_page = .not. is_reserved(path(2:slash))
     end function route_is_page
 
+    subroutine route_set_base(prefix)
+        character(len=*), intent(in) :: prefix
+        base = prefix
+        if (len(base) > 0) then
+            if (base(len(base):) == '/') base = base(1:len(base) - 1)
+        end if
+    end subroutine route_set_base
+
+    function at(path) result(href)
+        !! The rendered link to application path `path`.
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: href
+        if (.not. allocated(base)) base = ''
+        href = base//path
+    end function at
+
+    function unbased(href) result(path)
+        !! `href` without the base, as the application's own path.
+        character(len=*), intent(in) :: href
+        character(len=:), allocatable :: path
+        if (.not. allocated(base)) base = ''
+        path = href
+        if (len(base) == 0 .or. len(href) < len(base)) return
+        if (href(1:len(base)) /= base) return
+        path = href(len(base) + 1:)
+        if (len(path) == 0) path = '/'
+    end function unbased
+
     function route_href(kind, repo, path, plain) result(href)
-        !! The location of a page of repository `repo`.
+        !! The location of a page of repository `repo`. (rendered, with the base).
         integer, intent(in) :: kind
         character(len=*), intent(in) :: repo
         character(len=*), intent(in), optional :: path
@@ -129,12 +160,13 @@ contains
         case (R_COMMIT)
             href = href//'/-/commit/'//sub
         end select
+        href = at(href)
     end function route_href
 
     subroutine go(href)
         !! Asks the application to show `href` (a link was followed).
         character(len=*), intent(in) :: href
-        pending = href
+        pending = unbased(href)
     end subroutine go
 
     logical function go_take(href)

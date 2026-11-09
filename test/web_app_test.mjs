@@ -11,9 +11,11 @@ const data = mkdtempSync(join(process.env.FY_TEST_TMP || tmpdir(), 'fy-web-test-
 const init = execFileSync(fy, ['serve', '--init', '--data', join(data, 'd')]).toString();
 const admin = init.trim().split('\n').pop();
 const port = 20000 + Math.floor(Math.random() * 20000);
+// FY_TEST_BASE=/yard runs everything below a path prefix, as behind a proxy.
+const base = process.env.FY_TEST_BASE || '';
 const server = spawn(fy, ['serve', '--data', join(data, 'd'), '--listen', `127.0.0.1:${port}`,
-  '--web', web, '--workers', '1', '--threads', '4'], { stdio: 'ignore' });
-const url = `http://127.0.0.1:${port}/`;
+  '--web', web, '--workers', '1', '--threads', '4', '--base', base], { stdio: 'ignore' });
+const url = `http://127.0.0.1:${port}${base}/`;
 
 const browser = spawn(process.env.CHROME || 'chromium', ['--headless=new',
   '--remote-debugging-port=0', '--no-first-run', '--window-size=1280,800',
@@ -71,10 +73,11 @@ const hasText = (t) => `[...document.querySelectorAll('.fui')].some((e) => e.tex
 
 let failed = 0;
 const check = (ok, what) => { console.log((ok ? 'PASS ' : 'FAIL ') + what); if (!ok) failed++; };
-const path = () => evaluate('location.pathname + location.search');
+// The location below the base, as the application sees it.
+const path = async () => ((await evaluate('location.pathname + location.search')).slice(base.length) || '/');
 const bg = () => evaluate(`getComputedStyle(document.body).backgroundColor`);
 const scheme = (value) => send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value }] });
-const linkTo = (href) => `a[href=${JSON.stringify(href)}]`;
+const linkTo = (href) => `a[href=${JSON.stringify(base + href)}]`;
 const noOverflow = `document.documentElement.scrollWidth <= document.documentElement.clientWidth`;
 
 try {
@@ -187,12 +190,12 @@ try {
   const count = (e) => { const m = JSON.parse(e.data); if (m.method === 'Network.requestWillBeSent') requests++; };
   ws.addEventListener('message', count);
   await evaluate('history.back()');
-  await until(`location.pathname === '/demo/-/commits' && ${hasText('Add hello')}`, 'back to the history');
+  await until(`location.pathname.slice(${base.length}) === '/demo/-/commits' && ${hasText('Add hello')}`, 'back to the history');
   await evaluate('history.back()');
-  await until(`location.pathname === '/demo/-/blob/hello.f90' && [...document.querySelectorAll('[data-style="5"]')].some((e) => e.textContent.endsWith('end program'))`, 'back to the file');
+  await until(`location.pathname.slice(${base.length}) === '/demo/-/blob/hello.f90' && [...document.querySelectorAll('[data-style="5"]')].some((e) => e.textContent.endsWith('end program'))`, 'back to the file');
   check(requests === 0, 'Back shows the history and the file again without asking the server');
   await evaluate('history.forward()');
-  await until(`location.pathname === '/demo/-/commits'`, 'forward');
+  await until(`location.pathname.slice(${base.length}) === '/demo/-/commits'`, 'forward');
   ws.removeEventListener('message', count);
   check(true, 'Forward goes to the next page again');
 

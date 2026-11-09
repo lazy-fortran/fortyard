@@ -33,6 +33,7 @@ sends it as HTML, so pages show before the WebAssembly loads:
 scripts/build-web.sh . build/web               # fortui at the version fpm.toml pins
 build/fo/bin/fy serve --data DIR --web build/web
 node test/web_app_test.mjs build/fo/bin/fy build/web
+FY_TEST_BASE=/yard node test/web_app_test.mjs build/fo/bin/fy build/web   # below a path prefix
 ```
 
 See [DESIGN.md](DESIGN.md) for goals, decisions and architecture, and

@@ -5,12 +5,14 @@ program fy_app
     use fortui, only: ui_init, ui_run
     use fortui_web, only: web_backend_t
     use fy_ui_app, only: app_start, app_compose
-    use fy_nav, only: nav_location, nav_pref
+    use fy_nav, only: nav_location, nav_pref, nav_base
+    use fy_route, only: route_set_base
     implicit none
     integer :: stat
 
     call ui_init(web_backend_t(root_id="app"), 1000, 800, "fortyard", stat=stat)
     if (stat /= 0) error stop "fortyard needs a browser page"
+    call route_set_base(nav_base())
     call app_start(nav_location(), nav_pref('fy_sidebar'), nav_pref('fy_theme'))
     call ui_run(app_compose)
 end program fy_app
