@@ -99,7 +99,14 @@ addToLibrary({
       }
       case 5:
         if (s.charAt(0) === '/') s = location.origin + s;
-        if (navigator.clipboard) navigator.clipboard.writeText(s).catch(function () {});
+        // Plain HTTP (no secure context) has no Clipboard API: copy a selection.
+        if (navigator.clipboard) { navigator.clipboard.writeText(s).catch(function () {}); break; }
+        var ta = document.createElement('textarea');
+        ta.value = s; ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); } catch (e) {}
+        ta.remove();
         break;
     }
   },
