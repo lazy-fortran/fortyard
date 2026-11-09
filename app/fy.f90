@@ -6,8 +6,8 @@ program fy
     use fy_build_info, only: FY_VERSION, FY_COMMIT
     use fy_client, only: client_request, config_t, config_load, config_save
     use fy_posix, only: tcp_listen, activated_listen_fd, sock_bound_port
-    use fy_server, only: server_loop
-    use fy_sqlite, only: db_t, db_errmsg
+    use fy_server, only: server_supervise
+    use fy_sqlite, only: db_t, db_errmsg, db_close
     use fy_store, only: store_open, store_bootstrap
     implicit none
 
@@ -41,7 +41,7 @@ contains
         write (output_unit, '(a)') &
             'usage: fy <command> [options]', &
             '', &
-            '  serve [--data DIR] [--listen HOST:PORT] [--init]', &
+            '  serve [--data DIR] [--listen HOST:PORT] [--workers P] [--threads T] [--init]', &
             '                      run the server; --init creates the data directory', &
             '                      and prints the administrator token once', &
             '  login --server URL --token TOKEN', &
@@ -91,13 +91,19 @@ contains
     end function flag
 
     subroutine cmd_serve()
-        character(len=:), allocatable :: data, listen, host, token
+        character(len=:), allocatable :: data, listen, host, token, text
         type(db_t) :: db
-        integer :: lfd, port, stat, colon
+        integer :: lfd, port, stat, colon, workers, threads
         logical :: exists
 
         data = option('--data', './fortyard-data')
         listen = option('--listen', '127.0.0.1:8740')
+        text = option('--workers', '2')
+        read (text, *, iostat=stat) workers
+        if (stat /= 0 .or. workers < 1 .or. workers > 64) error stop 'fy: --workers needs 1 to 64'
+        text = option('--threads', '8')
+        read (text, *, iostat=stat) threads
+        if (stat /= 0 .or. threads < 1 .or. threads > 256) error stop 'fy: --threads needs 1 to 256'
         inquire (file=data//'/fortyard.db', exist=exists)
         if (flag('--init')) then
             if (exists) then
@@ -139,7 +145,8 @@ contains
         write (error_unit, '(a,i0)') 'fy serve '//FY_VERSION//' ('//FY_COMMIT// &
             ') listening on port ', sock_bound_port(lfd)
         flush (error_unit)
-        call server_loop(lfd, db)
+        call db_close(db)
+        call server_supervise(lfd, data//'/fortyard.db', workers, threads)
     end subroutine cmd_serve
 
     subroutine cmd_login()

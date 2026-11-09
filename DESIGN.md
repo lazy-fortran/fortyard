@@ -72,7 +72,7 @@ flowchart LR
         web["Browser: Fortran WASM app"]
         fo["fo: remote cache client"]
     end
-    subgraph server["fy serve (one process)"]
+    subgraph server["fy serve"]
         http["HTTP/1.1 + SSE"]
         api["REST API /api/v1"]
         sched["job scheduler"]
@@ -105,17 +105,20 @@ flowchart LR
 
 ### Server process
 
-`fy serve` is a single process:
+`fy serve` is one program running as a supervisor and its worker processes:
 
-- **HTTP.** HTTP/1.1 written in Fortran directly against POSIX sockets and
-  `poll` through `bind(C)`, with no C source files. Live updates (CI logs, agent
+- **HTTP.** HTTP/1.1 written in Fortran directly against POSIX sockets through
+  `bind(C)`, with no C source files. Live updates (CI logs, agent
   traces, review events) use server-sent events. fortyard itself never speaks
   TLS: in the MVP, WireGuard encrypts the traffic; later, the reverse proxy
   terminates HTTPS.
-- **Concurrency.** One event loop accepts and parses requests. Long work (git
-  operations, mirroring, agent turns, report rendering) runs in child processes
-  or in a small worker pool, so a slow request never blocks the loop. SQLite has
-  one serialized writer.
+- **Concurrency.** The supervisor forks a few worker processes that share the
+  listening socket. In each worker, OpenMP threads run their own accept loops,
+  each with its own SQLite connection, so a slow request or a long-lived event
+  stream holds one thread. A worker that dies, for example on a Fortran runtime
+  error, loses only its own requests and is replaced; threads alone could not
+  isolate such a failure. Long work (git operations, mirroring, agent turns)
+  runs in child processes. SQLite in WAL mode has one writer at a time.
 - **Storage.** Under one data directory: `fortyard.db`, `repos/<owner>/<name>.git`
   (bare, kept packed by periodic geometric repacking so there are few large
   files), and `cas/sha256/` for build-cache objects, logs, JUnit and coverage

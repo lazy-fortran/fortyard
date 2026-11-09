@@ -1,6 +1,6 @@
 module fy_server
     !! Request routing for `fy serve`.
-    use, intrinsic :: iso_fortran_env, only: error_unit
+    use, intrinsic :: iso_fortran_env, only: error_unit, output_unit, int64
     use fx_json_build, only: json_escape_string
     use fx_json_parse, only: json_extract_string
     use fy_build_info, only: FY_VERSION, FY_COMMIT, FY_BUILT
@@ -8,15 +8,94 @@ module fy_server
         http_bearer_token
     use fy_posix, only: tcp_accept, sock_close, sock_set_timeouts
     use fy_sqlite, only: db_t
-    use fy_store, only: token_identity_t, store_token_lookup, store_token_create
+    use fy_proc, only: proc_fork, proc_wait_any, proc_exit, proc_pid, &
+        proc_die_with_parent, proc_sleep_ms
+    use fy_store, only: token_identity_t, store_token_lookup, store_token_create, store_open
     implicit none
     private
 
-    public :: server_loop, serve_connection, route
+    public :: server_loop, serve_connection, route, server_supervise
 
     character(len=*), parameter :: JSON = 'application/json'
 
 contains
+
+    subroutine server_supervise(lfd, db_path, nworkers, nthreads)
+        !! Pre-forked workers share the listening socket, each with its own
+        !! database connection. A worker that dies, for example on a Fortran
+        !! runtime error, takes only its own requests down and is replaced. Inside a
+        !! worker, OpenMP threads run their own accept loops, so a long-lived
+        !! connection holds one thread rather than one process.
+        integer, intent(in) :: lfd, nworkers, nthreads
+        character(len=*), intent(in) :: db_path
+        integer :: pids(nworkers)
+        integer(int64) :: started(nworkers), now, rate
+        integer :: i, pid, status
+        integer :: me
+
+        me = proc_pid()
+        do i = 1, nworkers
+            call spawn(i)
+        end do
+        do
+            call proc_wait_any(pid, status)
+            if (pid < 0) then
+                call proc_sleep_ms(100)
+                cycle
+            end if
+            do i = 1, nworkers
+                if (pids(i) /= pid) cycle
+                write (error_unit, '(a,i0,a,i0)') 'fy: worker ', pid, &
+                    ' ended with wait status ', status
+                call system_clock(now, rate)
+                ! A worker that dies within a second of starting is crash-looping.
+                if (now - started(i) < rate) call proc_sleep_ms(1000)
+                call spawn(i)
+            end do
+        end do
+
+    contains
+
+        subroutine spawn(slot)
+            ! The supervisor never starts an OpenMP team: a child forked from a
+            ! process with live OpenMP threads inherits a broken thread pool.
+            integer, intent(in) :: slot
+            integer(int64) :: rate_
+
+            do
+                flush (error_unit)
+                flush (output_unit)
+                call system_clock(started(slot), rate_)
+                pids(slot) = proc_fork()
+                if (pids(slot) >= 0) exit
+                write (error_unit, '(a)') 'fy: cannot fork a worker; retrying'
+                call proc_sleep_ms(1000)
+            end do
+            if (pids(slot) /= 0) return
+            if (.not. proc_die_with_parent(me)) call proc_exit(0)
+            call worker_main(lfd, db_path, nthreads)
+            call proc_exit(0)
+        end subroutine spawn
+
+    end subroutine server_supervise
+
+    subroutine worker_main(lfd, db_path, nthreads)
+        integer, intent(in) :: lfd, nthreads
+        character(len=*), intent(in) :: db_path
+        type(db_t) :: db
+        integer :: stat
+
+        !$omp parallel num_threads(nthreads) default(none) private(db, stat) &
+        !$omp shared(lfd, db_path)
+        call store_open(db_path, db, stat)
+        if (stat /= 0) then
+            write (error_unit, '(a)') 'fy: worker thread cannot open the database'
+            flush (error_unit)
+            call proc_exit(1)
+        end if
+        call server_loop(lfd, db)
+        !$omp end parallel
+    end subroutine worker_main
 
     subroutine server_loop(lfd, db)
         integer, intent(in) :: lfd

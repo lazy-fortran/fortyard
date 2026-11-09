@@ -40,18 +40,33 @@ working tree on the loopback address and `scripts/dev-down.sh` stops it.
       releases kept, edge timer following `main`. Rollback verified with a
       release whose server exits at once.
 - [x] Tests: request parsing, token store, socket round trip through the server.
-- [ ] Concurrency: the accept loop serves one connection at a time; long
-      requests need a worker pool before CI log streaming (M2).
+- [x] Concurrency: a supervisor forks worker processes that share the
+      listening socket; inside each, OpenMP threads run their own accept loops
+      with their own database connections (`--workers P --threads T`).
 - [ ] OIDC login against Keycloak (device flow for `fy login`), first against a
       local Keycloak container; registering the real client waits for approval.
 - [ ] Account deactivation and token revocation when Keycloak disables a user.
 - [ ] restic backup of the database and repositories, and the scheduled restore
       test; backup target to be decided.
 - [ ] Runtime bounds checks kept on in release builds of the request parser.
-- [ ] Server stays up after a Fortran runtime error in one request (today
-      systemd restarts it within a second).
+- [x] A worker that dies, for example on a Fortran runtime error, loses only
+      its own requests; the supervisor replaces it.
 
-### M2 CI overlay
+### M2 Web application, first screens
+
+The browser application is Fortran compiled to WebAssembly with LFortran and
+drawn with [fortui](https://github.com/lazy-fortran/fortui). fortyard is the
+first consumer of fortui's browser backend, which is built in fortui itself.
+
+- [ ] fortui `web` backend: ordinary controls as DOM elements, a non-blocking
+      frame driver yielding to the browser, a small JavaScript host and the
+      emscripten loader as the only JavaScript.
+- [ ] Shared modules (JSON, API types) compiled with gfortran and LFortran.
+- [ ] `fy serve` serves the application and its WebAssembly module.
+- [ ] Screens: server status, account, tokens (list, create, revoke).
+- [ ] Canvas surface in fortui for diffs and plots (needed from M5 on).
+
+### M3 CI overlay
 
 - [ ] Mirror fx, fo and fortyard from GitHub by polling.
 - [ ] `fy runner` with leases, heartbeats, log streaming and per-case cgroups.
@@ -59,33 +74,34 @@ working tree on the loopback address and `scripts/dev-down.sh` stops it.
       and peak memory; commit statuses posted to GitHub.
 - [ ] GitHub stub for tests; GitHub App or fine-grained token decided.
 
-### M3 fortyard primary for itself
+### M4 fortyard primary for itself
 
 - [ ] Git smart HTTP and SSH through `git http-backend` and `git-shell`.
 - [ ] Size limit and repository checks on receive; same checks in `fy push`.
 - [ ] Push-mirror to GitHub; the edge channel then builds from fortyard itself.
 
-### M4 HTML views
+### M5 Web views of repositories
 
-- [ ] Repositories, commits, diffs, CI logs, test history.
+- [ ] Repositories, commits, diffs, CI logs, test history in the application;
+      server-rendered HTML only as permalinks and a fallback without
+      JavaScript.
 
 **Inspection gate:** the instance is reviewed before anything is hosted
 elsewhere.
 
 ## Stage B: hosted instance
 
-- M5 Shared build cache and the fo client.
-- M6 Coverage per commit and on changed lines.
-- M7 Native pull requests, stacks, reviews, merge queue, failover; fx and fo
+- M6 Shared build cache and the fo client.
+- M7 Coverage per commit and on changed lines.
+- M8 Native pull requests, stacks, reviews, merge queue, failover; fx and fo
   become primary.
-- M8 Agent harness: review, then implement, address, watch, fix-regression.
-- M9 Issues with one-way import from GitHub.
-- M10 WebAssembly application.
+- M9 Agent harness: review, then implement, address, watch, fix-regression.
+- M10 Issues with one-way import from GitHub.
 - M11 MILCA and further code repositories move to fortyard.
 
 ## Work in fo
 
-Tracked in fo; needed from M2 on (see
+Tracked in fo; needed from M3 on (see
 [Testing at scale](doc/testing-at-scale.md#what-fo-needs)):
 
 1. `fo test --plan --json` without building.
@@ -96,6 +112,8 @@ Tracked in fo; needed from M2 on (see
 
 ## LFortran and WebAssembly
 
-The web application (M10) needs LFortran's WebAssembly target. Nothing before
-M10 depends on it. Shared modules are checked with LFortran when M4 starts, and
-blocking LFortran defects are fixed in the lazy-fortran fork of LFortran.
+The web application needs LFortran's WebAssembly target (Flang cannot target
+WebAssembly). fortui's sources already compile with it and its headless tests
+pass in Node and Chromium. Defects that block fortyard or fortui are fixed in
+the lazy-fortran fork of LFortran. OpenMP stays in the server; modules shared
+with the browser do not use it.
