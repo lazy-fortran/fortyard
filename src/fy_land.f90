@@ -61,6 +61,16 @@ contains
         call run([character(len=1024) :: 'rm', '-rf', work], '')
         call run([character(len=1024) :: 'git', 'clone', '--quiet', '--shared', repo, work], '')
         if (status /= 0) return
+        ! A landing interrupted by a restart runs again; if it already moved main,
+        ! its commit (made by fortyard, numbered like it) is there and it is done.
+        call git([character(len=1024) :: 'log', '-1', '--format=%H', '--fixed-strings', &
+            '--committer=fortyard@localhost', '--grep= (#'//num//')', 'origin/main'])
+        if (status == 0 .and. len_trim(out) >= 40) then
+            commit = first_line(out)
+            log = 'Landed as '//commit//' before a restart.'
+            ok = .true.
+            return
+        end if
         call git([character(len=1024) :: 'rev-parse', '--verify', '--quiet', 'origin/'//branch])
         if (status /= 0) then
             log = 'There is no branch '//branch//'.'

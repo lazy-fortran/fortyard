@@ -7,7 +7,7 @@ program test_git_http
         sock_bound_port, sock_set_timeouts
     use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, SIGTERM
     use fy_server, only: server_supervise, server_set_data_dir, server_set_mirror_interval
-    use fy_sqlite, only: db_t, db_close
+    use fy_sqlite, only: db_t, db_close, db_exec
     use fy_store, only: store_open, store_bootstrap, store_repo_add, store_token_create
     implicit none
 
@@ -80,6 +80,17 @@ program test_git_http
         '"$(git --git-dir='//data//'/repos/demo.git rev-parse main)" && ! git --git-dir='// &
         data//'/repos/demo.git rev-parse -q --verify first', exitstat=stat)
     call check(stat == 0, 'main went to the mirror target and the branch is gone')
+    ! A restart during a landing runs it again; it must find its own result.
+    call store_open(data//'/fortyard.db', db, stat)
+    call db_exec(db, "UPDATE landings SET state = 'queued' WHERE id = 1;", stat)
+    call db_close(db)
+    do i = 1, 300
+        reply = get('/api/v1/repos/demo/landings')
+        if (index(reply, 'before a restart') > 0) exit
+        call proc_sleep_ms(100)
+    end do
+    call check(index(reply, '"landing":1,"branch":"first","account":"admin","state":"landed"') > 0 &
+        .and. index(reply, 'before a restart') > 0, 'a repeated landing finds its own commit')
 
     ! Read with a reading token; the URL without ".git" works too.
     call execute_command_line(git//'clone -q http://x:'//reader//'@'//base//'/demo '// &
