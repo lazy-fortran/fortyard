@@ -36,7 +36,7 @@ they are explicitly revised.
   results to a shared cache that developers and runners read.
 - **Modern Fortran.** Server, runner, client, agent harness and web interface
   are Fortran. C libraries are used through `bind(C)` where reimplementing them
-  would be unsafe or wasteful (TLS, SQLite); external programs (`git`, `jj`,
+  would be unsafe or wasteful (TLS, SQLite); external programs (`git`,
   `fo`, a container runtime) are called as subprocesses.
 
 Non-goals for the MVP: hosting large data, replacing git's storage format,
@@ -50,7 +50,7 @@ federation between forges, public sign-up.
 | Deployment | Single-node monolith. The MVP is reachable only over a WireGuard network; a later deployment sits behind an HTTPS reverse proxy under a path prefix such as `/yard` |
 | Git source of truth | Overlay first: GitHub stays primary, fortyard mirrors, runs CI and review and reports status back. Repositories move to fortyard-primary one at a time |
 | Repositories in scope | Code repositories now on GitHub, starting with [fx](https://github.com/lazy-fortran/fx) (the dependency-free Fortran infrastructure library under fo), fo and fortyard itself. Data repositories stay on the organization's GitLab with its Git LFS storage and are not migrated |
-| Version control model | Git storage format and wire protocol on the server; the data model is change-centric and built for [Jujutsu (`jj`)](https://jj-vcs.github.io/jj/). Plain git clients remain fully supported |
+| Version control model | Git first: git storage, wire protocol and plain git workflows; changes are identified by a `Change-Id` trailer |
 | Large files | No fortyard-specific large-file mechanism. A size limit on receive keeps large objects out of history. Large data stays in Git LFS on the existing GitLab or in a DOI archive |
 | Identity | OpenID Connect against the organization's existing Keycloak realm. Authentication only: fortyard decides authorization, deny by default |
 | HTTPS client | libcurl through `bind(C)` |
@@ -129,40 +129,32 @@ flowchart LR
   or distributed filesystem, where many small files are slow and strain the
   metadata servers.
 
-### Git and jj
+### Git
 
 fortyard stores repositories in git's format and speaks git's smart HTTP and SSH
 protocols, by calling `git http-backend`, `git receive-pack` and
 `git upload-pack`. Git is not reimplemented. This keeps every git client,
-GitHub and GitLab mirroring, fo and the runners working unchanged.
+GitHub and GitLab mirroring, fo and the runners working unchanged. Plain git is
+the workflow fortyard is designed for; other clients that speak git work too.
 
-The data model is built around changes instead of commits, following jj:
-
-- **Change IDs.** Every change has a stable ID that survives amend and rebase.
-  jj writes it into the commit. For plain git, `fy` installs a commit-message
-  hook that adds a `Change-Id` trailer, as Gerrit does, which amend and rebase
-  preserve. Commits that arrive with neither get an ID on first push and are
-  matched to later revisions only heuristically.
+- **Change IDs.** Every change has a stable ID that survives amend and rebase:
+  `fy` installs a commit-message hook that adds a `Change-Id` trailer, as Gerrit
+  does, which amend and rebase preserve. Commits that arrive without one get an
+  ID on first push and are matched to later versions by branch name.
 - **Changes are what is reviewed** (fortyard's pull requests, see
   [Workflow](doc/workflow.md#changes)). A force-push creates a new version of
   the same change. Review comments are anchored to change, path and line and
   are carried across versions; each version shows its difference from the
   previous one (interdiff). A stack is a sequence of changes, each with its own
   review.
-- **Server-side history work uses jj.** Rebasing stacks, merge-queue candidates
-  and conflict detection run through the `jj` binary with machine-readable
-  output templates. The jj version is pinned and its interface covered by tests,
-  because jj is still before version 1.0.
-- **Agents work in jj workspaces**, which gives them undo for every operation
-  and a working copy that cannot be lost.
-- **Plain git stays first class.** `fy` recommends jj but does not require it.
-  Repositories that rely on submodules or LFS, which jj does not support, use
-  plain-git mode.
+- **Server-side history work uses git**: squashing, rebasing stacks, merge-queue
+  candidates and conflict detection run through `git` subprocesses.
+- **Agents work in their own clone** in a sandbox; fortyard performs every push.
 
-jj does not run git hooks. Repository checks that normally run as pre-commit
-hooks therefore run in `fy push` before sending and again on the server when
-receiving. In overlay mode, pushes go to the upstream forge directly, so there
-the upstream's own checks and fortyard's CI apply instead.
+Repository checks that run as pre-commit hooks on a developer's machine (format,
+repository hygiene) run again when a change lands, so nothing that skipped the
+hooks reaches `main`. In overlay mode, pushes go to the upstream forge directly,
+so there the upstream's own checks and fortyard's CI apply instead.
 
 **History rewriting.** Rewriting unpushed work is normal. Pull-request stacks
 accept force-pushes. Protected branches (`main`, release branches) refuse
@@ -329,7 +321,7 @@ Task kinds:
 Rules:
 
 - The agent has one tool: a shell inside an ephemeral sandbox container with a
-  jj workspace of the repository. It never receives forge credentials.
+  clone of the repository. It never receives forge credentials.
 - The only publishable output is an explicit final submission. Reasoning, tool
   input and tool output go to a redacted trace and never become a review body.
 - fortyard performs every commit, push and pull-request operation. The agent
@@ -353,8 +345,7 @@ trace in the web interface.
 
 - **REST API** under `/api/v1`, JSON, versioned. A server-sent event stream
   `/api/v1/events` delivers repository, CI, review and agent events.
-- **`fy`** finds the repository from the current checkout and works with jj or
-  git:
+- **`fy`** finds the repository from the current git checkout:
   `fy login`, `fy whoami`, `fy repo`, `fy push`, `fy pr create|list|checkout|review|merge`,
   `fy issue`, `fy ci status|logs|rerun|run --local`, `fy cache`,
   `fy agent review|implement`, `fy serve`, `fy runner`.
@@ -498,7 +489,7 @@ fortyard/
   src/http/              server, client (libcurl), SSE
   src/db/                SQLite binding, schema, migrations
   src/auth/              OIDC, sessions, tokens
-  src/vcs/               git and jj subprocess layer, receive checks, mirroring
+  src/vcs/               git subprocess layer, receive checks, mirroring
   src/ci/                jobs, runner protocol, results, merge queue
   src/cache/             remote cache endpoints
   src/review/            stacks, revisions, comments, Fortran-aware views

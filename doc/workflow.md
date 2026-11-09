@@ -37,19 +37,17 @@ code faster than people can read it:
 ## Changes
 
 A change is fortyard's pull request: one commit's worth of work under review,
-with a stable identity. The name follows jj, where a change keeps its identity
-when it is amended or rebased. A **stack** is a sequence of changes where each
+with a stable identity that it keeps when it is amended or rebased. A **stack** is a sequence of changes where each
 builds on the previous one; each change of a stack has its own number, page
 and review. Every push of a change creates a new **version** of it.
 
-- **Opening.** Pushing a jj change, or a git branch other than a protected one,
+- **Opening.** Pushing a branch other than a protected one
   opens or updates a change as a draft; branches under `wip/` never open one.
   Marking a change ready (`fy change ready`, or the button) puts it into the
   merge queue.
 - **Versions.** Every push creates a new version of the same change, matched by
-  its change ID (the `change-id` header jj writes, or a `Change-Id` trailer that
-  `fy` adds for plain git). A plain-git commit without either is matched by its
-  branch name. The page shows the difference between any two versions, and line
+  its `Change-Id` trailer, which `fy` adds through a commit hook. A commit without
+  one is matched by its branch name. The page shows the difference between any two versions, and line
   comments carry over where the line still exists.
 - **Page.** As on GitHub and GitLab: title and a required Markdown description
   (drafted by the review agent from the issue and the diff, edited by the
