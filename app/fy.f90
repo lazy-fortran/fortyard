@@ -6,7 +6,7 @@ program fy
     use fy_build_info, only: FY_VERSION, FY_COMMIT
     use fy_client, only: client_request, config_t, config_load, config_save
     use fy_posix, only: tcp_listen, activated_listen_fd, sock_bound_port
-    use fy_server, only: server_supervise, server_set_web_dir
+    use fy_server, only: server_supervise, server_set_web_dir, server_set_data_dir
     use fy_sqlite, only: db_t, db_errmsg, db_close
     use fy_store, only: store_open, store_bootstrap
     implicit none
@@ -23,6 +23,8 @@ program fy
         call cmd_get('/api/v1/whoami')
     case ('token')
         call cmd_token()
+    case ('repo')
+        call cmd_repo()
     case ('mcp')
         call cmd_mcp()
     case ('version', '--version')
@@ -49,6 +51,8 @@ contains
             '                      check and store a login', &
             '  whoami              show the account of the stored token', &
             '  token create NAME   create a token with the scopes of the current one', &
+            '  repo add NAME URL   mirror a repository (https or ssh URL; admin only)', &
+            '  repo list           list mirrored repositories', &
             '  mcp                 MCP server on standard input and output', &
             '  version             print the version'
     end subroutine usage
@@ -149,6 +153,7 @@ contains
         flush (error_unit)
         call db_close(db)
         call server_set_web_dir(web)
+        call server_set_data_dir(data)
         call server_supervise(lfd, data//'/fortyard.db', workers, threads)
     end subroutine cmd_serve
 
@@ -217,6 +222,31 @@ contains
             '{"name":"'//json_escape_string(arg(3))//'"}', code, body, stat)
         call report(code, body, stat)
     end subroutine cmd_token
+
+    subroutine cmd_repo()
+        type(config_t) :: cfg
+        character(len=:), allocatable :: body
+        integer :: code, stat
+
+        call config_load(cfg)
+        select case (arg(2))
+        case ('add')
+            if (len(arg(3)) == 0 .or. len(arg(4)) == 0) then
+                write (error_unit, '(a)') 'fy: usage: fy repo add NAME URL'
+                error stop 2
+            end if
+            call require_login(cfg)
+            call client_request(cfg%server, 'POST', '/api/v1/repos', cfg%token, &
+                '{"name":"'//json_escape_string(arg(3))//'","upstream":"'// &
+                json_escape_string(arg(4))//'"}', code, body, stat)
+            call report(code, body, stat)
+        case ('list')
+            call cmd_get('/api/v1/repos')
+        case default
+            write (error_unit, '(a)') 'fy: usage: fy repo add NAME URL | fy repo list'
+            error stop 2
+        end select
+    end subroutine cmd_repo
 
     subroutine require_login(cfg)
         type(config_t), intent(in) :: cfg

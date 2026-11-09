@@ -10,11 +10,13 @@
     color-scheme: light dark;
     --fg: #1d1f21; --bg: #fbfbf8; --mut: #6b6f76; --acc: #3b6e5a;
     --line: #d9d6cc; --ctl: #ffffff; --hover: #f0efe9;
+    --pos: #2f7d4f; --neg: #b23a3a; --accent-bg: #eef3f0; --code-bg: #f3f2ec;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --fg: #e6e4dc; --bg: #17191b; --mut: #9a9da3; --acc: #7fb69c;
       --line: #3a3d42; --ctl: #212427; --hover: #2a2d31;
+      --pos: #7fc79a; --neg: #f08a8a; --accent-bg: #23302a; --code-bg: #1d2023;
     }
   }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); }
@@ -34,7 +36,25 @@
   .fui:focus, .fui:focus-visible { outline: none; }
   .fui-keyboard .fui-focus, .fui-k8.fui-focus { outline: 2px solid var(--acc); outline-offset: 1px; }
   .fui-k1 { color: var(--fg); }
+  .fui-k1 { line-height: 1.25; }
   .fui[data-style="2"] { color: var(--mut); }
+  .fui[data-tone="1"] { color: var(--pos); }
+  .fui[data-tone="2"] { color: var(--neg); }
+  .fui[data-tone="3"] { color: var(--mut); }
+  .fui[data-tone="4"] { color: var(--acc); background: var(--accent-bg); }
+  .fui[data-style="5"] { background: var(--code-bg); }
+  /* Entries, path segments and commit ids read as links, not buttons. */
+  .fui-k2[data-id$="/open"], .fui-k2[data-id="root"], .fui-k2[data-id^="seg"],
+  .fui-k2[data-id*="/id#"] {
+    border: 0; background: transparent; color: var(--acc); text-align: left;
+    padding: 0 4px; border-radius: 4px;
+  }
+  .fui-k2[data-id$="/open"].fui-hover, .fui-k2[data-id="root"].fui-hover,
+  .fui-k2[data-id^="seg"].fui-hover, .fui-k2[data-id*="/id#"].fui-hover {
+    background: var(--hover); text-decoration: underline;
+  }
+  .fui-k2[data-id*="/id#"] { font-family: ui-monospace, monospace; }
+  .fui-k2:disabled { color: var(--mut); cursor: default; }
   #app::before {
     content: ""; position: absolute; left: 0; right: 0; top: 56px;
     border-top: 1px solid var(--line);

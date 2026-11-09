@@ -5,17 +5,22 @@ module fy_server
     use fx_json_parse, only: json_extract_string
     use fy_build_info, only: FY_VERSION, FY_COMMIT, FY_BUILT
     use fy_http, only: http_request_t, http_read_request, http_send_response, &
-        http_bearer_token, http_cookie
+        http_bearer_token, http_cookie, http_query_param
+    use fy_repo, only: repo_name_ok, repo_ref_ok, repo_path_ok, repo_log_json, repo_tree_json, &
+        repo_blob, repo_commit_json, repo_refs_json, repo_clone, repo_fetch
     use fy_posix, only: tcp_accept, sock_close, sock_set_timeouts
     use fy_sqlite, only: db_t
     use fy_proc, only: proc_fork, proc_wait_any, proc_exit, proc_pid, &
         proc_die_with_parent, proc_sleep_ms
     use fy_store, only: token_identity_t, token_info_t, store_token_lookup, store_token_create, &
-        store_open, store_token_list, store_token_revoke, store_token_revoke_hash
+        store_open, store_token_list, store_token_revoke, store_token_revoke_hash, repo_info_t, &
+        store_repo_add, store_repo_list, store_repo_fetched
+    use fy_sqlite, only: db_close
     implicit none
     private
 
     public :: server_loop, serve_connection, route, server_supervise, server_set_web_dir
+    public :: server_set_data_dir
     public :: response_t
 
     character(len=*), parameter :: JSON = 'application/json'
@@ -31,6 +36,8 @@ module fy_server
 
     !! Directory of the web application; empty serves the status page at /.
     character(len=:), allocatable :: web_dir
+    !! Directory of the repository mirrors.
+    character(len=:), allocatable :: repos_dir
 
 contains
 
@@ -42,13 +49,17 @@ contains
         !! connection holds one thread rather than one process.
         integer, intent(in) :: lfd, nworkers, nthreads
         character(len=*), intent(in) :: db_path
-        integer :: pids(nworkers)
-        integer(int64) :: started(nworkers), now, rate
-        integer :: i, pid, status
+        ! Slot nworkers + 1, when there is a data directory, is the process
+        ! that mirrors repositories.
+        integer :: pids(nworkers + 1)
+        integer(int64) :: started(nworkers + 1), now, rate
+        integer :: i, pid, status, slots
         integer :: me
 
         me = proc_pid()
-        do i = 1, nworkers
+        slots = nworkers
+        if (allocated(repos_dir)) slots = nworkers + 1
+        do i = 1, slots
             call spawn(i)
         end do
         do
@@ -57,7 +68,7 @@ contains
                 call proc_sleep_ms(100)
                 cycle
             end if
-            do i = 1, nworkers
+            do i = 1, slots
                 if (pids(i) /= pid) cycle
                 write (error_unit, '(a,i0,a,i0)') 'fy: worker ', pid, &
                     ' ended with wait status ', status
@@ -87,11 +98,180 @@ contains
             end do
             if (pids(slot) /= 0) return
             if (.not. proc_die_with_parent(me)) call proc_exit(0)
-            call worker_main(lfd, db_path, nthreads)
+            if (slot > nworkers) then
+                call mirror_main(db_path)
+            else
+                call worker_main(lfd, db_path, nthreads)
+            end if
             call proc_exit(0)
         end subroutine spawn
 
     end subroutine server_supervise
+
+    subroutine mirror_main(db_path)
+        !! Clones repositories that have no mirror yet and fetches the others
+        !! once a minute; a failed fetch is recorded and retried a minute later.
+        character(len=*), intent(in) :: db_path
+        type(db_t) :: db
+        type(repo_info_t), allocatable :: repos(:)
+        character(len=64), allocatable :: names(:)
+        integer(int64), allocatable :: last(:)
+        integer(int64) :: now, rate
+        integer :: stat, i, k, status
+        logical :: exists
+
+        allocate (names(0), last(0))
+        call execute_command_line('mkdir -p '''//repos_dir//'''', exitstat=stat)
+        do
+            call store_open(db_path, db, stat)
+            if (stat == 0) then
+                call store_repo_list(db, repos, stat)
+                do i = 1, size(repos)
+                    k = findloc(names, repos(i)%name, 1)
+                    if (k == 0) then
+                        names = [names, [character(len=64) :: repos(i)%name]]
+                        last = [last, -huge(1_int64)]
+                        k = size(names)
+                    end if
+                    call system_clock(now, rate)
+                    inquire (file=repo_path(repos(i)%name)//'/HEAD', exist=exists)
+                    if (.not. exists) then
+                        call repo_clone(repos(i)%upstream, repo_path(repos(i)%name), status)
+                    else if (now - last(k) >= 60 * rate) then
+                        call repo_fetch(repo_path(repos(i)%name), status)
+                    else
+                        cycle
+                    end if
+                    last(k) = now
+                    call store_repo_fetched(db, repos(i)%name, status)
+                    if (status /= 0) then
+                        write (error_unit, '(a,i0)') 'fy: mirroring '//repos(i)%name// &
+                            ' failed with status ', status
+                        flush (error_unit)
+                    end if
+                end do
+                call db_close(db)
+            end if
+            call proc_sleep_ms(10000)
+        end do
+    end subroutine mirror_main
+
+    function repo_path(name) result(path)
+        character(len=*), intent(in) :: name
+        character(len=:), allocatable :: path
+        path = repos_dir//'/'//trim(name)//'.git'
+    end function repo_path
+
+    subroutine server_set_data_dir(dir)
+        !! Set once before workers start; read-only afterwards.
+        character(len=*), intent(in) :: dir
+        repos_dir = dir//'/repos'
+    end subroutine server_set_data_dir
+
+    subroutine repos_route(req, db, res)
+        !! /api/v1/repos and /api/v1/repos/NAME/{refs,log,tree,blob,commits/ID}.
+        type(http_request_t), intent(in) :: req
+        type(db_t), intent(in) :: db
+        type(response_t), intent(inout) :: res
+        type(token_identity_t) :: who
+        type(repo_info_t), allocatable :: repos(:)
+        character(len=:), allocatable :: rest, name, sub, ref, path, upstream
+        integer :: slash, i, status, stat
+        logical :: found, exists
+
+        if (.not. authenticated(req, db, who, res)) return
+        if (req%path == '/api/v1/repos') then
+            if (req%method == 'POST') then
+                if (index(' '//who%scopes//' ', ' admin ') == 0) then
+                    call fail(res, 403, 'adding repositories needs the admin scope')
+                    return
+                end if
+                call json_extract_string(req%body, 'name', name, found)
+                if (.not. found) name = ''
+                call json_extract_string(req%body, 'upstream', upstream, found)
+                if (.not. found) upstream = ''
+                if (.not. repo_name_ok(name) .or. .not. upstream_ok(upstream)) then
+                    call fail(res, 400, 'body must be {"name":"...","upstream":"..."} with a'// &
+                        ' lower-case name and an https or ssh URL')
+                    return
+                end if
+                call store_repo_add(db, name, upstream, stat)
+                if (stat /= 0) then
+                    call fail(res, 409, 'repository exists')
+                    return
+                end if
+                res%code = 201
+                res%body = '{"name":"'//name//'"}'
+                return
+            end if
+            if (.not. method_is(req, 'GET', res)) return
+            call store_repo_list(db, repos, stat)
+            res%body = '{"repos":['
+            do i = 1, size(repos)
+                inquire (file=repo_path(repos(i)%name)//'/HEAD', exist=exists)
+                if (i > 1) res%body = res%body//','
+                res%body = res%body//'{"name":"'//repos(i)%name//'","upstream":"'// &
+                    json_escape_string(repos(i)%upstream)//'","fetched":"'// &
+                    repos(i)%fetched_at//'","ready":'//json_bool(exists)//'}'
+            end do
+            res%body = res%body//']}'
+            return
+        end if
+
+        if (.not. method_is(req, 'GET', res)) return
+        rest = req%path(len('/api/v1/repos/') + 1:)
+        slash = index(rest, '/')
+        if (slash < 2) then
+            call fail(res, 404, 'not found')
+            return
+        end if
+        name = rest(1:slash - 1)
+        sub = rest(slash + 1:)
+        inquire (file=repo_path(name)//'/HEAD', exist=exists)
+        if (.not. repo_name_ok(name) .or. .not. exists) then
+            call fail(res, 404, 'no such repository, or not mirrored yet')
+            return
+        end if
+        ref = http_query_param(req%query, 'ref')
+        if (len(ref) == 0) ref = 'HEAD'
+        path = http_query_param(req%query, 'path')
+        if (.not. repo_ref_ok(ref) .or. .not. repo_path_ok(path)) then
+            call fail(res, 400, 'bad ref or path')
+            return
+        end if
+        select case (sub)
+        case ('refs')
+            call repo_refs_json(repo_path(name), res%body, status)
+        case ('log')
+            call repo_log_json(repo_path(name), ref, 100, res%body, status)
+        case ('tree')
+            call repo_tree_json(repo_path(name), ref, path, res%body, status)
+        case ('blob')
+            call repo_blob(repo_path(name), ref, path, res%body, status)
+            if (status == 413) then
+                call fail(res, 413, 'file larger than 1 MiB')
+                return
+            end if
+            res%ctype = 'text/plain; charset=utf-8'
+        case default
+            if (index(sub, 'commits/') /= 1 .or. .not. repo_ref_ok(sub(9:))) then
+                call fail(res, 404, 'not found')
+                return
+            end if
+            call repo_commit_json(repo_path(name), sub(9:), res%body, status)
+        end select
+        if (status /= 0) call fail(res, 404, 'no such ref, path or commit')
+    end subroutine repos_route
+
+    pure logical function upstream_ok(url)
+        !! An https or ssh git URL, never an option or a local path.
+        character(len=*), intent(in) :: url
+
+        upstream_ok = len(url) > 8 .and. len(url) < 512 .and. index(url, ' ') == 0
+        if (.not. upstream_ok) return
+        upstream_ok = index(url, 'https://') == 1 .or. index(url, 'ssh://') == 1 .or. &
+            (index(url, 'git@') == 1 .and. index(url, ':') > 5)
+    end function upstream_ok
 
     subroutine worker_main(lfd, db_path, nthreads)
         integer, intent(in) :: lfd, nthreads
@@ -206,6 +386,8 @@ contains
             if (index(req%path, '/app/') == 1) then
                 if (.not. method_is(req, 'GET', res)) return
                 call static_file(req, req%path(6:), res)
+            else if (req%path == '/api/v1/repos' .or. index(req%path, '/api/v1/repos/') == 1) then
+                call repos_route(req, db, res)
             else if (index(req%path, '/api/v1/tokens/') == 1) then
                 rest = req%path(16:)
                 if (index(rest, '/revoke') /= len(rest) - 6 .or. len(rest) < 8) then

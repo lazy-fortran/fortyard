@@ -8,6 +8,7 @@ program fy_app
         json_parser_init, json_parser_next, JSON_KEY, JSON_STRING, JSON_INTEGER, &
         JSON_BOOL, JSON_OBJECT_END, JSON_END_OF_INPUT, JSON_ERROR
     use fy_fetch, only: request_t, fetch_start, fetch_ready
+    use fy_repo_view, only: repo_view_open, repo_view_compose, repo_view_receive
     implicit none
 
     type :: token_row_t
@@ -20,8 +21,8 @@ program fy_app
     type(token_row_t), allocatable :: tokens(:)
     character(len=:), allocatable :: version, commit, account, scopes, message
     character(len=:), allocatable :: token_input, new_name, new_token
-    character(len=16), parameter :: tab_labels(2) = [character(len=16) :: "Overview", &
-        "Access tokens"]
+    character(len=16), parameter :: tab_labels(3) = [character(len=16) :: "Repositories", &
+        "Access tokens", "Server"]
     integer :: tab, stat, i
     logical :: signed_in, checked, submitted
     logical :: narrow
@@ -64,12 +65,17 @@ program fy_app
         else if (.not. signed_in) then
             call sign_in_view()
         else
-            if (tabs("tabs", tab_labels, tab, width=min(360.0, page_w), size=CTRL)) message = ''
+            if (tabs("tabs", tab_labels, tab, width=min(420.0, page_w), size=CTRL)) then
+                message = ''
+                if (tab == 1) call repo_view_open()
+            end if
             select case (tab)
             case (1)
-                call overview_view()
-            case default
+                call repo_view_compose(page_w, narrow, index(scopes, 'admin') > 0)
+            case (2)
                 call tokens_view()
+            case default
+                call overview_view()
             end select
         end if
         if (len(message) > 0) call text(message, size=SMALL, style=UI_CAPTION)
@@ -244,8 +250,10 @@ contains
                 call json_extract_string(whoami_req%body, 'account', account, found)
                 call json_extract_string(whoami_req%body, 'scopes', scopes, found)
                 call fetch_start(tokens_req, 'GET', '/api/v1/tokens')
+                call repo_view_open()
             end if
         end if
+        call repo_view_receive()
         if (fetch_ready(tokens_req)) then
             if (tokens_req%status == 200) call parse_tokens(tokens_req%body)
         end if

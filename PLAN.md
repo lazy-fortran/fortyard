@@ -73,7 +73,8 @@ first consumer of fortui's browser backend, which is built in fortui itself.
 
 ### M3 CI overlay
 
-- [ ] Mirror fx, fo and fortyard from GitHub by polling.
+- [x] Mirror repositories from GitHub: a supervised mirror process clones new
+      ones and fetches every minute (`fy repo add NAME URL`, admin only).
 - [ ] `fy runner` with leases, heartbeats, log streaming and per-case cgroups.
 - [ ] Runs through fo on new heads; results per case with input hash, CPU time
       and peak memory; commit statuses posted to GitHub.
@@ -87,9 +88,10 @@ first consumer of fortui's browser backend, which is built in fortui itself.
 
 ### M5 Web views of repositories
 
-- [ ] Repositories, commits, diffs, CI logs, test history in the application;
-      server-rendered HTML only as permalinks and a fallback without
-      JavaScript.
+- [x] Repository list, file browser, history and commits with coloured diffs
+      in the application, from a read-only API over the mirrors.
+- [ ] CI logs, test history; browser URLs and back button for these pages;
+      server-rendered HTML as permalinks and a fallback without JavaScript.
 
 **Inspection gate:** the instance is reviewed before anything is hosted
 elsewhere.

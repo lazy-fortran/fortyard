@@ -6,6 +6,7 @@ module fy_http
 
     public :: http_request_t, http_parse_head, http_read_request
     public :: http_send_response, http_status_text, http_bearer_token, http_cookie
+    public :: http_query_param, http_percent_decode
 
     integer, parameter, public :: HTTP_MAX_HEAD = 65536
     integer, parameter, public :: HTTP_MAX_BODY = 1048576
@@ -160,6 +161,59 @@ contains
             'X-Content-Type-Options: nosniff'//CRLF// &
             'Connection: close'//CRLF//CRLF//body, stat)
     end subroutine http_send_response
+
+    function http_query_param(query, key) result(value)
+        !! Decoded value of `key` in a query string, or empty.
+        character(len=*), intent(in) :: query, key
+        character(len=:), allocatable :: value
+        integer :: pos, amp, eq
+        character(len=:), allocatable :: pair
+
+        value = ''
+        pos = 1
+        do while (pos <= len(query))
+            amp = index(query(pos:), '&')
+            if (amp == 0) then
+                pair = query(pos:)
+                pos = len(query) + 1
+            else
+                pair = query(pos:pos + amp - 2)
+                pos = pos + amp
+            end if
+            eq = index(pair, '=')
+            if (eq == 0) cycle
+            if (http_percent_decode(pair(1:eq - 1)) == key) then
+                value = http_percent_decode(pair(eq + 1:))
+                return
+            end if
+        end do
+    end function http_query_param
+
+    function http_percent_decode(s) result(d)
+        !! %XX escapes and '+' for a space; a malformed escape stays as it is.
+        character(len=*), intent(in) :: s
+        character(len=:), allocatable :: d
+        integer :: i, v, ios
+
+        d = ''
+        i = 1
+        do while (i <= len(s))
+            if (s(i:i) == '%' .and. i + 2 <= len(s)) then
+                read (s(i + 1:i + 2), '(z2)', iostat=ios) v
+                if (ios == 0 .and. verify(s(i + 1:i + 2), '0123456789abcdefABCDEF') == 0) then
+                    d = d//achar(v)
+                    i = i + 3
+                    cycle
+                end if
+            end if
+            if (s(i:i) == '+') then
+                d = d//' '
+            else
+                d = d//s(i:i)
+            end if
+            i = i + 1
+        end do
+    end function http_percent_decode
 
     function http_cookie(req, name) result(value)
         !! Value of cookie `name`, or empty.

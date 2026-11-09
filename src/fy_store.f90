@@ -13,8 +13,9 @@ module fy_store
     public :: store_bootstrap, store_token_lookup, store_token_create
     public :: store_token_list, store_token_revoke, store_token_revoke_hash
     public :: token_identity_t, token_info_t, random_token
+    public :: repo_info_t, store_repo_add, store_repo_list, store_repo_fetched
 
-    integer, parameter, public :: SCHEMA_VERSION = 1
+    integer, parameter, public :: SCHEMA_VERSION = 2
 
     type :: token_identity_t
         logical :: found = .false.
@@ -30,6 +31,12 @@ module fy_store
         character(len=:), allocatable :: name, scopes, created_at, expires_at
         logical :: revoked = .false.
     end type token_info_t
+
+    type :: repo_info_t
+        character(len=:), allocatable :: name, upstream, fetched_at
+        !! Exit status of the last clone or fetch; -1 before the first.
+        integer :: fetch_status = -1
+    end type repo_info_t
 
     character(len=*), parameter :: NOW = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
 
@@ -68,6 +75,18 @@ contains
                 ' created_at TEXT NOT NULL, expires_at TEXT,'// &
                 ' revoked INTEGER NOT NULL DEFAULT 0);'// &
                 'DELETE FROM schema_version; INSERT INTO schema_version VALUES (1);'// &
+                'COMMIT;', stat)
+            if (stat /= SQLITE_OK) then
+                call db_exec(db, 'ROLLBACK;', version)
+                return
+            end if
+        end if
+        if (store_schema_version(db) < 2) then
+            call db_exec(db, 'BEGIN;'// &
+                'CREATE TABLE repos (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL,'// &
+                ' upstream TEXT NOT NULL, created_at TEXT NOT NULL, fetched_at TEXT,'// &
+                ' fetch_status INTEGER);'// &
+                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (2);'// &
                 'COMMIT;', stat)
             if (stat /= SQLITE_OK) then
                 call db_exec(db, 'ROLLBACK;', version)
@@ -227,6 +246,61 @@ contains
         stat = stmt_step(st)
         call stmt_finalize(st)
     end subroutine store_token_revoke_hash
+
+
+    subroutine store_repo_add(db, name, upstream, stat)
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: name, upstream
+        integer, intent(out) :: stat
+        type(stmt_t) :: st
+
+        call db_prepare(db, 'INSERT INTO repos (name, upstream, created_at) VALUES (?1, ?2, '// &
+            NOW//');', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, name, stat)
+        call stmt_bind_text(st, 2, upstream, stat)
+        stat = SQLITE_OK
+        if (stmt_step(st) /= SQLITE_DONE) stat = 1
+        call stmt_finalize(st)
+    end subroutine store_repo_add
+
+    subroutine store_repo_list(db, repos, stat)
+        type(db_t), intent(in) :: db
+        type(repo_info_t), allocatable, intent(out) :: repos(:)
+        integer, intent(out) :: stat
+        type(stmt_t) :: st
+        type(repo_info_t) :: r
+
+        allocate (repos(0))
+        call db_prepare(db, "SELECT name, upstream, coalesce(fetched_at, ''),"// &
+            ' coalesce(fetch_status, -1) FROM repos ORDER BY name;', st, stat)
+        if (stat /= SQLITE_OK) return
+        do while (stmt_step(st) == SQLITE_ROW)
+            r%name = stmt_text(st, 0)
+            r%upstream = stmt_text(st, 1)
+            r%fetched_at = stmt_text(st, 2)
+            r%fetch_status = int(stmt_int(st, 3))
+            repos = [repos, r]
+        end do
+        call stmt_finalize(st)
+        stat = SQLITE_OK
+    end subroutine store_repo_list
+
+    subroutine store_repo_fetched(db, name, status)
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: name
+        integer, intent(in) :: status
+        type(stmt_t) :: st
+        integer :: stat
+
+        call db_prepare(db, 'UPDATE repos SET fetched_at = '//NOW//', fetch_status = ?2'// &
+            ' WHERE name = ?1;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, name, stat)
+        call stmt_bind_int(st, 2, int(status, int64), stat)
+        stat = stmt_step(st)
+        call stmt_finalize(st)
+    end subroutine store_repo_fetched
 
     function random_token() result(token)
         !! 256 random bits from the kernel, hex-encoded with a recognizable prefix.

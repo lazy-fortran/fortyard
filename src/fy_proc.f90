@@ -5,7 +5,7 @@ module fy_proc
     private
 
     public :: proc_fork, proc_wait_any, proc_wait, proc_kill, proc_exit, proc_pid
-    public :: proc_die_with_parent, proc_sleep_ms
+    public :: proc_die_with_parent, proc_sleep_ms, proc_run
     public :: SIGTERM, SIGKILL
 
     integer, parameter :: SIGKILL = 9, SIGTERM = 15
@@ -58,6 +58,52 @@ module fy_proc
             integer(c_long), value :: arg2, arg3, arg4, arg5
             integer(c_int) :: rc
         end function c_prctl
+
+        function c_pipe(fds) bind(C, name='pipe') result(rc)
+            import :: c_int
+            integer(c_int), intent(out) :: fds(2)
+            integer(c_int) :: rc
+        end function c_pipe
+
+        function c_dup2(old, new) bind(C, name='dup2') result(rc)
+            import :: c_int
+            integer(c_int), value :: old, new
+            integer(c_int) :: rc
+        end function c_dup2
+
+        function c_close(fd) bind(C, name='close') result(rc)
+            import :: c_int
+            integer(c_int), value :: fd
+            integer(c_int) :: rc
+        end function c_close
+
+        function c_open(path, flags) bind(C, name='open') result(fd)
+            import :: c_int, c_char
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), value :: flags
+            integer(c_int) :: fd
+        end function c_open
+
+        function c_chdir(path) bind(C, name='chdir') result(rc)
+            import :: c_ptr, c_int
+            type(c_ptr), value :: path
+            integer(c_int) :: rc
+        end function c_chdir
+
+        function c_execvp(file, argv) bind(C, name='execvp') result(rc)
+            import :: c_ptr, c_int
+            type(c_ptr), value :: file
+            type(c_ptr), intent(in) :: argv(*)
+            integer(c_int) :: rc
+        end function c_execvp
+
+        function c_read(fd, buf, n) bind(C, name='read') result(got)
+            import :: c_int, c_char, c_size_t, c_intptr_t
+            integer(c_int), value :: fd
+            character(kind=c_char), intent(out) :: buf(*)
+            integer(c_size_t), value :: n
+            integer(c_intptr_t) :: got
+        end function c_read
 
         function c_nanosleep(req, rem) bind(C, name='nanosleep') result(rc)
             import :: c_int, timespec_t, c_ptr
@@ -133,5 +179,95 @@ contains
         ts%nsec = int(mod(ms, 1000), c_long) * 1000000_c_long
         rc = c_nanosleep(ts, c_null_ptr)
     end subroutine proc_sleep_ms
+
+
+    subroutine proc_run(argv, output, status, max_bytes, dir)
+        !! Runs argv(1) with the arguments argv(2:), found on PATH, without a
+        !! shell, and captures standard output up to `max_bytes`; standard
+        !! input and error are /dev/null. `status` is the exit code, 128 + the
+        !! signal number when a signal ended it, or -1 when it could not start.
+        !! Everything the child needs is prepared before `fork`: between fork
+        !! and exec only async-signal-safe C calls run, as other threads may
+        !! hold locks.
+        character(len=*), intent(in) :: argv(:)
+        character(len=:), allocatable, intent(out) :: output
+        integer, intent(out) :: status
+        integer, intent(in) :: max_bytes
+        character(len=*), intent(in), optional :: dir
+        character(kind=c_char), allocatable, target :: strings(:), cdir(:)
+        character(kind=c_char), target :: devnull(10)
+        type(c_ptr), allocatable, target :: ptrs(:)
+        character(kind=c_char) :: chunk(65536)
+        integer(c_int) :: fds(2), rc, st, nullfd
+        integer(c_intptr_t) :: got
+        integer :: i, k, pos, n, pid, kept
+
+        output = ''
+        status = -1
+        n = 0
+        do i = 1, size(argv)
+            n = n + len_trim(argv(i)) + 1
+        end do
+        allocate (strings(n), ptrs(size(argv) + 1))
+        pos = 1
+        do i = 1, size(argv)
+            ptrs(i) = c_loc(strings(pos))
+            do k = 1, len_trim(argv(i))
+                strings(pos) = argv(i)(k:k)
+                pos = pos + 1
+            end do
+            strings(pos) = c_null_char
+            pos = pos + 1
+        end do
+        ptrs(size(argv) + 1) = c_null_ptr
+        if (present(dir)) then
+            allocate (cdir(len_trim(dir) + 1))
+            do k = 1, len_trim(dir)
+                cdir(k) = dir(k:k)
+            end do
+            cdir(len_trim(dir) + 1) = c_null_char
+        end if
+        devnull = transfer('/dev/null'//c_null_char, devnull)
+        if (c_pipe(fds) /= 0) return
+
+        pid = proc_fork()
+        if (pid < 0) then
+            rc = c_close(fds(1))
+            rc = c_close(fds(2))
+            return
+        end if
+        if (pid == 0) then
+            nullfd = c_open(devnull, 0_c_int)
+            rc = c_dup2(nullfd, 0_c_int)
+            rc = c_dup2(fds(2), 1_c_int)
+            rc = c_dup2(nullfd, 2_c_int)
+            rc = c_close(fds(1))
+            if (allocated(cdir)) then
+                if (c_chdir(c_loc(cdir)) /= 0) call c_exit_now(127_c_int)
+            end if
+            rc = c_execvp(ptrs(1), ptrs)
+            call c_exit_now(127_c_int)
+        end if
+
+        rc = c_close(fds(2))
+        kept = 0
+        do
+            got = c_read(fds(1), chunk, int(size(chunk), c_size_t))
+            if (got <= 0) exit
+            ! Past the limit the child is still drained, so it never blocks.
+            if (kept < max_bytes) then
+                k = min(int(got), max_bytes - kept)
+                output = output//transfer(chunk(1:k), repeat(' ', k))
+                kept = kept + k
+            end if
+        end do
+        rc = c_close(fds(1))
+        rc = c_waitpid(int(pid, c_int), st, 0_c_int)
+        if (iand(st, 127) == 0) then
+            status = iand(ishft(st, -8), 255)
+        else
+            status = 128 + iand(st, 127)
+        end if
+    end subroutine proc_run
 
 end module fy_proc

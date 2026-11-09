@@ -94,6 +94,8 @@ try {
   const session = cookies.find((c) => c.name === 'fy_session');
   check(session && session.httpOnly && session.sameSite === 'Strict', 'the session is an HttpOnly, SameSite=Strict cookie');
   check(await evaluate(`document.cookie === ''`), 'scripts on the page cannot read it');
+  await click('[data-id$="tabs#3"]');
+  await until(hasText('Version'), 'server tab');
   check(await evaluate(hasText((await (await fetch(url + 'api/v1/version')).json()).commit)),
     'the overview shows the server commit');
 
@@ -110,6 +112,34 @@ try {
   await click('[data-id*="/revoke#"]');
   await until(`document.querySelectorAll('[data-id*="/revoke#"]').length === ${revokes - 1}`, 'revocation');
   check(await evaluate(hasText('revoked')), 'revoking a token marks it revoked');
+
+  // A mirrored repository: registered through the API, its mirror cloned
+  // from a local repository (the registered URL is never reached).
+  const up = join(data, 'up');
+  const g = ['-c', 'user.name=T', '-c', 'user.email=t@example.org', '-C', up];
+  execFileSync('git', ['init', '-q', '-b', 'main', up]);
+  writeFileSync(join(up, 'hello.f90'), 'program hello\n  print *, "hi"\nend program\n');
+  execFileSync('git', [...g, 'add', 'hello.f90']);
+  execFileSync('git', [...g, 'commit', '-q', '-m', 'Add hello']);
+  const added = await fetch(url + 'api/v1/repos', { method: 'POST',
+    headers: { Cookie: `fy_session=${session.value}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'demo', upstream: 'https://example.invalid/demo.git' }) });
+  check(added.status === 201, 'an administrator registers a repository');
+  execFileSync('git', ['clone', '-q', '--mirror', up, join(data, 'd', 'repos', 'demo.git')]);
+  await click('[data-id$="tabs#2"]');
+  await click('[data-id$="tabs#1"]');
+  await until(`[...document.querySelectorAll('button')].some((e) => e.textContent === 'demo' && !e.disabled)`, 'repository listed');
+  await click(`[data-id="${await evaluate(`[...document.querySelectorAll('button')].find((e) => e.textContent === 'demo').dataset.id`)}"]`);
+  await until(`[...document.querySelectorAll('button')].some((e) => e.textContent === 'hello.f90')`, 'tree');
+  await click(`[data-id="${await evaluate(`[...document.querySelectorAll('button')].find((e) => e.textContent === 'hello.f90').dataset.id`)}"]`);
+  await until(`[...document.querySelectorAll('[data-style="5"]')].some((e) => e.textContent === '  print *, "hi"')`, 'file');
+  check(true, 'a file of the repository is shown as code');
+  await click('[data-id$="sub#2"]');
+  await until(`!!document.querySelector('[data-id$="/id#1"]')`, 'history');
+  check(await evaluate(hasText('Add hello')), 'the history lists the commit');
+  await click('[data-id$="/id#1"]');
+  await until(`[...document.querySelectorAll('[data-tone="1"]')].some((e) => e.textContent === '+program hello')`, 'diff');
+  check(true, 'the commit shows its diff with added lines marked');
 
   if (shot) {
     const png = await send('Page.captureScreenshot', { format: 'png' });

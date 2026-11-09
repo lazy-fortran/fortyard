@@ -16,7 +16,7 @@ if [ -z "${FORTUI_DIR:-}" ]; then
     git -C "$FORTUI_DIR" checkout -q --detach "$rev"
 fi
 mkdir -p "$out"
-FORTUI_WEB_SOURCES="$fx/fx_string.f90 $fx/fx_json_build.f90 $fx/fx_json_parse.f90 $src/web/fy_fetch.f90" \
+FORTUI_WEB_SOURCES="$fx/fx_string.f90 $fx/fx_json_build.f90 $fx/fx_json_parse.f90 $src/web/fy_fetch.f90 $src/web/fy_repo_view.f90" \
 FORTUI_WEB_JS="$src/web/fy_web.js" \
     "$FORTUI_DIR/web/build.sh" "$src/web/fy_app.f90" "$out" >/dev/null
 rm -rf "$out/obj"
