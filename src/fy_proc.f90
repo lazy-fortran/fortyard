@@ -7,6 +7,7 @@ module fy_proc
     public :: proc_fork, proc_wait_any, proc_wait, proc_kill, proc_exit, proc_pid
     public :: proc_die_with_parent, proc_sleep_ms, proc_run, proc_spawn, proc_find
     public :: fd_read, fd_write_all, fd_close, proc_exit_status
+    public :: proc_poll_child, proc_readlink, proc_reexec
     public :: SIGTERM, SIGKILL
 
     integer, parameter :: SIGKILL = 9, SIGTERM = 15
@@ -104,6 +105,33 @@ module fy_proc
             type(c_funptr), value :: handler
             type(c_funptr) :: old
         end function c_signal
+
+        function c_execv(path, argv) bind(C, name='execv') result(rc)
+            import :: c_ptr, c_int
+            type(c_ptr), value :: path, argv
+            integer(c_int) :: rc
+        end function c_execv
+
+        function c_dup(fd) bind(C, name='dup') result(rc)
+            import :: c_int
+            integer(c_int), value :: fd
+            integer(c_int) :: rc
+        end function c_dup
+
+        function c_setenv(name, value, overwrite) bind(C, name='setenv') result(rc)
+            import :: c_ptr, c_int
+            type(c_ptr), value :: name, value
+            integer(c_int), value :: overwrite
+            integer(c_int) :: rc
+        end function c_setenv
+
+        function c_readlink(path, buf, n) bind(C, name='readlink') result(got)
+            import :: c_ptr, c_char, c_size_t, c_intptr_t
+            type(c_ptr), value :: path
+            character(kind=c_char), intent(out) :: buf(*)
+            integer(c_size_t), value :: n
+            integer(c_intptr_t) :: got
+        end function c_readlink
 
         function c_execve(path, argv, envp) bind(C, name='execve') result(rc)
             import :: c_ptr, c_int
@@ -429,6 +457,73 @@ contains
         integer(c_int) :: rc
         if (fd >= 0) rc = c_close(int(fd, c_int))
     end subroutine fd_close
+
+    subroutine proc_poll_child(pid, status)
+        !! A child that ended, without waiting: pid 0 when none has, negative
+        !! when there are no children.
+        integer, intent(out) :: pid, status
+        integer(c_int) :: st
+        integer(c_int), parameter :: WNOHANG = 1
+
+        st = 0
+        pid = int(c_waitpid(-1_c_int, st, WNOHANG))
+        status = int(st)
+    end subroutine proc_poll_child
+
+    function proc_readlink(path) result(target)
+        !! Where the symbolic link `path` points, or empty.
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: target
+        character(kind=c_char), allocatable, target :: cpath(:)
+        character(kind=c_char) :: buf(4096)
+        integer(c_intptr_t) :: n
+        integer :: k
+
+        call c_strings(path, cpath)
+        n = c_readlink(c_loc(cpath), buf, int(size(buf), c_size_t))
+        allocate (character(len=max(0, int(n))) :: target)
+        do k = 1, len(target)
+            target(k:k) = buf(k)
+        end do
+    end function proc_readlink
+
+    subroutine proc_reexec(path, args, fd)
+        !! Replaces this process by the program at `path` with arguments args,
+        !! handing over the listening socket `fd` as descriptor 3 in the way of
+        !! systemd socket activation (LISTEN_FDS, LISTEN_PID); the process keeps
+        !! its PID, so the socket stays open across the switch. Returns only if
+        !! exec failed.
+        character(len=*), intent(in) :: path, args(:)
+        integer, intent(in) :: fd
+        character(kind=c_char), allocatable, target :: cpath(:), astr(:)
+        type(c_ptr), allocatable, target :: aptr(:)
+        integer(c_int) :: rc, tmp
+        character(len=16) :: num
+
+        if (fd /= 3) then
+            rc = c_dup2(int(fd, c_int), 3_c_int)
+        else
+            ! dup2 onto itself would keep close-on-exec; go through a copy.
+            tmp = c_dup(3_c_int)
+            rc = c_dup2(tmp, 3_c_int)
+            rc = c_close(tmp)
+        end if
+        write (num, '(i0)') proc_pid()
+        call set_env('LISTEN_FDS', '1')
+        call set_env('LISTEN_PID', trim(num))
+        call c_strings(path, cpath)
+        call c_vector(args, astr, aptr)
+        rc = c_execv(c_loc(cpath), c_loc(aptr))
+    end subroutine proc_reexec
+
+    subroutine set_env(name, value)
+        character(len=*), intent(in) :: name, value
+        character(kind=c_char), allocatable, target :: cn(:), cv(:)
+        integer(c_int) :: rc
+        call c_strings(name, cn)
+        call c_strings(value, cv)
+        rc = c_setenv(c_loc(cn), c_loc(cv), 1_c_int)
+    end subroutine set_env
 
     subroutine ignore_sigpipe()
         type(c_funptr) :: old

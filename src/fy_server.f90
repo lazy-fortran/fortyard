@@ -20,7 +20,7 @@ module fy_server
     use fy_posix, only: tcp_accept, sock_close, sock_set_timeouts, sock_recv
     use fy_sqlite, only: db_t
     use fy_proc, only: proc_fork, proc_wait_any, proc_exit, proc_pid, &
-        proc_die_with_parent, proc_sleep_ms
+        proc_die_with_parent, proc_sleep_ms, proc_poll_child, proc_readlink, proc_reexec, proc_kill, proc_wait, SIGTERM
     use fx_hash, only: sha256_file
     use fy_store, only: token_identity_t, token_info_t, store_token_lookup, store_token_create, &
         store_open, store_token_list, store_token_revoke, store_token_revoke_hash, repo_info_t, &
@@ -32,7 +32,7 @@ module fy_server
     private
 
     public :: server_loop, serve_connection, route, server_supervise, server_set_web_dir
-    public :: server_set_data_dir, server_set_mirror_interval, server_set_base
+    public :: server_set_data_dir, server_set_mirror_interval, server_set_base, server_set_follow
     public :: response_t
 
     character(len=*), parameter :: JSON = 'application/json'
@@ -57,6 +57,9 @@ module fy_server
     !! Path below the host where fortyard is served (e.g. "/yard"), empty at the
     !! root. A reverse proxy removes it from requests; links and cookies need it.
     character(len=:), allocatable :: base
+    !! A symbolic link to the installed release (directory with `fy`); when it
+    !! changes, the server re-executes the release it points to.
+    character(len=:), allocatable :: follow_link
     !! Seconds between fetches of a mirror.
     integer :: mirror_interval = 60
     !! Database and cookie of the page being composed (in critical fortui_render).
@@ -78,6 +81,7 @@ contains
         integer :: pids(nworkers + 2)
         integer(int64) :: started(nworkers + 2), now, rate
         integer :: i, pid, status, slots
+        character(len=:), allocatable :: followed
         integer :: me
 
         me = proc_pid()
@@ -86,10 +90,15 @@ contains
         do i = 1, slots
             call spawn(i)
         end do
+        if (allocated(follow_link)) followed = proc_readlink(follow_link)
         do
-            call proc_wait_any(pid, status)
-            if (pid < 0) then
-                call proc_sleep_ms(100)
+            call proc_poll_child(pid, status)
+            if (pid <= 0) then
+                call proc_sleep_ms(200)
+                if (allocated(follow_link)) then
+                    if (proc_readlink(follow_link) /= followed .and. &
+                        len(proc_readlink(follow_link)) > 0) call switch_release()
+                end if
                 cycle
             end if
             do i = 1, slots
@@ -104,6 +113,35 @@ contains
         end do
 
     contains
+
+        subroutine switch_release()
+            !! A new release was installed: stop the children and become it,
+            !! keeping the listening socket, so connections wait instead of failing.
+            character(len=4096), allocatable :: args(:)
+            integer :: k, n, st
+
+            write (error_unit, '(a)') 'fy: switching to '//proc_readlink(follow_link)
+            flush (error_unit)
+            do k = 1, slots
+                if (pids(k) > 0) call proc_kill(pids(k), SIGTERM)
+            end do
+            do k = 1, slots
+                if (pids(k) > 0) call proc_wait(pids(k), st)
+            end do
+            n = command_argument_count()
+            allocate (args(n + 1))
+            args(1) = follow_link//'/fy'
+            do k = 1, n
+                call get_command_argument(k, args(k + 1))
+            end do
+            call proc_reexec(follow_link//'/fy', args, lfd)
+            write (error_unit, '(a)') 'fy: the new release does not start; staying'
+            flush (error_unit)
+            followed = proc_readlink(follow_link)
+            do k = 1, slots
+                call spawn(k)
+            end do
+        end subroutine switch_release
 
         subroutine spawn(slot)
             ! The supervisor never starts an OpenMP team: a child forked from a
@@ -1339,6 +1377,11 @@ contains
         ends_with = len(s) >= len(suffix)
         if (ends_with) ends_with = s(len(s) - len(suffix) + 1:) == suffix
     end function ends_with
+
+    subroutine server_set_follow(link)
+        character(len=*), intent(in) :: link
+        follow_link = link
+    end subroutine server_set_follow
 
     subroutine server_set_base(prefix)
         !! Set once before workers start.

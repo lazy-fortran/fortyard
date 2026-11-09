@@ -7,7 +7,7 @@ program fy
     use fy_client, only: client_request, config_t, config_load, config_save
     use fy_posix, only: tcp_listen, activated_listen_fd, sock_bound_port
     use fy_server, only: server_supervise, server_set_web_dir, server_set_data_dir, &
-        server_set_base, &
+        server_set_base, server_set_follow, &
         server_set_mirror_interval
     use fy_sqlite, only: db_t, db_errmsg, db_close
     use fy_store, only: store_open, store_bootstrap
@@ -177,6 +177,9 @@ contains
         text = repeat(' ', max(n, 0))
         if (stat == 0 .and. n > 0) call get_environment_variable('FY_BASE', text)
         call server_set_base(option('--base', trim(text)))
+        ! --follow LINK: re-execute the release LINK points to when it changes.
+        text = option('--follow', '')
+        if (len(text) > 0) call server_set_follow(text)
         call server_set_data_dir(data)
         call server_set_mirror_interval(interval)
         call server_supervise(lfd, data//'/fortyard.db', workers, threads)

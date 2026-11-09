@@ -6,6 +6,9 @@ src=$1
 : "${FY_HOME:?FY_HOME must point to the instance directory}"
 : "${FY_URL:?FY_URL must be the instance base URL}"
 unit=${FY_UNIT:-fortyard.service}
+# FY_RESTART=follow: the server follows the `current` link itself (fy serve
+# --follow), so switching the link is the whole restart.
+restart=${FY_RESTART:-systemd}
 . "$src/RELEASE"
 (cd "$src" && sha256sum -c fy.sha256 >/dev/null)
 dest="$FY_HOME/releases/$version"
@@ -16,7 +19,7 @@ previous=$(readlink "$FY_HOME/current" 2>/dev/null || true)
 switch_to() {
     ln -sfn "$1" "$FY_HOME/current.new"
     mv -T "$FY_HOME/current.new" "$FY_HOME/current"
-    systemctl --user restart "$unit"
+    [ "$restart" = follow ] || systemctl --user restart "$unit"
 }
 
 healthy() {
