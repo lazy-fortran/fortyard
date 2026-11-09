@@ -195,6 +195,7 @@ contains
         type(landing_t) :: l
         type(repo_info_t), allocatable :: repos(:)
         character(len=:), allocatable :: commit, log, upstream, mode, base
+        character(len=:), allocatable :: work
         character(len=1024) :: url
         integer :: stat, i, n
         logical :: found, ok
@@ -224,8 +225,12 @@ contains
                     'Only a primary repository lands branches.')
                 cycle
             end if
-            call land_branch(repo_path(l%repo), repos_dir//'/../work/land-'//itoa(int(l%id)), &
-                l%repo, l%branch, int(l%id), base, upstream, commit, log, ok)
+            ! Scratch space of a landing lives in the temporary directory and is
+            ! removed when the landing ends, whatever its outcome.
+            work = tmp_dir()//'/fy-land-'//itoa(int(l%id))
+            call land_branch(repo_path(l%repo), work, l%repo, l%branch, int(l%id), base, &
+                upstream, commit, log, ok)
+            call execute_command_line('rm -rf '''//work//'''')
             if (ok) then
                 call store_landing_finish(db, l%id, 'landed', commit, log)
             else
@@ -237,6 +242,15 @@ contains
         end do
 
     contains
+
+        function tmp_dir() result(s)
+            character(len=:), allocatable :: s
+            character(len=1024) :: v
+            integer :: n, st
+            call get_environment_variable('TMPDIR', v, n, st)
+            s = '/var/tmp'
+            if (st == 0 .and. n > 0) s = trim(v)
+        end function tmp_dir
 
         function itoa(k) result(s)
             integer, intent(in) :: k
