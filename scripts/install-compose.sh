@@ -11,7 +11,8 @@ home=$1 first=$2 base=$3 image=$4 network=$5
 root=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p "$home/bin" "$home/releases" "$home/staging"
 cp "$root/scripts/deploy.sh" "$root/scripts/self-update.sh" "$root/scripts/start.sh" "$home/bin/"
-if [ ! -e "$home/current" ]; then
+# -L: the link may point to the path the container sees, not the host.
+if [ ! -L "$home/current" ]; then
     stage=$home/staging/first
     rm -rf "$stage"
     mkdir -p "$stage"
