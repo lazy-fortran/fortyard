@@ -55,7 +55,10 @@ federation between forges, public sign-up.
 | Identity | OpenID Connect against the organization's existing Keycloak realm. Authentication only: fortyard decides authorization, deny by default |
 | HTTPS client | libcurl through `bind(C)` |
 | Database | SQLite through `bind(C)`, in write-ahead-log mode so readers never block the writer |
-| AI models | Local models behind an OpenAI-compatible gateway |
+| AI models | Local models behind an OpenAI-compatible gateway by default; external models per repository only where its settings allow it and with credentials that permit unattended use |
+| Workflow | Merge first, review later as a hard rule, with review before merge only for irreversible effects; agents triage, review, garden issues and explore; everything auditable (see [Workflow](doc/workflow.md)) |
+| Namespaces | Nested groups and subgroups as on GitLab, plus a personal namespace per account; URLs `/GROUP/SUB/REPO` with pages after `/-/`; old paths redirect after moves |
+| GitHub | Code, tags and releases are pushed to GitHub mirrors; issues are synchronised both ways; GitHub pull requests are never merged automatically, only ingested by a person after checking them. Self-hosted GitHub runners are retired once fortyard is fully up |
 | Agent harness | Written in Fortran inside fortyard |
 | Web interface | Target: full browser application in Fortran compiled to WebAssembly; server-rendered HTML until that exists (see [Web interface](#web-interface)) |
 | Runners | Container hosts run all builds and tests; the server host runs none |
@@ -140,10 +143,12 @@ The data model is built around changes instead of commits, following jj:
   hook that adds a `Change-Id` trailer, as Gerrit does, which amend and rebase
   preserve. Commits that arrive with neither get an ID on first push and are
   matched to later revisions only heuristically.
-- **Pull requests are stacks of changes.** A force-push creates a new revision
-  of the same changes. Review comments are anchored to change, path and line and
-  are carried across revisions; each revision shows its difference from the
-  previous one (interdiff).
+- **Changes are what is reviewed** (fortyard's pull requests, see
+  [Workflow](doc/workflow.md#changes)). A force-push creates a new version of
+  the same change. Review comments are anchored to change, path and line and
+  are carried across versions; each version shows its difference from the
+  previous one (interdiff). A stack is a sequence of changes, each with its own
+  review.
 - **Server-side history work uses jj.** Rebasing stacks, merge-queue candidates
   and conflict detection run through the `jj` binary with machine-readable
   output templates. The jj version is pinned and its interface covered by tests,
@@ -247,7 +252,8 @@ Merges into protected branches go through a queue. The queue builds the
 candidate result of the target branch plus the queued stacks, runs the
 pre-merge tier on it (affected cases within the budget), and fast-forwards the
 branch only if it passes. Rules are set
-per repository: required checks and required approvals. The queue applies only to fortyard-primary repositories;
+per repository: required checks, and approvals only for the areas reviewed
+before merge (see [Workflow](doc/workflow.md#the-merge-queue)). The queue applies only to fortyard-primary repositories;
 in overlay mode the merge happens upstream and fortyard provides a required
 status.
 
@@ -282,17 +288,25 @@ Fortran-aware information next to the diff:
 - coverage of changed lines;
 - lint findings introduced by the change.
 
-Review states are comment, approve and request changes. Human and agent reviews
-use the same objects; repository rules decide whether an agent approval counts.
+Changes land first and are reviewed afterwards; review states, the human review
+queue, flagging and the review ledger are described in
+[Workflow](doc/workflow.md#review). Human and agent reviews use the same
+objects.
 
 ### Issues
 
 Issues have title, Markdown body, labels, assignees, milestones, links to
-changes and pull requests, and a closing reference from merged changes. Import
-from GitHub is one-way and on demand; fortyard does not synchronize issues or
-pull requests in both directions.
+changes, and a closing reference from landed changes. Issues and changes share
+one number sequence per repository. Agents triage them with three separate
+priorities and keep the list current; issues of repositories with a GitHub
+mirror are synchronised both ways (see [Workflow](doc/workflow.md)).
 
 ### AI agents
+
+The roles of agents in the workflow (triage, review, issue gardening,
+exploration, later implementation), their sandbox, settings per group and
+repository, and how their quality is measured are described in
+[Workflow](doc/workflow.md#agents). This section describes the harness.
 
 The agent harness is written in Fortran and runs inside fortyard. It drives
 local models through an OpenAI-compatible chat API over libcurl.
@@ -373,8 +387,13 @@ JavaScript.
 - **Accounts** are keyed on the token's subject identifier (`sub`), never on the
   email address. The first login creates an inactive account; an administrator
   or an invitation activates it.
-- **Authorization** is fortyard's own: organizations, teams and per-repository
-  roles (read, write, maintain, admin).
+- **Authorization** is fortyard's own. Repositories live in nested groups
+  (subgroups to any reasonable depth) or in a personal namespace per account.
+  Roles are read, write, maintain and own; a member's effective role is the
+  highest on the path from the repository up to the top group, so a subgroup
+  can grant more but never less. Groups are private (members only) or internal
+  (everyone signed in). Moving or renaming records a redirect from the old
+  path, for the web and for git URLs.
 - **Tokens** are scoped (for example `repo:read`, `repo:write`, `ci:run`,
   `cache:write`, `agent:run`), have an expiry, and are stored only as hashes.
   Runner tokens and job tokens are separate kinds.
@@ -524,8 +543,11 @@ with the inspection instance as staging and both release channels active.
 6. **Coverage** per commit and on changed lines.
 7. **Native pull requests and reviews** with stacks, interdiffs and the
    Fortran-aware views; merge queue; failover mode. fx and fo become primary.
-8. **Agent harness**: review first, then implement, address and watch.
-9. **Issues** with one-way import from GitHub.
+8. **Agent harness**: one background agent on a local model for triage and
+   review first, then issue gardening and exploration; implementation once a
+   second model is available (see [Workflow](doc/workflow.md)).
+9. **Issues** with two-way synchronisation for GitHub mirrors, and manual
+   ingest of GitHub pull requests.
 10. **WebAssembly application** replacing the HTML views step by step.
 11. **Further code repositories** move from GitHub to fortyard-primary.
 

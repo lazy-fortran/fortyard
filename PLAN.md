@@ -1,7 +1,7 @@
 # fortyard plan
 
-Delivery order for [DESIGN.md](DESIGN.md) and
-[Testing at scale](doc/testing-at-scale.md). A milestone is done when its
+Delivery order for [DESIGN.md](DESIGN.md),
+[Testing at scale](doc/testing-at-scale.md) and [Workflow](doc/workflow.md). A milestone is done when its
 behaviour is covered by tests that run with `fo test` and it runs on the
 development instance.
 
@@ -86,11 +86,39 @@ first consumer of fortui's browser backend, which is built in fortui itself.
       and peak memory; commit statuses posted to GitHub.
 - [ ] GitHub stub for tests; GitHub App or fine-grained token decided.
 
-### M4 fortyard primary for itself
+### M4 fortyard primary for itself (next)
 
-- [ ] Git smart HTTP and SSH through `git http-backend` and `git-shell`.
+The instance develops itself: pushes go to fortyard, changes land through its
+own queue, the edge timer deploys its own `main`, and GitHub becomes a mirror.
+In order:
+
+- [ ] Git smart HTTP through `git http-backend` (clone, fetch, push) with token
+      authentication; SSH later.
 - [ ] Size limit and repository checks on receive; same checks in `fy push`.
-- [ ] Push-mirror to GitHub; the edge channel then builds from fortyard itself.
+- [ ] Changes, minimal: a push to a non-protected branch opens or updates a
+      change (title, description, versions by change ID); `main` refuses
+      direct pushes.
+- [ ] Merge queue, minimal: one change at a time, rebased onto `main`, built
+      and tested with `fo test` by a local runner under a memory and CPU cap,
+      landed as one squashed commit with `(#N)`, `Change:` and `Change-Id:`.
+- [ ] Push-mirror of `main` and tags to GitHub; the edge timer follows the
+      instance's own `main`.
+- [ ] `fy` and `fy mcp` grow with each step (push, change list and view, land,
+      queue status).
+- [ ] Audit log (append-only, hash-chained) from the first landing on.
+
+### M4a Namespaces
+
+- [ ] Groups with subgroups, personal namespaces, roles with downward
+      inheritance, redirects after moves; existing mirrors move into a group.
+
+### M4b First background agent
+
+- [ ] One agent on the local model gateway, in a per-task sandbox (fresh
+      container, no credentials, network only to the gateway and the API),
+      with its own bot account: triage of new issues and changes, and review of
+      landed changes with flags for human review. Kill switch, rate limits,
+      transcripts linked to outcomes. See [Workflow](doc/workflow.md).
 
 ### M5 Web views of repositories
 
@@ -108,10 +136,13 @@ elsewhere.
 
 - M6 Shared build cache and the fo client.
 - M7 Coverage per commit and on changed lines.
-- M8 Native pull requests, stacks, reviews, merge queue, failover; fx and fo
-  become primary.
-- M9 Agent harness: review, then implement, address, watch, fix-regression.
-- M10 Issues with one-way import from GitHub.
+- M8 Full changes: stacks, versions with interdiff, attachments, review
+  ledger, batched merge queue, failover; fx and fo become primary.
+- M9 Agents: issue gardening and exploration; implementation once a second
+  model is available; instructions and settings per group and repository;
+  benchmark and outcome evaluation.
+- M10 Issues with two-way GitHub synchronisation; manual ingest of GitHub
+  pull requests; staging and promotion for live services.
 - M11 MILCA and further code repositories move to fortyard.
 
 ## Work in fo
