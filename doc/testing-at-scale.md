@@ -188,6 +188,64 @@ a server answering 504 is an INFRA_ERROR, never a red library.
 tested: the instance mirrors it and runs its cases like those of its own
 repositories. libneo's registry is the first one imported.
 
+## Discovered tests and declared policy
+
+**Design rule:** everything fo can discover is discovered, everything that can
+be measured is learned, and only what cannot be inferred reliably is
+configured. An ordinary project needs no CI file.
+
+Two things are kept apart:
+
+- **Test definition** (what a test is, how it is built, what counts as a pass)
+  belongs to the project: `fpm.toml` and the test tree, or CMake and CTest
+  (`add_test`, its labels and properties). fo discovers it (`fo test --list
+  --json`, later the plan of [What fo needs](#what-fo-needs)).
+- **Execution policy** (when a case runs, on which runner class, with which
+  data, and whether it gates a landing or a release) belongs to fortyard, with
+  defaults: affected cheap cases before landing, everything else in the pool,
+  resources measured from earlier runs.
+
+CTest properties are used as hints where they exist (`LABELS`, `TIMEOUT`,
+`PROCESSORS`), but they cannot provision a cluster allocation or fetch
+authenticated data. Such cases get a short policy entry, in `[extra.fortyard]`
+of `fpm.toml` or in `fortyard.toml` for CMake projects; for example (format to
+be fixed when it is built):
+
+```toml
+[tests.neo2_golden_ql]
+runner = "slurm-reference"     # a runner class of the instance
+cpus = 8
+data = "plasma-data/golden"    # a data repository with a pinned revision
+schedule = "pool"              # never before landing
+required_for = "stable"        # gates stable and reference releases
+```
+
+The numerical comparison, tolerances and fixtures stay in the scientific code;
+fortyard knows nothing about HDF5 files or physics.
+
+**NEO-2 as the hard case.** NEO-2's unit tests are CTest tests that fo runs
+today. Its golden-record comparisons are not: `ci/golden.sh` and its workflows
+fetch private reference data (with Git LFS) from a data repository, build the
+candidate, the base and the stable release, run on a reference CPU allocation
+of a cluster, compare against stored records with separate tolerances, and
+record timings and memory. To join the pool, each comparison is registered as
+a CTest test that calls the existing scripts, and gets a policy entry like the
+one above. Its result key then covers the NEO-2 commit, every dependency
+revision (libneo among them), the revision and content hashes of the golden
+data, the toolchain and the reference environment, so a changed outcome is
+attributed to the right one of them.
+
+| Change | Before landing | After landing |
+|---|---|---|
+| Ordinary numerical change | affected unit tests | golden comparisons in the pool |
+| Change to a core solver | unit tests and fast physics checks | golden comparisons at high priority |
+| Intentional change of golden records | human review of the changed records and policy | full golden verification, provenance archived |
+| Stable or reference release | — | promotion waits for the designated golden suite |
+
+**Deployment stays explicit.** Where a program is installed, with which
+credentials, and when it is promoted cannot be inferred from a manifest; that
+is configured per service (see [Workflow](workflow.md#live-services)).
+
 ## Tiers
 
 Cases are not assigned to tiers by hand. Each case has a measured cost and
@@ -368,7 +426,10 @@ output and JSON reports. It needs:
    moved to a given revision, all others fixed, with that revision in the key.
 7. **Interface changes:** which public module interfaces a change alters, to
    choose consumer smoke cases.
-8. **Running as process 1 of a container.** fo fails to start compilers when it
+8. **Test properties in the plan:** CTest labels, timeouts and processor counts,
+   and the policy entries of `[extra.fortyard]` or `fortyard.toml`, reported
+   with each case.
+9. **Running as process 1 of a container.** fo fails to start compilers when it
    is the first process of a container (its process-group setup ends in
    status 126); until fixed, containers start fo under `--init`.
 

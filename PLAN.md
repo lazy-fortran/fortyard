@@ -159,6 +159,9 @@ elsewhere.
   cases in the pool keyed by dependency snapshot, classified outcomes
   (regression only against a passing baseline), libneo's registry imported
   (see [Testing at scale](doc/testing-at-scale.md#downstream-consumers)).
+- M6b Declared policy for workloads fo cannot infer (runner class, private
+  data, release gates); NEO-2's golden comparisons as CTest tests with policy
+  entries and fully keyed results.
 - M7 Coverage per commit and on changed lines.
 - M8 Full changes: stacks, versions with interdiff, attachments, review
   ledger, batched merge queue, failover; fx and fo become primary.
@@ -178,9 +181,11 @@ Tracked in fo; needed from M3 on (see
 2. Running a given set of cases from a plan, results with digests.
 3. Per-case cgroups, peak memory, bytes written, memory admission.
 4. `fo-metric` lines in reports.
-. Dependency overrides: one dependency at a given revision, in the key.
+5. Remote lookup of trusted passes by key.
+6. Dependency overrides: one dependency at a given revision, in the key.
 7. Changed public module interfaces of a change.
 8. Starting compilers when fo is process 1 of a container (fails today).
+9. CTest properties and fortyard policy entries reported per case in the plan.
 
 ## LFortran and WebAssembly
 

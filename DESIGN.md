@@ -214,6 +214,10 @@ it without going through fortyard's CI.
 ### CI
 
 A pipeline is derived from the project, not written as YAML:
+everything fo can discover is discovered, everything measurable is learned,
+and only what cannot be inferred (runner class, private data, release gates)
+is configured (see
+[Discovered tests and declared policy](doc/testing-at-scale.md#discovered-tests-and-declared-policy)).
 
 - **Default:** static checks, lint and format check, a build, and the test
   cases the change affects within a time budget, run through fo with
