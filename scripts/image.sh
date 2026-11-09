@@ -24,7 +24,12 @@ INFO
     tail -40 "$ctx/web.log" >&2
     exit 1
 }
+# Keep the fetched dependency sources (fortui is private), drop the host build.
+mv "$ctx/src/build/dependencies" "$ctx/deps"
 rm -rf "$ctx/src/build"
+mkdir -p "$ctx/src/build"
+mv "$ctx/deps" "$ctx/src/build/dependencies"
+find "$ctx/src/build/dependencies" -name build -type d -prune -exec rm -rf {} +
 docker build --quiet --build-arg FPM_SHA256="$fpm_sha" --build-arg FO_REV="$FO_REV" \
     -f "$ctx/src/deploy/container/Dockerfile" -t "$tag" "$ctx" >/dev/null
 echo "$tag"

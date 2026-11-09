@@ -29,7 +29,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=build /opt/fo/bin/ /usr/local/bin/
 COPY --from=build /opt/fortyard/bin/fy /usr/local/bin/fy
 COPY web /opt/fortyard/web
-ENV HOME=/data/home
+# Home and fo's build cache stay out of the data directory (which is backed
+# up): the cache is a regenerable volume, run directories live in /tmp.
+ENV HOME=/tmp/home FO_CACHE_DIR=/cache/fo TMPDIR=/tmp
 EXPOSE 8740
 ENTRYPOINT ["fy", "serve", "--data", "/data/db", "--web", "/opt/fortyard/web", \
     "--listen", "0.0.0.0:8740"]
