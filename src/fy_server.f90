@@ -8,6 +8,7 @@ module fy_server
         http_bearer_token, http_cookie, http_query_param, http_read_head, http_read_body, &
         http_basic_password
     use fy_git_http, only: git_http_route, git_http_serve
+    use fy_land, only: land_branch, land_hook_install
     use fortui, only: ui_init, ui_frame_begin, ui_present, ui_shutdown
     use fortui_backend_headless, only: headless_backend_t
     use fortui_html, only: ui_frame_html
@@ -22,7 +23,9 @@ module fy_server
         proc_die_with_parent, proc_sleep_ms
     use fy_store, only: token_identity_t, token_info_t, store_token_lookup, store_token_create, &
         store_open, store_token_list, store_token_revoke, store_token_revoke_hash, repo_info_t, &
-        store_repo_add, store_repo_list, store_repo_fetched, store_repo_set_mode
+        store_repo_add, store_repo_list, store_repo_fetched, store_repo_set_mode, landing_t, &
+        store_landing_add, store_landing_next, store_landing_requeue, store_landing_finish, &
+        store_landing_list
     use fy_sqlite, only: db_close
     implicit none
     private
@@ -66,16 +69,16 @@ contains
         !! connection holds one thread rather than one process.
         integer, intent(in) :: lfd, nworkers, nthreads
         character(len=*), intent(in) :: db_path
-        ! Slot nworkers + 1, when there is a data directory, is the process
-        ! that mirrors repositories.
-        integer :: pids(nworkers + 1)
-        integer(int64) :: started(nworkers + 1), now, rate
+        ! Slots nworkers + 1 and + 2, when there is a data directory, are the
+        ! processes that mirror repositories and land branches.
+        integer :: pids(nworkers + 2)
+        integer(int64) :: started(nworkers + 2), now, rate
         integer :: i, pid, status, slots
         integer :: me
 
         me = proc_pid()
         slots = nworkers
-        if (allocated(repos_dir)) slots = nworkers + 1
+        if (allocated(repos_dir)) slots = nworkers + 2
         do i = 1, slots
             call spawn(i)
         end do
@@ -115,7 +118,9 @@ contains
             end do
             if (pids(slot) /= 0) return
             if (.not. proc_die_with_parent(me)) call proc_exit(0)
-            if (slot > nworkers) then
+            if (slot == nworkers + 2) then
+                call lander_main(db_path)
+            else if (slot > nworkers) then
                 call mirror_main(db_path)
             else
                 call worker_main(lfd, db_path, nthreads)
@@ -158,6 +163,7 @@ contains
                         ! Pushed to fortyard, never fetched; created empty once.
                         if (exists) cycle
                         call repo_init(repo_path(repos(i)%name), status)
+                        if (status == 0) call land_hook_install(repo_path(repos(i)%name), status)
                     else if (.not. exists) then
                         call repo_clone(repos(i)%upstream, repo_path(repos(i)%name), status)
                     else if (now - last(k) >= int(mirror_interval, int64) * rate) then
@@ -178,6 +184,66 @@ contains
             call proc_sleep_ms(min(10000, 1000 * mirror_interval))
         end do
     end subroutine mirror_main
+
+    subroutine lander_main(db_path)
+        !! Lands queued branches one at a time, oldest first.
+        character(len=*), intent(in) :: db_path
+        type(db_t) :: db
+        type(landing_t) :: l
+        type(repo_info_t), allocatable :: repos(:)
+        character(len=:), allocatable :: commit, log, upstream, mode, base
+        character(len=1024) :: url
+        integer :: stat, i, n
+        logical :: found, ok
+
+        call get_environment_variable('FY_URL', url, n, stat)
+        base = ''
+        if (stat == 0) base = trim(url)
+        call store_open(db_path, db, stat)
+        if (stat /= 0) call proc_exit(1)
+        call store_landing_requeue(db)
+        do
+            call store_landing_next(db, l, found)
+            if (.not. found) then
+                call proc_sleep_ms(2000)
+                cycle
+            end if
+            call store_repo_list(db, repos, stat)
+            mode = ''
+            upstream = ''
+            do i = 1, size(repos)
+                if (repos(i)%name /= l%repo) cycle
+                mode = repos(i)%mode
+                upstream = repos(i)%upstream
+            end do
+            if (mode /= 'primary') then
+                call store_landing_finish(db, l%id, 'failed', '', &
+                    'Only a primary repository lands branches.')
+                cycle
+            end if
+            call land_branch(repo_path(l%repo), repos_dir//'/../work/land-'//itoa(int(l%id)), &
+                l%repo, l%branch, int(l%id), base, upstream, commit, log, ok)
+            if (ok) then
+                call store_landing_finish(db, l%id, 'landed', commit, log)
+            else
+                call store_landing_finish(db, l%id, 'failed', '', log)
+            end if
+            write (error_unit, '(a)') 'fy: landing '//itoa(int(l%id))//' of '//l%repo//' '// &
+                l%branch//merge(' landed', ' failed', ok)
+            flush (error_unit)
+        end do
+
+    contains
+
+        function itoa(k) result(s)
+            integer, intent(in) :: k
+            character(len=:), allocatable :: s
+            character(len=16) :: b
+            write (b, '(i0)') k
+            s = trim(b)
+        end function itoa
+
+    end subroutine lander_main
 
     function repo_path(name) result(path)
         character(len=*), intent(in) :: name
@@ -230,6 +296,7 @@ contains
                 if (len(upstream) == 0) then
                     call store_repo_add(db, name, '', stat, mode='primary')
                     if (stat == 0) call repo_init(repo_path(name), status)
+                    if (stat == 0 .and. status == 0) call land_hook_install(repo_path(name), status)
                 else
                     call store_repo_add(db, name, upstream, stat)
                 end if
@@ -250,6 +317,17 @@ contains
         if (req%method == 'POST' .and. len(rest) > 5) then
             if (rest(len(rest) - 4:) == '/mode') then
                 call set_mode(rest(1:len(rest) - 5))
+                return
+            end if
+            if (rest(len(rest) - 4:) == '/land') then
+                call queue_landing(rest(1:len(rest) - 5))
+                return
+            end if
+        end if
+        if (len(rest) > 9) then
+            if (rest(len(rest) - 8:) == '/landings') then
+                if (.not. method_is(req, 'GET', res)) return
+                call list_landings(rest(1:len(rest) - 9))
                 return
             end if
         end if
@@ -298,6 +376,56 @@ contains
 
     contains
 
+        subroutine queue_landing(target)
+            !! POST /api/v1/repos/NAME/land {"branch":"..."}: queues the branch to
+            !! land on main as one squashed commit; 202 with the landing number.
+            character(len=*), intent(in) :: target
+            character(len=:), allocatable :: branch
+            integer(int64) :: number
+            character(len=24) :: num
+            logical :: ok
+
+            if (index(' '//who%scopes//' ', ' admin ') == 0) then
+                call fail(res, 403, 'landing needs the admin scope')
+                return
+            end if
+            call json_extract_string(req%body, 'branch', branch, ok)
+            if (.not. ok) branch = ''
+            if (.not. repo_name_ok(target) .or. .not. repo_ref_ok(branch) .or. &
+                branch == 'main' .or. len(branch) == 0) then
+                call fail(res, 400, 'body must be {"branch":"..."} naming a branch other than main')
+                return
+            end if
+            call store_landing_add(db, target, branch, who%account, number, stat)
+            if (stat /= 0) then
+                call fail(res, 500, 'landing not queued')
+                return
+            end if
+            write (num, '(i0)') number
+            res%code = 202
+            res%body = '{"landing":'//trim(num)//',"state":"queued"}'
+        end subroutine queue_landing
+
+        subroutine list_landings(target)
+            character(len=*), intent(in) :: target
+            type(landing_t), allocatable :: ls(:)
+            character(len=24) :: num
+            integer :: k
+
+            call store_landing_list(db, target, ls, stat)
+            res%body = '{"landings":['
+            do k = 1, size(ls)
+                write (num, '(i0)') ls(k)%id
+                if (k > 1) res%body = res%body//','
+                res%body = res%body//'{"landing":'//trim(num)//',"branch":"'// &
+                    json_escape_string(ls(k)%branch)//'","account":"'// &
+                    json_escape_string(ls(k)%account)//'","state":"'//ls(k)%state// &
+                    '","created":"'//ls(k)%created//'","finished":"'//ls(k)%finished// &
+                    '","commit":"'//ls(k)%commit//'","log":"'//json_escape_string(ls(k)%log)//'"}'
+            end do
+            res%body = res%body//']}'
+        end subroutine list_landings
+
         subroutine set_mode(target)
             !! POST /api/v1/repos/NAME/mode {"mode":"primary"|"mirror"}: a primary
             !! repository takes pushes and is no longer fetched from upstream.
@@ -320,6 +448,7 @@ contains
                 call fail(res, 404, 'no such repository')
                 return
             end if
+            if (mode == 'primary') call land_hook_install(repo_path(target), status)
             res%body = '{"name":"'//json_escape_string(target)//'","mode":"'//mode//'"}'
         end subroutine set_mode
 

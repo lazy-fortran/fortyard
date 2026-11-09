@@ -100,11 +100,13 @@ In order:
 - [ ] Changes, minimal: a push to a non-protected branch opens or updates a
       change (title, description, versions by change ID); `main` refuses
       direct pushes.
-- [ ] Merge queue, minimal: one change at a time, rebased onto `main`, built
-      and tested with `fo test` by a local runner under a memory and CPU cap,
-      landed as one squashed commit with `(#N)`, `Change:` and `Change-Id:`.
-- [ ] Push-mirror of `main` and tags to GitHub; the edge timer follows the
-      instance's own `main`.
+- [x] Landing, minimal: `main` takes no pushes; `fy land REPO BRANCH` queues a
+      pushed branch, which lands one at a time as one squashed commit with
+      `(#N)` and a `Change:` trailer after the repository's check (`fo test`, or
+      `.fortyard/check`) passed on that commit under a memory cap.
+- [ ] Batched merge queue, `Change-Id` trailers, landing from a change page.
+- [x] Push of `main` to the repository's upstream after each landing.
+- [ ] Tags to the upstream; the edge timer follows the instance's own `main`.
 - [ ] `fy` and `fy mcp` grow with each step (push, change list and view, land,
       queue status).
 - [ ] Audit log (append-only, hash-chained) from the first landing on.

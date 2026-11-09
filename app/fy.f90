@@ -26,6 +26,14 @@ program fy
         call cmd_token()
     case ('repo')
         call cmd_repo()
+    case ('land')
+        call cmd_land()
+    case ('landings')
+        if (len(arg(2)) == 0) then
+            write (error_unit, '(a)') 'fy: usage: fy landings REPO'
+            error stop 2
+        end if
+        call cmd_get('/api/v1/repos/'//arg(2)//'/landings')
     case ('mcp')
         call cmd_mcp()
     case ('version', '--version')
@@ -57,6 +65,9 @@ contains
             '  repo mode NAME MODE primary: take pushes; mirror: follow upstream (admin)', &
             '  repo list           list repositories', &
             '                      clone and push: git clone http://x:TOKEN@HOST/NAME.git', &
+            '  land REPO BRANCH    land a pushed branch on main as one squashed commit', &
+            '                      after its check passed (admin)', &
+            '  landings REPO       recent landings with their state and log', &
             '  mcp                 MCP server on standard input and output', &
             '  version             print the version'
     end subroutine usage
@@ -230,6 +241,22 @@ contains
             '{"name":"'//json_escape_string(arg(3))//'"}', code, body, stat)
         call report(code, body, stat)
     end subroutine cmd_token
+
+    subroutine cmd_land()
+        type(config_t) :: cfg
+        character(len=:), allocatable :: body
+        integer :: code, stat
+
+        if (len(arg(2)) == 0 .or. len(arg(3)) == 0) then
+            write (error_unit, '(a)') 'fy: usage: fy land REPO BRANCH'
+            error stop 2
+        end if
+        call config_load(cfg)
+        call require_login(cfg)
+        call client_request(cfg%server, 'POST', '/api/v1/repos/'//arg(2)//'/land', cfg%token, &
+            '{"branch":"'//json_escape_string(arg(3))//'"}', code, body, stat)
+        call report(code, body, stat)
+    end subroutine cmd_land
 
     subroutine cmd_repo()
         type(config_t) :: cfg

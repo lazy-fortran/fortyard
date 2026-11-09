@@ -12,7 +12,8 @@ program test_git_http
     implicit none
 
     character(len=*), parameter :: data = 'build/test_git_http_data', &
-        work = 'build/test_git_http_work', up = 'build/test_git_http_up'
+        work = 'build/test_git_http_work', up = 'build/test_git_http_up', &
+        target = 'build/test_git_http_target.git'
     ! The test's repositories ignore the machine's git configuration and hooks.
     character(len=*), parameter :: git = 'env GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true '// &
         'GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 '// &
@@ -25,8 +26,8 @@ program test_git_http
     logical :: exists
 
     sup = 0
-    call execute_command_line('rm -rf '//data//' '//work//' '//work//'-clone '//work//'-anon '//up// &
-        ' && mkdir -p '//data// &
+    call execute_command_line('rm -rf '//data//' '//work//' '//work//'-clone '//work//'-anon '//up//' '//target// &
+        ' && mkdir -p '//data//' && git init -q --bare '//target// &
         ' && git init -q -b main '//up//' && '//git//'-C '//up//' commit -q --allow-empty'// &
         ' -m upstream', exitstat=stat)
     call check(stat == 0, 'directories prepared')
@@ -35,7 +36,7 @@ program test_git_http
     call store_bootstrap(db, admin, stat)
     call store_token_create(db, 1_int64, 'reader', 'repo:read', reader, stat)
     call check(stat == 0, 'reader token created')
-    call store_repo_add(db, 'demo', '', stat, mode='primary')
+    call store_repo_add(db, 'demo', trim(cwd)//'/'//target, stat, mode='primary')
     call check(stat == 0, 'primary repository registered')
     call store_repo_add(db, 'mir', trim(cwd)//'/'//up, stat)
     call db_close(db)
@@ -58,15 +59,27 @@ program test_git_http
     end do
     call check(exists, 'the primary repository is created and the mirror cloned')
 
-    ! Push a first commit with the administrator token.
+    ! main takes no pushes; a pushed branch lands on it as one squashed commit
+    ! after the repository's check passed, and goes on to the mirror target.
     url = 'http://x:'//admin//'@'//base//'/demo.git'
-    call execute_command_line('git init -q -b main '//work//' && printf "hello\n" > '//work// &
-        '/README && '//git//'-C '//work//' add README && '//git//'-C '//work// &
-        ' commit -q -m "First commit" && '//git//'-C '//work//' push -q '//url//' main', &
+    call execute_command_line('git init -q -b main '//work//' && mkdir '//work//'/.fortyard'// &
+        ' && printf "hello\n" > '//work//'/README && printf "#!/bin/sh\ntest -f README\n" > '// &
+        work//'/.fortyard/check && chmod +x '//work//'/.fortyard/check && '//git//'-C '// &
+        work//' add -A && '//git//'-C '//work//' commit -q -m "First commit" && '//git// &
+        '-C '//work//' push -q '//url//' HEAD:first', exitstat=stat)
+    call check(stat == 0, 'an administrator pushes a branch')
+    call execute_command_line(git//'-C '//work//' push -q '//url//' HEAD:main >/dev/null 2>&1', &
         exitstat=stat)
-    call check(stat == 0, 'an administrator pushes')
+    call check(stat /= 0, 'main takes no pushes')
+    reply = post('/api/v1/repos/demo/land', '{"branch":"first"}')
+    call check(index(reply, 'HTTP/1.1 202') == 1, 'a landing is queued')
+    call wait_landing(1, 'landed')
     reply = get('/api/v1/repos/demo/log?ref=main')
-    call check(index(reply, '"subject":"First commit"') > 0, 'the pushed commit is in the API')
+    call check(index(reply, '"subject":"First commit (#1)"') > 0, 'the branch landed as #1')
+    call execute_command_line('test "$(git --git-dir='//target//' rev-parse main)" = '// &
+        '"$(git --git-dir='//data//'/repos/demo.git rev-parse main)" && ! git --git-dir='// &
+        data//'/repos/demo.git rev-parse -q --verify first', exitstat=stat)
+    call check(stat == 0, 'main went to the mirror target and the branch is gone')
 
     ! Read with a reading token; the URL without ".git" works too.
     call execute_command_line(git//'clone -q http://x:'//reader//'@'//base//'/demo '// &
@@ -77,19 +90,31 @@ program test_git_http
     call check(stat /= 0, 'nobody clones without a token')
 
     ! Writing needs the admin scope and a primary repository.
-    call execute_command_line('printf "more\n" >> '//work//'/README && '//git//'-C '//work// &
-        ' commit -q -am "Second commit" && '//git//'-C '//work//' push -q http://x:'// &
-        reader//'@'//base//'/demo.git main >/dev/null 2>&1', exitstat=stat)
+    call execute_command_line('printf "more\n" >> '//work//'-clone/README && '//git//'-C '// &
+        work//'-clone commit -q -am "Second commit" && '//git//'-C '//work// &
+        '-clone push -q http://x:'//reader//'@'//base//'/demo.git HEAD:second >/dev/null 2>&1', &
+        exitstat=stat)
     call check(stat /= 0, 'a reader cannot push')
     call execute_command_line(git//'-C '//work//' push -q http://x:'//admin//'@'//base// &
         '/mir.git main:side >/dev/null 2>&1', exitstat=stat)
     call check(stat /= 0, 'a mirror refuses pushes')
 
+    ! A branch whose check fails does not land.
+    call execute_command_line(git//'-C '//work//'-clone rm -q README && '//git//'-C '//work// &
+        '-clone commit -q -m "Remove README" && '//git//'-C '//work//'-clone push -q '//url// &
+        ' HEAD:broken', exitstat=stat)
+    call check(stat == 0, 'a branch with a failing check is pushed')
+    reply = post('/api/v1/repos/demo/land', '{"branch":"broken"}')
+    call wait_landing(2, 'failed')
+    reply = get('/api/v1/repos/demo/log?ref=main')
+    call check(index(reply, 'Remove README') == 0, 'main stays where it was')
+
     ! Larger than git's 1 MiB post buffer: the body arrives in chunked encoding.
     call execute_command_line('head -c 3000000 /dev/urandom > '//work//'/big && '//git// &
         '-C '//work//' add big && '//git//'-C '//work//' commit -q -m "Large file" && '// &
-        git//'-C '//work//' push -q '//url//' main && '//git//'-C '//work// &
-        '-clone pull -q && cmp -s '//work//'/big '//work//'-clone/big', exitstat=stat)
+        git//'-C '//work//' push -q '//url//' HEAD:big && '//git//'-C '//work// &
+        '-clone fetch -q origin big && '//git//'-C '//work//'-clone show FETCH_HEAD:big | '// &
+        'cmp -s - '//work//'/big', exitstat=stat)
     call check(stat == 0, 'a 3 MB push arrives intact and is fetched again')
 
     call proc_kill(sup, SIGTERM)
@@ -98,8 +123,35 @@ program test_git_http
 
 contains
 
+    subroutine wait_landing(number, state)
+        integer, intent(in) :: number
+        character(len=*), intent(in) :: state
+        integer :: k
+        do k = 1, 300
+            reply = get('/api/v1/repos/demo/landings')
+            if (index(reply, '{"landing":'//itoa(number)//',') > 0 .and. index(reply, &
+                '"state":"'//state//'"') > 0) return
+            call proc_sleep_ms(100)
+        end do
+        call check(.false., 'landing '//itoa(number)//' '//state//': '//reply)
+    end subroutine wait_landing
+
+    function post(path, body) result(r)
+        character(len=*), intent(in) :: path, body
+        character(len=:), allocatable :: r
+        r = exchange('POST '//path//' HTTP/1.1'//CRLF//'Authorization: Bearer '//admin//CRLF// &
+            'Content-Type: application/json'//CRLF//'Content-Length: '//itoa(len(body))// &
+            CRLF//CRLF//body)
+    end function post
+
     function get(path) result(r)
         character(len=*), intent(in) :: path
+        character(len=:), allocatable :: r
+        r = exchange('GET '//path//' HTTP/1.1'//CRLF//'Authorization: Bearer '//admin//CRLF//CRLF)
+    end function get
+
+    function exchange(request) result(r)
+        character(len=*), intent(in) :: request
         character(len=:), allocatable :: r
         character(len=4096) :: buf
         integer :: cfd, n, st
@@ -108,15 +160,14 @@ contains
         call tcp_connect('127.0.0.1', port, cfd, st)
         if (st /= 0) return
         call sock_set_timeouts(cfd, 5)
-        call sock_send_all(cfd, 'GET '//path//' HTTP/1.1'//CRLF//'Authorization: Bearer '// &
-            admin//CRLF//CRLF, st)
+        call sock_send_all(cfd, request, st)
         do
             n = sock_recv(cfd, buf)
             if (n <= 0) exit
             r = r//buf(1:n)
         end do
         call sock_close(cfd)
-    end function get
+    end function exchange
 
     function itoa(k) result(s)
         integer, intent(in) :: k
