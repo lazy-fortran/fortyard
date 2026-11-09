@@ -11,7 +11,7 @@ module fy_ui_app
         JSON_BOOL, JSON_OBJECT_END, JSON_END_OF_INPUT, JSON_ERROR
     use fy_fetch, only: request_t, fetch_start, fetch_ready
     use fy_nav, only: nav_push, nav_popped, nav_title, nav_assign, nav_set_pref, nav_copy
-    use fy_route, only: route_t, route_parse, route_href, go, go_take, R_REPOS, R_TOKENS, &
+    use fy_route, only: route_t, route_parse, route_href, go, go_take, at, R_REPOS, R_TOKENS, &
         R_SERVER, R_TREE, R_BLOB, R_COMMITS, R_COMMIT, R_MISSING
     use fy_repo_view, only: repo_view_reset, repo_view_show, repo_view_list, &
         repo_view_compose, repo_view_list_compose, repo_view_receive, repo_view_title, &
@@ -228,7 +228,7 @@ contains
                 end if
             end if
         end if
-        if (link("home", "fortyard", "/", size=HEADING, style=UI_HEADING, &
+        if (link("home", "fortyard", at("/"), size=HEADING, style=UI_HEADING, &
             tone=UI_TONE_NORMAL)) call go("/")
         if (signed_in .and. checked) then
             ! Where the page is: the repository's groups and name, or the page.
@@ -276,7 +276,7 @@ contains
         call column_begin(2.0, id=name)
         if (name == "drawer") then
             call row_begin(GAP, id="drawerhead", height=48.0)
-            if (link("home", "fortyard", "/", size=HEADING, style=UI_HEADING, &
+            if (link("home", "fortyard", at("/"), size=HEADING, style=UI_HEADING, &
                 tone=UI_TONE_NORMAL)) call go("/")
             call text("", width=UI_FILL)
             if (button("close", "Close menu", width=40.0, height=40.0)) drawer_open = .false.
@@ -292,9 +292,9 @@ contains
                 page == R_COMMITS .or. page == R_COMMIT)
             call text("", width=UI_FILL, id="hr1")
         end if
-        call side_link("repos", "Repositories", "/", page == R_REPOS)
-        call side_link("tokens", "Access tokens", "/tokens", page == R_TOKENS)
-        call side_link("server", "Server", "/server", page == R_SERVER)
+        call side_link("repos", "Repositories", at("/"), page == R_REPOS)
+        call side_link("tokens", "Access tokens", at("/tokens"), page == R_TOKENS)
+        call side_link("server", "Server", at("/server"), page == R_SERVER)
         call text("", width=UI_FILL, id="hr2")
         call text("Theme", size=SMALL, style=UI_HEADING, tone=UI_TONE_MUTED, id="section2")
         if (tabs("theme", [character(len=6) :: "System", "Light", "Dark"], theme_choice, &
@@ -368,7 +368,7 @@ contains
     subroutine missing_view()
         call text("Page not found", size=TITLE, style=UI_HEADING)
         call text("This page does not exist.", size=BODY, tone=UI_TONE_MUTED)
-        if (link("back", "Go to the repositories", "/", size=BODY)) call go("/")
+        if (link("back", "Go to the repositories", at("/"), size=BODY)) call go("/")
     end subroutine missing_view
 
     subroutine server_view()
@@ -393,9 +393,9 @@ contains
         call column_end()
         call text("Health", size=HEADING, style=UI_HEADING, id="heading3")
         call row_begin(16.0, id="links")
-        if (link("status", "Status page", "/status", size=BODY)) call go("/status")
-        if (link("healthz", "Health check", "/healthz", size=BODY)) call go("/healthz")
-        if (link("versionapi", "Version (JSON)", "/api/v1/version", size=BODY)) &
+        if (link("status", "Status page", at("/status"), size=BODY)) call go("/status")
+        if (link("healthz", "Health check", at("/healthz"), size=BODY)) call go("/healthz")
+        if (link("versionapi", "Version (JSON)", at("/api/v1/version"), size=BODY)) &
             call go("/api/v1/version")
         call row_end()
     end subroutine server_view

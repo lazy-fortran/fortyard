@@ -14,7 +14,7 @@ module fy_server
     use fortui_html, only: ui_frame_html
     use fy_ui_app, only: app_start, app_compose, app_title, app_missing
     use fy_fetch, only: fetch_serve, fetch_served_json
-    use fy_route, only: route_is_page
+    use fy_route, only: route_is_page, route_set_base
     use fy_repo, only: repo_name_ok, repo_ref_ok, repo_path_ok, repo_log_json, repo_tree_json, &
         repo_blob, repo_commit_json, repo_refs_json, repo_clone, repo_fetch, repo_init
     use fy_posix, only: tcp_accept, sock_close, sock_set_timeouts
@@ -31,7 +31,7 @@ module fy_server
     private
 
     public :: server_loop, serve_connection, route, server_supervise, server_set_web_dir
-    public :: server_set_data_dir, server_set_mirror_interval
+    public :: server_set_data_dir, server_set_mirror_interval, server_set_base
     public :: response_t
 
     character(len=*), parameter :: JSON = 'application/json'
@@ -53,6 +53,9 @@ module fy_server
     character(len=:), allocatable :: web_dir
     !! Directory of the repository mirrors.
     character(len=:), allocatable :: repos_dir
+    !! Path below the host where fortyard is served (e.g. "/yard"), empty at the
+    !! root. A reverse proxy removes it from requests; links and cookies need it.
+    character(len=:), allocatable :: base
     !! Seconds between fetches of a mirror.
     integer :: mirror_interval = 60
     !! Database and cookie of the page being composed (in critical fortui_render).
@@ -507,6 +510,14 @@ contains
 
         call http_read_head(cfd, req, rest, status)
         if (status < 0) return
+        ! Behind a proxy that keeps the prefix, requests arrive with it.
+        if (len(b()) > 0 .and. status == 0) then
+            if (req%path == b()) then
+                req%path = '/'
+            else if (index(req%path, b()//'/') == 1) then
+                req%path = req%path(len(b()) + 1:)
+            end if
+        end if
         if (status == 0) then
             if (git_http_route(req%path, req%query, repo, write)) then
                 call git_route(cfd, req, rest, db, repo, write)
@@ -816,7 +827,7 @@ contains
             return
         end if
         res%headers = 'Set-Cookie: '//SESSION_COOKIE//'='//session// &
-            '; Path=/; HttpOnly; SameSite=Strict; Max-Age='//SESSION_MAX_AGE//CRLF
+            '; Path='//cookie_path()//'; HttpOnly; SameSite=Strict; Max-Age='//SESSION_MAX_AGE//CRLF
         res%body = '{"account":"'//json_escape_string(who%account)//'"}'
     end subroutine open_session
 
@@ -829,7 +840,7 @@ contains
         token = http_cookie(req, SESSION_COOKIE)
         if (len(token) > 0) call store_token_revoke_hash(db, token)
         res%headers = 'Set-Cookie: '//SESSION_COOKIE// &
-            '=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0'//CRLF
+            '=; Path='//cookie_path()//'; HttpOnly; SameSite=Strict; Max-Age=0'//CRLF
         res%body = '{"closed":true}'
     end subroutine close_session
 
@@ -889,6 +900,12 @@ contains
         at = index(template, '<title>')
         a2 = index(template, '</title>')
         if (at > 0 .and. a2 > at) template = template(1:at + 6)//html_text(title)//template(a2:)
+        ! Asset and page addresses below the base.
+        do
+            at = index(template, '%BASE%')
+            if (at == 0) exit
+            template = template(1:at - 1)//b()//template(at + 6:)
+        end do
         at = index(template, '<html lang="en"')
         if (at > 0) template = template(1:at + 14)//theme_attr(http_cookie(req, THEME_COOKIE))// &
             template(at + 15:)
@@ -1098,6 +1115,28 @@ contains
         if (ends_with) ends_with = s(len(s) - len(suffix) + 1:) == suffix
     end function ends_with
 
+    subroutine server_set_base(prefix)
+        !! Set once before workers start.
+        character(len=*), intent(in) :: prefix
+        base = prefix
+        if (len(base) > 0) then
+            if (base(len(base):) == '/') base = base(1:len(base) - 1)
+        end if
+        call route_set_base(base)
+    end subroutine server_set_base
+
+    function b() result(s)
+        character(len=:), allocatable :: s
+        s = ''
+        if (allocated(base)) s = base
+    end function b
+
+    function cookie_path() result(s)
+        character(len=:), allocatable :: s
+        s = b()
+        if (len(s) == 0) s = '/'
+    end function cookie_path
+
     subroutine server_set_web_dir(dir)
         !! Set once before workers start; read-only afterwards.
         character(len=*), intent(in) :: dir
@@ -1136,13 +1175,13 @@ contains
             '<dt>Commit</dt><dd>'//FY_COMMIT//'</dd>'// &
             '<dt>Built</dt><dd>'//FY_BUILT//'</dd></dl>'// &
             '<h2>API</h2><ul>'// &
-            '<li><a href="/healthz"><code>/healthz</code></a></li>'// &
-            '<li><a href="/api/v1/version"><code>/api/v1/version</code></a></li>'// &
+            '<li><a href="'//b()//'/healthz"><code>/healthz</code></a></li>'// &
+            '<li><a href="'//b()//'/api/v1/version"><code>/api/v1/version</code></a></li>'// &
             '<li><code>/api/v1/whoami</code> (token)</li>'// &
             '<li><code>GET, POST /api/v1/tokens</code>, '// &
             '<code>POST /api/v1/tokens/ID/revoke</code> (token)</li>'// &
             '<li><code>POST, DELETE /api/v1/session</code> (browser session)</li></ul>'// &
-            '<p>The web application is at <a href="/">/</a>.</p>'// &
+            '<p>The web application is at <a href="'//b()//'/">'//b()//'/</a>.</p>'// &
             '<h2>Command line</h2><p><code>fy login --server URL --token TOKEN</code>, '// &
             'then <code>fy whoami</code>.</p>'// &
             '</main></body></html>'

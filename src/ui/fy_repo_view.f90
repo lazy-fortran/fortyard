@@ -13,7 +13,7 @@ module fy_repo_view
     use fy_highlight, only: highlight, lang_of
     use fy_diff, only: diff_file_t, parse_patch, DL_ADDED, DL_REMOVED, DL_HUNK, DL_NOTE
     use fy_markdown, only: md_doc_t, md_parse, md_compose
-    use fy_route, only: route_t, route_href, url_encode, go, R_TREE, R_BLOB, R_COMMITS, &
+    use fy_route, only: route_t, route_href, url_encode, go, at, R_TREE, R_BLOB, R_COMMITS, &
         R_COMMIT
     use fy_time, only: ago, day_of
     use fy_nav, only: nav_copy
@@ -518,7 +518,7 @@ contains
             call row_end()
         end if
         call text(file_info, size=SMALL, tone=UI_TONE_MUTED, width=UI_FILL, id="info")
-        if (link("raw", "Raw", api(repo, 'blob')//'?path='//url_encode(file), size=SMALL)) &
+        if (link("raw", "Raw", at(api(repo, 'blob')//'?path='//url_encode(file)), size=SMALL)) &
             call go(api(repo, 'blob')//'?path='//url_encode(file))
         call row_end()
         if (preview .and. size(file_md%blocks) > 0) then

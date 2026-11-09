@@ -5,7 +5,7 @@ module fy_nav
     implicit none
     private
 
-    public :: nav_push, nav_popped, nav_title, nav_location, nav_assign, nav_set_pref, &
+    public :: nav_push, nav_popped, nav_title, nav_location, nav_base, nav_assign, nav_set_pref, &
         nav_pref, nav_copy
 
     interface
@@ -25,7 +25,7 @@ module fy_nav
 
     ! What fy_nav_call and fy_nav_get do.
     integer(c_int), parameter :: DO_PUSH = 1, DO_TITLE = 2, DO_ASSIGN = 3, DO_PREF = 4, DO_COPY = 5
-    integer(c_int), parameter :: GET_LOCATION = 1, GET_POPPED = 2, GET_COOKIE = 3
+    integer(c_int), parameter :: GET_LOCATION = 1, GET_POPPED = 2, GET_COOKIE = 3, GET_BASE = 4
 
 contains
 
@@ -41,6 +41,12 @@ contains
         path = get(GET_POPPED, '')
         nav_popped = len(path) > 0
     end function nav_popped
+
+    function nav_base() result(prefix)
+        !! The path prefix the application is served under, e.g. "/yard", or empty.
+        character(len=:), allocatable :: prefix
+        prefix = get(GET_BASE, '')
+    end function nav_base
 
     function nav_location() result(path)
         !! Path and query of the page.
