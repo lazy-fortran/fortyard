@@ -16,7 +16,8 @@ fortui=${FORTUI_DIR:-$deps/fortui}
 mkdir -p "$out"
 rm -f "$out"/fy_app.*
 FORTUI_WEB_SOURCES="$fx/fx_string.f90 $fx/fx_json_build.f90 $fx/fx_json_parse.f90 \
-$src/web/fy_fetch.f90 $src/src/ui/fy_repo_view.f90 $src/src/ui/fy_ui_app.f90" \
+$src/web/fy_fetch.f90 $src/src/ui/fy_highlight.f90 $src/src/ui/fy_diff.f90 \
+$src/src/ui/fy_markdown.f90 $src/src/ui/fy_repo_view.f90 $src/src/ui/fy_ui_app.f90" \
 FORTUI_WEB_JS="$src/web/fy_web.js" \
     "$fortui/web/build.sh" "$src/web/fy_app.f90" "$out" >/dev/null
 rm -rf "$out/obj" "$out/fortui.css"

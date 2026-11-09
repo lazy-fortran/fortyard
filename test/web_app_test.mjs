@@ -85,8 +85,12 @@ try {
   const adopted = async () => {
     await until(`window.Module && typeof Module._fortui_web_step === 'function'`, 'WebAssembly running');
     await sleep(500);
-    return evaluate(`(() => { const all = [...document.querySelectorAll('[data-key]')];
+    const ok = await evaluate(`(() => { const all = [...document.querySelectorAll('[data-key]')];
       return all.length === window.__ssrCount && all.every((e) => e.__ssr === 1); })()`);
+    if (!ok) console.log('  not adopted: ' + await evaluate(`[...document.querySelectorAll('[data-key]')]
+      .filter((e) => e.__ssr !== 1).map((e) => e.dataset.key).join(' ') + ' | server elements: ' + window.__ssrCount
+      + ', now: ' + document.querySelectorAll('[data-key]').length`));
+    return ok;
   };
   await send('Page.navigate', { url });
   await until(`window.__ssrCount > 0`, 'page parsed');
@@ -147,13 +151,13 @@ try {
   await click(`[data-id="${await evaluate(`[...document.querySelectorAll('button')].find((e) => e.textContent === 'demo').dataset.id`)}"]`);
   await until(`[...document.querySelectorAll('button')].some((e) => e.textContent === 'hello.f90')`, 'tree');
   await click(`[data-id="${await evaluate(`[...document.querySelectorAll('button')].find((e) => e.textContent === 'hello.f90').dataset.id`)}"]`);
-  await until(`[...document.querySelectorAll('[data-style="5"]')].some((e) => e.textContent === '  print *, "hi"')`, 'file');
+  await until(`[...document.querySelectorAll('[data-style="5"]')].some((e) => e.textContent.endsWith('  print *, "hi"') && e.querySelector('span[data-t="5"]')?.textContent === 'print')`, 'file');
   check(true, 'a file of the repository is shown as code');
   await click('[data-id$="sub#2"]');
   await until(`!!document.querySelector('[data-id$="/id#1"]')`, 'history');
   check(await evaluate(hasText('Add hello')), 'the history lists the commit');
   await click('[data-id$="/id#1"]');
-  await until(`[...document.querySelectorAll('[data-tone="1"]')].some((e) => e.textContent === '+program hello')`, 'diff');
+  await until(`[...document.querySelectorAll('[data-tone="11"]')].some((e) => e.textContent.endsWith('+ program hello'))`, 'diff');
   check(true, 'the commit shows its diff with added lines marked');
 
   // A signed-in reload: the server renders account and repositories.
