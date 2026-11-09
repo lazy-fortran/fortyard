@@ -12,7 +12,9 @@ module fy_ui_app
     use fy_fetch, only: request_t, fetch_start, fetch_ready
     use fy_nav, only: nav_push, nav_popped, nav_title, nav_assign, nav_set_pref, nav_copy
     use fy_route, only: route_t, route_parse, route_href, go, go_take, at, R_REPOS, R_TOKENS, &
-        R_SERVER, R_TREE, R_BLOB, R_COMMITS, R_COMMIT, R_MISSING
+        R_SERVER, R_TREE, R_BLOB, R_COMMITS, R_COMMIT, R_MISSING, R_JOBS
+    use fy_jobs_view, only: jobs_view_show, jobs_view_hide, jobs_view_receive, &
+        jobs_view_compose, jobs_view_title
     use fy_repo_view, only: repo_view_reset, repo_view_show, repo_view_list, &
         repo_view_compose, repo_view_list_compose, repo_view_receive, repo_view_title, &
         repo_view_repo, repo_view_missing
@@ -110,10 +112,13 @@ contains
         page = r%kind
         drawer_open = .false.
         message = ''
+        if (page /= R_JOBS) call jobs_view_hide()
         if (.not. signed_in) return
         select case (page)
         case (R_REPOS)
             call repo_view_list()
+        case (R_JOBS)
+            call jobs_view_show(r%repo)
         case (R_TOKENS)
             copied = .false.
             call fetch_start(tokens_req, 'GET', '/api/v1/tokens')
@@ -152,6 +157,8 @@ contains
             s = 'Access tokens · fortyard'
         case (R_SERVER)
             s = 'Server · fortyard'
+        case (R_JOBS)
+            s = jobs_view_title()//' · fortyard'
         case (R_MISSING)
             s = 'Page not found · fortyard'
         case default
@@ -199,6 +206,8 @@ contains
                 call tokens_view()
             case (R_SERVER)
                 call server_view()
+            case (R_JOBS)
+                call jobs_view_compose(page_w < 600.0)
             case (R_MISSING)
                 call missing_view()
             case default
@@ -293,6 +302,7 @@ contains
             call text("", width=UI_FILL, id="hr1")
         end if
         call side_link("repos", "Repositories", at("/"), page == R_REPOS)
+        call side_link("jobs", "Jobs", at("/jobs"), page == R_JOBS)
         call side_link("tokens", "Access tokens", at("/tokens"), page == R_TOKENS)
         call side_link("server", "Server", at("/server"), page == R_SERVER)
         call text("", width=UI_FILL, id="hr2")
@@ -546,6 +556,7 @@ contains
             if (signed_in) call show(here)
         end if
         call repo_view_receive()
+        call jobs_view_receive()
         if (fetch_ready(tokens_req)) then
             if (tokens_req%status == 200) call parse_tokens(tokens_req%body)
         end if

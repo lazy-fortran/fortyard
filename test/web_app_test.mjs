@@ -267,6 +267,18 @@ try {
   check(true, 'Escape closes the drawer');
   await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
 
+  // The jobs page is live: a landing queued elsewhere appears without input.
+  await load('/jobs');
+  await until(hasText('No jobs yet.'), 'jobs page');
+  check(await evaluate('document.title') === 'Jobs · fortyard', 'the jobs page has its address and title');
+  const auth = { Cookie: `fy_session=${session.value}`, 'Content-Type': 'application/json' };
+  await fetch(url + 'api/v1/repos', { method: 'POST', headers: auth, body: JSON.stringify({ name: 'live' }) });
+  await fetch(url + 'api/v1/repos/live/land', { method: 'POST', headers: auth, body: JSON.stringify({ branch: 'nothing' }) });
+  await until(hasText('live · nothing'), 'the queued landing appears');
+  check(true, 'a job queued elsewhere appears on the open jobs page');
+  await until(hasText('failed'), 'the landing ends');
+  check(true, 'its end appears too');
+
   if (shot) {
     const png = await send('Page.captureScreenshot', { format: 'png' });
     writeFileSync(shot, Buffer.from(png.result.data, 'base64'));

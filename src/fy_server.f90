@@ -9,6 +9,7 @@ module fy_server
         http_basic_password
     use fy_git_http, only: git_http_route, git_http_serve
     use fy_land, only: land_branch, land_hook_install
+    use fy_events, only: events_set_dir, events_notify, events_stream
     use fortui, only: ui_init, ui_frame_begin, ui_present, ui_shutdown
     use fortui_backend_headless, only: headless_backend_t
     use fortui_html, only: ui_frame_html
@@ -26,7 +27,8 @@ module fy_server
         store_open, store_token_list, store_token_revoke, store_token_revoke_hash, repo_info_t, &
         store_repo_add, store_repo_list, store_repo_fetched, store_repo_set_mode, landing_t, &
         store_landing_add, store_landing_next, store_landing_requeue, store_landing_finish, &
-        store_landing_list, release_t, store_release_add, store_release_ready, store_release_list
+        store_landing_list, release_t, store_release_add, store_release_ready, store_release_list, &
+        store_jobs, store_job, store_job_counts, store_jobs_state
     use fy_sqlite, only: db_close
     implicit none
     private
@@ -245,8 +247,10 @@ contains
         call store_open(db_path, db, stat)
         if (stat /= 0) call proc_exit(1)
         call store_landing_requeue(db)
+        call events_notify('jobs')
         do
             call store_landing_next(db, l, found)
+            if (found) call events_notify('jobs')
             if (.not. found) then
                 call proc_sleep_ms(2000)
                 cycle
@@ -262,6 +266,7 @@ contains
             if (mode /= 'primary') then
                 call store_landing_finish(db, l%id, 'failed', '', &
                     'Only a primary repository lands branches.')
+                call events_notify('jobs')
                 cycle
             end if
             ! Scratch space of a landing lives in the temporary directory and is
@@ -277,6 +282,7 @@ contains
             else
                 call store_landing_finish(db, l%id, 'failed', '', log)
             end if
+            call events_notify('jobs')
             write (error_unit, '(a)') 'fy: landing '//itoa(int(l%id))//' of '//l%repo//' '// &
                 l%branch//merge(' landed', ' failed', ok)
             flush (error_unit)
@@ -319,6 +325,7 @@ contains
         !! Set once before workers start; read-only afterwards.
         character(len=*), intent(in) :: dir
         repos_dir = dir//'/repos'
+        call events_set_dir(dir//'/events')
     end subroutine server_set_data_dir
 
     subroutine repos_route(req, db, res)
@@ -548,6 +555,7 @@ contains
                 return
             end if
             call store_landing_add(db, target, branch, who%account, number, stat)
+            if (stat == 0) call events_notify('jobs')
             if (stat /= 0) then
                 call fail(res, 500, 'landing not queued')
                 return
@@ -669,6 +677,10 @@ contains
         if (status == 0) then
             if (git_http_route(req%path, req%query, repo, write)) then
                 call git_route(cfd, req, rest, db, repo, write)
+                return
+            end if
+            if (req%path == '/api/v1/events' .and. req%method == 'GET') then
+                call events_route(cfd, req, db)
                 return
             end if
             if (release_upload_route(req, repo, version)) then
@@ -800,6 +812,31 @@ contains
         path = repos_dir//'/../releases'
     end function releases_dir
 
+    subroutine events_route(cfd, req, db)
+        !! GET /api/v1/events?topic=jobs: a server-sent event stream that
+        !! announces each change of the topic, for pages that show it live.
+        integer, intent(in) :: cfd
+        type(http_request_t), intent(in) :: req
+        type(db_t), intent(in) :: db
+        type(token_identity_t) :: who
+        character(len=:), allocatable :: token, topic
+
+        token = http_bearer_token(req)
+        if (len(token) == 0) token = http_cookie(req, SESSION_COOKIE)
+        call store_token_lookup(db, token, who)
+        topic = http_query_param(req%query, 'topic')
+        if (.not. who%found) then
+            call http_send_response(cfd, 401, JSON, '{"error":"missing or invalid token"}')
+        else if (topic /= 'jobs') then
+            call http_send_response(cfd, 404, JSON, '{"error":"no such topic"}')
+        else
+            ! Holds this thread until the client leaves; it sleeps in poll(2).
+            call events_stream(cfd, topic)
+        end if
+        write (error_unit, '(a,1x,a)') req%method, req%path
+        flush (error_unit)
+    end subroutine events_route
+
     subroutine git_route(cfd, req, rest, db, repo, write)
         !! Clone, fetch and push over HTTP. Git sends the access token as the
         !! Basic password (any user name) or as a bearer token. Reading needs a
@@ -926,6 +963,8 @@ contains
             if (index(req%path, '/app/') == 1) then
                 if (.not. method_is(req, 'GET', res)) return
                 call static_file(req, req%path(6:), res)
+            else if (req%path == '/api/v1/jobs' .or. index(req%path, '/api/v1/jobs/') == 1) then
+                call jobs_route(req, db, res)
             else if (req%path == '/api/v1/repos' .or. index(req%path, '/api/v1/repos/') == 1) then
                 call repos_route(req, db, res)
             else if (index(req%path, '/api/v1/tokens/') == 1) then
@@ -949,6 +988,92 @@ contains
             end if
         end select
     end subroutine route
+
+    subroutine jobs_route(req, db, res)
+        !! GET /api/v1/jobs[?repo=NAME]: running and queued jobs, recent finished
+        !! ones and counts per repository. Pages learn of changes through
+        !! /api/v1/events?topic=jobs.
+        !! GET /api/v1/jobs/N: one job with its log.
+        type(http_request_t), intent(in) :: req
+        type(db_t), intent(in) :: db
+        type(response_t), intent(inout) :: res
+        type(token_identity_t) :: who
+        type(landing_t), allocatable :: ls(:)
+        type(landing_t) :: l
+        character(len=64), allocatable :: names(:)
+        integer, allocatable :: counts(:, :)
+        character(len=:), allocatable :: repo, state
+        character(len=24) :: num
+        integer(int64) :: id
+        integer :: k, stat, ios, totals(4)
+        logical :: found
+
+        if (.not. authenticated(req, db, who, res)) return
+        if (.not. method_is(req, 'GET', res)) return
+        if (index(req%path, '/api/v1/jobs/') == 1) then
+            read (req%path(14:), *, iostat=ios) id
+            if (ios /= 0 .or. verify(req%path(14:), '0123456789') /= 0) then
+                call fail(res, 404, 'not found')
+                return
+            end if
+            call store_job(db, id, l, found)
+            if (.not. found) then
+                call fail(res, 404, 'no such job')
+                return
+            end if
+            res%body = job_json(l, .true.)
+            return
+        end if
+        repo = http_query_param(req%query, 'repo')
+        if (len(repo) > 0 .and. .not. repo_name_ok(repo)) then
+            call fail(res, 400, 'bad repository name')
+            return
+        end if
+        state = store_jobs_state(db)
+        call store_job_counts(db, names, counts, stat)
+        call store_jobs(db, repo, ls, stat)
+        totals = 0
+        res%body = '{"state":"'//json_escape_string(state)//'","repos":['
+        do k = 1, size(names)
+            totals = totals + counts(:, k)
+            if (k > 1) res%body = res%body//','
+            res%body = res%body//'{"name":"'//trim(names(k))//'","running":'// &
+                itoa(counts(1, k))//',"queued":'//itoa(counts(2, k))//',"landed":'// &
+                itoa(counts(3, k))//',"failed":'//itoa(counts(4, k))//'}'
+        end do
+        res%body = res%body//'],"totals":{"running":'//itoa(totals(1))//',"queued":'// &
+            itoa(totals(2))//',"landed":'//itoa(totals(3))//',"failed":'//itoa(totals(4))// &
+            '},"jobs":['
+        do k = 1, size(ls)
+            if (k > 1) res%body = res%body//','
+            res%body = res%body//job_json(ls(k), .false.)
+        end do
+        res%body = res%body//']}'
+
+    contains
+
+        function job_json(j, with_log) result(s)
+            type(landing_t), intent(in) :: j
+            logical, intent(in) :: with_log
+            character(len=:), allocatable :: s
+            write (num, '(i0)') j%id
+            s = '{"id":'//trim(num)//',"kind":"landing","repo":"'//j%repo//'","branch":"'// &
+                json_escape_string(j%branch)//'","account":"'//json_escape_string(j%account)// &
+                '","state":"'//j%state//'","queued":"'//j%created//'","started":"'// &
+                j%started//'","finished":"'//j%finished//'","commit":"'//j%commit//'"'
+            if (with_log) s = s//',"log":"'//json_escape_string(j%log)//'"'
+            s = s//'}'
+        end function job_json
+
+        function itoa(v) result(s)
+            integer, intent(in) :: v
+            character(len=:), allocatable :: s
+            character(len=16) :: b
+            write (b, '(i0)') v
+            s = trim(b)
+        end function itoa
+
+    end subroutine jobs_route
 
     logical function method_is(req, method, res)
         type(http_request_t), intent(in) :: req

@@ -17,8 +17,9 @@ module fy_store
     public :: landing_t, store_landing_add, store_landing_next, store_landing_requeue
     public :: store_landing_finish, store_landing_list
     public :: release_t, store_release_add, store_release_ready, store_release_list
+    public :: store_jobs, store_job, store_job_counts, store_jobs_state
 
-    integer, parameter, public :: SCHEMA_VERSION = 5
+    integer, parameter, public :: SCHEMA_VERSION = 6
 
     type :: token_identity_t
         logical :: found = .false.
@@ -55,7 +56,7 @@ module fy_store
         !! A branch queued to land on main as one squashed commit.
         integer(int64) :: id = 0
         character(len=:), allocatable :: repo, branch, account, state, created, finished
-        character(len=:), allocatable :: commit, log
+        character(len=:), allocatable :: commit, log, started
     end type landing_t
 
     character(len=*), parameter :: NOW = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
@@ -145,6 +146,15 @@ contains
                 " state TEXT NOT NULL DEFAULT 'open', sha256 TEXT, size INTEGER,"// &
                 ' UNIQUE (repo, version));'// &
                 'DELETE FROM schema_version; INSERT INTO schema_version VALUES (5);'// &
+                'COMMIT;', stat)
+            if (stat /= SQLITE_OK) then
+                call db_exec(db, 'ROLLBACK;', version)
+                return
+            end if
+        end if
+        if (store_schema_version(db) < 6) then
+            call db_exec(db, 'BEGIN;ALTER TABLE landings ADD COLUMN started_at TEXT;'// &
+                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (6);'// &
                 'COMMIT;', stat)
             if (stat /= SQLITE_OK) then
                 call db_exec(db, 'ROLLBACK;', version)
@@ -401,7 +411,7 @@ contains
         integer :: stat
 
         found = .false.
-        call db_prepare(db, "UPDATE landings SET state = 'running' WHERE id = (SELECT min(id)"// &
+        call db_prepare(db, "UPDATE landings SET state = 'running', started_at = "//NOW//" WHERE id = (SELECT min(id)"// &
             " FROM landings WHERE state = 'queued') RETURNING id, repo, branch, account, created_at;", &
             st, stat)
         if (stat /= SQLITE_OK) return
@@ -472,6 +482,122 @@ contains
         call stmt_finalize(st)
         stat = SQLITE_OK
     end subroutine store_landing_list
+
+    subroutine store_jobs(db, repo, ls, stat)
+        !! Running and queued landings, then the 40 newest finished ones, of
+        !! `repo` or of all repositories when it is empty; without logs.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: repo
+        type(landing_t), allocatable, intent(out) :: ls(:)
+        integer, intent(out) :: stat
+        type(stmt_t) :: st
+        type(landing_t) :: l
+        character(len=*), parameter :: COLS = "SELECT id, repo, branch, account, state,"// &
+            " created_at, coalesce(started_at, ''), coalesce(finished_at, ''),"// &
+            " coalesce(commit_id, '') FROM landings WHERE (?1 = '' OR repo = ?1)"
+        integer :: pass
+
+        allocate (ls(0))
+        do pass = 1, 2
+            if (pass == 1) then
+                call db_prepare(db, COLS//" AND state IN ('running', 'queued')"// &
+                    " ORDER BY state = 'queued', id;", st, stat)
+            else
+                call db_prepare(db, COLS//" AND state NOT IN ('running', 'queued')"// &
+                    ' ORDER BY id DESC LIMIT 40;', st, stat)
+            end if
+            if (stat /= SQLITE_OK) return
+            call stmt_bind_text(st, 1, repo, stat)
+            do while (stmt_step(st) == SQLITE_ROW)
+                l%id = stmt_int(st, 0)
+                l%repo = stmt_text(st, 1)
+                l%branch = stmt_text(st, 2)
+                l%account = stmt_text(st, 3)
+                l%state = stmt_text(st, 4)
+                l%created = stmt_text(st, 5)
+                l%started = stmt_text(st, 6)
+                l%finished = stmt_text(st, 7)
+                l%commit = stmt_text(st, 8)
+                l%log = ''
+                ls = [ls, l]
+            end do
+            call stmt_finalize(st)
+        end do
+        stat = SQLITE_OK
+    end subroutine store_jobs
+
+    subroutine store_job(db, id, l, found)
+        !! One landing with its log.
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: id
+        type(landing_t), intent(out) :: l
+        logical, intent(out) :: found
+        type(stmt_t) :: st
+        integer :: stat
+
+        found = .false.
+        call db_prepare(db, "SELECT id, repo, branch, account, state, created_at,"// &
+            " coalesce(started_at, ''), coalesce(finished_at, ''), coalesce(commit_id, ''),"// &
+            " coalesce(log, '') FROM landings WHERE id = ?1;", st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, id, stat)
+        if (stmt_step(st) == SQLITE_ROW) then
+            l%id = stmt_int(st, 0)
+            l%repo = stmt_text(st, 1)
+            l%branch = stmt_text(st, 2)
+            l%account = stmt_text(st, 3)
+            l%state = stmt_text(st, 4)
+            l%created = stmt_text(st, 5)
+            l%started = stmt_text(st, 6)
+            l%finished = stmt_text(st, 7)
+            l%commit = stmt_text(st, 8)
+            l%log = stmt_text(st, 9)
+            found = .true.
+        end if
+        call stmt_finalize(st)
+    end subroutine store_job
+
+    subroutine store_job_counts(db, names, counts, stat)
+        !! Per repository: running, queued, landed and failed in the last 24 hours.
+        type(db_t), intent(in) :: db
+        character(len=64), allocatable, intent(out) :: names(:)
+        integer, allocatable, intent(out) :: counts(:, :)
+        integer, intent(out) :: stat
+        type(stmt_t) :: st
+        character(len=64) :: nm
+        integer :: n, k
+
+        allocate (names(0), counts(4, 0))
+        call db_prepare(db, "SELECT repo, sum(state = 'running'), sum(state = 'queued'),"// &
+            " sum(state = 'landed' AND finished_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now',"// &
+            " '-1 day')), sum(state = 'failed' AND finished_at >= strftime('%Y-%m-%dT%H:%M:%SZ',"// &
+            " 'now', '-1 day')) FROM landings GROUP BY repo ORDER BY repo;", st, stat)
+        if (stat /= SQLITE_OK) return
+        do while (stmt_step(st) == SQLITE_ROW)
+            n = size(names) + 1
+            nm = stmt_text(st, 0)
+            names = [names, nm]
+            counts = reshape([counts, [(int(stmt_int(st, k)), k = 1, 4)]], [4, n])
+        end do
+        call stmt_finalize(st)
+        stat = SQLITE_OK
+    end subroutine store_job_counts
+
+    function store_jobs_state(db) result(s)
+        !! Changes whenever a landing is queued, starts or finishes.
+        type(db_t), intent(in) :: db
+        character(len=:), allocatable :: s
+        type(stmt_t) :: st
+        integer :: stat
+
+        s = ''
+        call db_prepare(db, "SELECT count(*) || '.' || coalesce(max(id), 0) || '.' ||"// &
+            " coalesce(max(started_at), '') || '.' || coalesce(max(finished_at), '')"// &
+            ' FROM landings;', st, stat)
+        if (stat /= SQLITE_OK) return
+        if (stmt_step(st) == SQLITE_ROW) s = stmt_text(st, 0)
+        call stmt_finalize(st)
+    end function store_jobs_state
 
     subroutine store_release_add(db, repo, version, commit, notes, uploader, stat)
         !! Opens release `version` of `repo`; its file is uploaded next.

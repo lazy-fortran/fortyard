@@ -11,9 +11,9 @@ module fy_route
     public :: go, go_take, route_set_base, at
 
     integer, parameter, public :: R_REPOS = 1, R_TOKENS = 2, R_SERVER = 3, R_TREE = 4, &
-        R_BLOB = 5, R_COMMITS = 6, R_COMMIT = 7, R_MISSING = 8
+        R_BLOB = 5, R_COMMITS = 6, R_COMMIT = 7, R_MISSING = 8, R_JOBS = 9
 
-    character(len=7), parameter :: RESERVED(*) = [character(len=7) :: 'tokens', 'server', &
+    character(len=7), parameter :: RESERVED(*) = [character(len=7) :: 'tokens', 'server', 'jobs', &
         'status', 'healthz', 'api', 'app', '-']
 
     type :: route_t
@@ -67,6 +67,10 @@ contains
         end if
         if (first == 'tokens' .and. qpos == 0) r%kind = R_TOKENS
         if (first == 'server' .and. qpos == 0) r%kind = R_SERVER
+        if (first == 'jobs' .and. qpos == 0) then
+            r%kind = R_JOBS
+            r%repo = url_decode(query_value(q, 'repo'))
+        end if
         if (is_reserved(first)) return
 
         qpos = index(p, '/-/')
@@ -180,6 +184,19 @@ contains
             href = ''
         end if
     end function go_take
+
+    function query_value(q, name) result(v)
+        !! The raw value of `name` in query string `q`, or empty.
+        character(len=*), intent(in) :: q, name
+        character(len=:), allocatable :: v
+        integer :: k, e
+        v = ''
+        k = index('&'//q, '&'//name//'=')
+        if (k == 0) return
+        v = q(k + len(name) + 1:)
+        e = index(v, '&')
+        if (e > 0) v = v(1:e - 1)
+    end function query_value
 
     logical function is_reserved(segment)
         character(len=*), intent(in) :: segment

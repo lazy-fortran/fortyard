@@ -86,6 +86,27 @@ addToLibrary({
     return n;
   },
 
+  // Server-sent event streams (web/fy_stream.f90): each event of the topic
+  // counts and wakes the frame loop.
+  fy_stream_open__deps: ['$FY', '$FY_base', '$FUI'],
+  fy_stream_open: function (pPtr, pLen, tPtr, tLen) {
+    var id = FY.next++, s = { count: 0, es: new EventSource(FY_base() + UTF8ToString(pPtr, pLen)) };
+    s.es.addEventListener(UTF8ToString(tPtr, tLen), function () { s.count++; FUI.wakeUp(); });
+    FY.streams = FY.streams || new Map();
+    FY.streams.set(id, s);
+    return id;
+  },
+  fy_stream_count__deps: ['$FY'],
+  fy_stream_count: function (id) {
+    var s = FY.streams && FY.streams.get(id);
+    return s ? s.count : 0;
+  },
+  fy_stream_close__deps: ['$FY'],
+  fy_stream_close: function (id) {
+    var s = FY.streams && FY.streams.get(id);
+    if (s) { s.es.close(); FY.streams.delete(id); }
+  },
+
   // Location, title, preferences and clipboard (web/fy_nav.f90).
   fy_nav_call__deps: ['$FY', '$FY_base', '$FY_here'],
   fy_nav_call: function (what, pPtr, pLen, qPtr, qLen) {
