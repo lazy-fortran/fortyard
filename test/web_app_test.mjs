@@ -91,6 +91,8 @@ try {
   await send('Page.navigate', { url });
   await until(`window.__ssrCount > 0`, 'page parsed');
   check(await evaluate(`!!document.querySelector('[data-id="token"]')`), 'the server sends the sign-in form in the page');
+  check(await evaluate(`!/serif/.test(getComputedStyle(document.querySelector('.fui-k1')).fontFamily.replace('sans-serif', ''))`),
+    'the page sets its font');
   check(await adopted(), 'the WebAssembly adopts the page from the server');
 
   // Pasted, as people sign in.
