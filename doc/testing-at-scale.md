@@ -54,6 +54,8 @@ desktop or the host of the forge.
 | Mozilla | Test selection from historical failure data; skipped jobs are backfilled when something fails, to find the culprit; Perfherder detects performance changes and raises alerts |
 | Linux kernel (0-day) | Tests patches posted to the mailing lists and branches, bisects many regressions including performance ones, and emails the author of the culprit commit |
 | Rust | A merge queue tests each pull request (small ones are batched into rollups); compiler performance is tracked with instruction counts as the primary metric, because they vary far less than time |
+| Rust (crater) | A compiler change is tested against the packages that use it: each package is built and tested with the baseline and the candidate compiler, and only a difference between the two counts as a regression |
+| Debian, Ubuntu | A package moves into the testing distribution only after the test suites of the packages that depend on it pass with the new version |
 
 The common pattern: select what a change can affect, test the rest later in
 batches, and when something fails, find the culprit automatically and tell its
@@ -109,6 +111,82 @@ reads a file it does not declare. Two mechanisms catch this:
   closure-changing commits only.
 - **Maximum staleness.** Every case is rerun after a maximum time even if its
   key did not change, for example seven days for golden records.
+
+## Downstream consumers
+
+A library change can leave every test of the library green and still break a
+code that uses it. libneo shows the problem and an existing answer: its nightly
+run dispatches the workflows of six consumers (SIMPLE, NEO-2, MEPHIT, KAMEL,
+rabe, NEO-RT) against the candidate libneo commit, listed in its
+`ci/downstreams` registry. fortyard makes this part of the pool, so that
+consumers are tested continuously, within the same capacity limits, and
+without repeating work.
+
+**The unit of verification is a test case against a dependency snapshot.** A
+case's key covers the consumer's own inputs and the resolved revision of every
+dependency it is built against, with toolchain and runner environment as
+before. The repositories on an instance form a versioned dependency graph,
+read from `fpm.toml`, CMake `FetchContent` declarations and, where neither
+exists, a registry like libneo's.
+
+**Consumer cases join the pool.** When `main` of a library moves, every
+consumer case whose key changes with the new library revision becomes a
+candidate, tested at the consumer's current `main` with only that dependency
+moved to the library's new `main`. The scheduler treats these cases like the
+library's own: same priorities, staleness limits, fair share and memory
+admission. The library's project is charged for them, so a widely used library
+cannot crowd out the consumers' own testing. A capacity limit still holds: what
+does not fit waits and grows stale, which the instance shows, instead of
+running anyway.
+
+**No duplicate work.** The key makes repetitions identical, so they run once:
+
+- A consumer case that depends only on library modules the change did not
+  touch keeps its key and is not rerun. fo's closure covers the files a case
+  uses, not the whole library.
+- A run with the library at revision R and the consumer's own run once it pins
+  R have the same key; whichever comes first serves both.
+- Consumers are tested against the newest library `main` only, which covers all
+  library commits since their last run. Bisection over library commits happens
+  only when an outcome changed.
+- External downloads (source archives, data files) are cached by content on
+  the instance, so a test does not depend on a remote server being up, and
+  fetching it is no part of the measured work.
+
+**Outcomes are classified before anyone is blamed.**
+
+| Outcome | Meaning |
+|---|---|
+| PASS | the case passed |
+| REGRESSION | fails with the new library revision, passes with the previous one, all else fixed, reproducibly |
+| BASELINE_BROKEN | fails with the previous library revision too: the consumer or its other dependencies are at fault, not the library |
+| INFRA_ERROR | the run failed for reasons outside the code: a download error, a runner lost or out of memory, a timeout of the platform |
+| FLAKY | passes and fails at the same key |
+| NOT_TESTED | no result at this key yet |
+
+Before a consumer failure is reported against a library, the case reruns with
+the previous library revision in the same environment. Only a failure that
+appears with the new revision alone is a regression of the library; it is then
+bisected over library commits while the consumer and all other dependencies
+stay fixed, and reported to the library change's author. A broken baseline goes
+to the consumer instead; an infrastructure error is retried and reported to the
+instance's operators. For numerical codes the comparison includes the measured
+metrics and golden records, not only pass or fail. A download failure such as
+a server answering 504 is an INFRA_ERROR, never a red library.
+
+**Where consumer tests run in the workflow.**
+
+| Stage | Consumer cases |
+|---|---|
+| Before landing | none by default; for a change to a public module interface (fo sees changed `.mod` files), a few cheap smoke cases of the most affected consumers |
+| After landing | every affected consumer case, by priority |
+| Continuously | stale and flaky cases, audit runs |
+| Stable release | designated consumers pass at the release's snapshot |
+| Reference release (for publications) | a reproducible snapshot with the numerical benchmarks of the designated consumers |
+
+**Consumers outside the instance.** A consumer that stays on GitHub can still be
+tested: the instance mirrors it and runs its cases like those of its own
+repositories. libneo's registry is the first one imported.
 
 ## Tiers
 
@@ -285,6 +363,14 @@ output and JSON reports. It needs:
 4. **The `fo-metric` protocol** collected into its reports.
 5. **A remote result lookup** for trusted passes by key, next to the remote
    build cache.
+
+6. **Dependency overrides:** building and testing a project with one dependency
+   moved to a given revision, all others fixed, with that revision in the key.
+7. **Interface changes:** which public module interfaces a change alters, to
+   choose consumer smoke cases.
+8. **Running as process 1 of a container.** fo fails to start compilers when it
+   is the first process of a container (its process-group setup ends in
+   status 126); until fixed, containers start fo under `--init`.
 
 ## Large CMake codes
 

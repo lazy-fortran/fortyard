@@ -118,6 +118,20 @@ In order:
 - [ ] Groups with subgroups, personal namespaces, roles with downward
       inheritance, redirects after moves; existing mirrors move into a group.
 
+### M4c Releases and production
+
+- [x] Releases stored by the instance itself: upload with checksum, list,
+      download; `release-builder.sh` builds fy incrementally in a Debian toolchain
+      image and the browser files only when their sources changed;
+      `self-update.sh` installs each new release with the atomic switch.
+- [ ] Production at code.tugraz.at/yard (faepkub3, user service, Traefik route
+      file); fortyard and fortui primary there; the development instance
+      becomes staging.
+- [ ] Per-repository deploy keys for pushing landings to GitHub.
+- [ ] Landing checks in the toolchain image with CPU and memory limits.
+- [ ] Release notes drafted by the agent; health watch after a switch with
+      automatic rollback.
+
 ### M4b First background agent
 
 - [ ] One agent on the local model gateway, in a per-task sandbox (fresh
@@ -141,6 +155,10 @@ elsewhere.
 ## Stage B: hosted instance
 
 - M6 Shared build cache and the fo client.
+- M6a Downstream consumers: dependency graph across repositories, consumer
+  cases in the pool keyed by dependency snapshot, classified outcomes
+  (regression only against a passing baseline), libneo's registry imported
+  (see [Testing at scale](doc/testing-at-scale.md#downstream-consumers)).
 - M7 Coverage per commit and on changed lines.
 - M8 Full changes: stacks, versions with interdiff, attachments, review
   ledger, batched merge queue, failover; fx and fo become primary.
@@ -160,7 +178,9 @@ Tracked in fo; needed from M3 on (see
 2. Running a given set of cases from a plan, results with digests.
 3. Per-case cgroups, peak memory, bytes written, memory admission.
 4. `fo-metric` lines in reports.
-5. Remote lookup of trusted passes by key.
+. Dependency overrides: one dependency at a given revision, in the key.
+7. Changed public module interfaces of a change.
+8. Starting compilers when fo is process 1 of a container (fails today).
 
 ## LFortran and WebAssembly
 
