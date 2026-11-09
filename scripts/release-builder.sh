@@ -44,7 +44,10 @@ module fy_build_info
     character(len=*), parameter :: FY_BUILT = '$built'
 end module fy_build_info
 INFO
-    docker run --rm --user "$(id -u):$(id -g)" -v "$home/fy:/work" -v "$home/cache:/cache" \
+    # The tree borrows objects from the mirror, so the mirror is mounted at its
+    # path. --init: fo cannot start compilers as process 1 of a container.
+    docker run --rm --init --user "$(id -u):$(id -g)" -v "$home/fy:/work" -v "$home/cache:/cache" \
+        -v "$mirror:$mirror:ro" \
         -w /work "$FY_TOOLCHAIN" fo install --prefix /work/build/prefix >"$out.log" 2>&1 || {
         tail -30 "$out.log" >&2
         return 1
