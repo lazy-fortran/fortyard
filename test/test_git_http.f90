@@ -140,6 +140,16 @@ program test_git_http
         '-clone fetch -q origin big && '//git//'-C '//work//'-clone show FETCH_HEAD:big | '// &
         'cmp -s - '//work//'/big', exitstat=stat)
     call check(stat == 0, 'a 3 MB push arrives intact and is fetched again')
+    ! A landing must not bring a file over 1 MiB onto main.
+    call execute_command_line(git//'-C '//work//'-clone fetch -q origin main && '//git//'-C '//work// &
+        '-clone checkout -q -B large origin/main && cp '//work//'/big '//work//'-clone/big && '// &
+        git//'-C '//work//'-clone add big && '//git//'-C '//work//'-clone commit -q -m Large && '// &
+        git//'-C '//work//'-clone push -q '//url//' HEAD:large', exitstat=stat)
+    reply = post('/api/v1/repos/demo/land', '{"branch":"large"}')
+    call wait_landing(3, 'failed')
+    reply = get('/api/v1/jobs/3')
+    call check(index(reply, 'Files over 1 MiB') > 0 .and. index(reply, 'big (3000000 bytes)') > 0, &
+        'a landing refuses a file over 1 MiB')
 
     call proc_kill(sup, SIGTERM)
     call proc_wait(sup, stat)
@@ -152,9 +162,8 @@ contains
         character(len=*), intent(in) :: state
         integer :: k
         do k = 1, 300
-            reply = get('/api/v1/repos/demo/landings')
-            if (index(reply, '{"landing":'//itoa(number)//',') > 0 .and. index(reply, &
-                '"state":"'//state//'"') > 0) return
+            reply = get('/api/v1/jobs/'//itoa(number))
+            if (index(reply, '"state":"'//state//'"') > 0) return
             call proc_sleep_ms(100)
         end do
         call check(.false., 'landing '//itoa(number)//' '//state//': '//reply)

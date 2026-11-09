@@ -9,6 +9,19 @@ module fy_land
     public :: land_branch, land_hook_install
 
     integer, parameter :: LOG_BYTES = 65536
+    !! git's empty tree, the base of a first landing.
+    character(len=*), parameter :: EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+    !! Prints each file the landing adds or changes that is over 1 MiB and not
+    !! matched by a pattern in .fortyard/allow-large (one shell pattern a line).
+    character(len=*), parameter :: SIZE_CHECK = 'git diff --name-only --diff-filter=AMR "$1" HEAD '// &
+        '| while IFS= read -r f; do s=$(git cat-file -s "HEAD:$f"); '// &
+        '[ "$s" -gt 1048576 ] || continue; ok=; if [ -f .fortyard/allow-large ]; then '// &
+        'while IFS= read -r p; do case "$f" in $p) ok=1;; esac; done < .fortyard/allow-large; '// &
+        'fi; [ -n "$ok" ] || echo "$f ($s bytes)"; done'
+    !! fo fmt --check on the Fortran files the landing adds or changes.
+    character(len=*), parameter :: FORMAT_CHECK = 'files=$(git diff --name-only '// &
+        '--diff-filter=AMR "$1" HEAD -- "*.f90" "*.F90" "*.f" "*.F"); [ -n "$files" ] || exit 0; '// &
+        '{ [ -f fpm.toml ] || [ -f CMakeLists.txt ]; } || exit 0; fo fmt --check $files 2>&1'
 
 contains
 
@@ -52,6 +65,7 @@ contains
         ! Fixed length: gfortran overflows typed array constructors around
         ! deferred-length strings.
         character(len=1024) :: range, author
+        character(len=40) :: base
         integer :: status, k, n
         logical :: has_main
 
@@ -125,6 +139,23 @@ contains
             '--author='//trim(author), '-F', '.git/LANDING_MSG'])
         if (status /= 0) then
             log = 'The squashed commit could not be made.'//new_line('a')//out
+            return
+        end if
+
+        base = EMPTY_TREE
+        if (has_main) base = 'HEAD~1'
+        ! What local pre-commit hooks check, checked again on the landing commit,
+        ! so nothing that skipped them reaches main.
+        call run([character(len=1024) :: 'sh', '-c', SIZE_CHECK, 'size-check', &
+            base], work)
+        if (status /= 0 .or. len_trim(out) > 0) then
+            log = 'Files over 1 MiB (allow them in .fortyard/allow-large):'//new_line('a')//out
+            return
+        end if
+        call run([character(len=1024) :: 'sh', '-c', FORMAT_CHECK, 'format-check', &
+            base], work)
+        if (status /= 0) then
+            log = 'Changed Fortran files need formatting (run fo fmt):'//new_line('a')//out
             return
         end if
 
