@@ -402,7 +402,7 @@ contains
 
         found = .false.
         call db_prepare(db, "UPDATE landings SET state = 'running' WHERE id = (SELECT min(id)"// &
-            " FROM landings WHERE state = 'queued') RETURNING id, repo, branch, account;", &
+            " FROM landings WHERE state = 'queued') RETURNING id, repo, branch, account, created_at;", &
             st, stat)
         if (stat /= SQLITE_OK) return
         if (stmt_step(st) == SQLITE_ROW) then
@@ -410,6 +410,7 @@ contains
             l%repo = stmt_text(st, 1)
             l%branch = stmt_text(st, 2)
             l%account = stmt_text(st, 3)
+            l%created = stmt_text(st, 4)
             l%state = 'running'
             found = .true.
         end if
