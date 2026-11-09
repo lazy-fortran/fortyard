@@ -39,12 +39,13 @@ contains
             out, stat, 1024)
     end subroutine land_hook_install
 
-    subroutine land_branch(repo, work, name, branch, number, base_url, upstream, commit, log, ok)
-        !! Lands `branch` of the bare repository `repo` (called `name` in URLs) as
-        !! landing `number`, using the scratch directory `work`. On success `commit`
-        !! is the new `main`; `log` tells what happened either way.
-        character(len=*), intent(in) :: repo, work, name, branch, base_url, upstream
-        integer, intent(in) :: number
+    subroutine land_branch(repo, work, name, branch, ident, base_url, upstream, commit, log, ok)
+        !! Lands `branch` of the bare repository `repo` (called `name` in URLs),
+        !! using the scratch directory `work`. `ident` names this landing uniquely
+        !! and goes into the commit as a `Landing:` trailer. The commit is numbered
+        !! after the highest `(#N)` on main. On success `commit` is the new `main`;
+        !! `log` tells what happened either way.
+        character(len=*), intent(in) :: repo, work, name, branch, ident, base_url, upstream
         character(len=:), allocatable, intent(out) :: commit, log
         logical, intent(out) :: ok
         character(len=:), allocatable :: out, subjects, message, num
@@ -57,14 +58,13 @@ contains
         ok = .false.
         commit = ''
         log = ''
-        num = itoa(number)
         call run([character(len=1024) :: 'rm', '-rf', work], '')
         call run([character(len=1024) :: 'git', 'clone', '--quiet', '--shared', repo, work], '')
         if (status /= 0) return
         ! A landing interrupted by a restart runs again; if it already moved main,
-        ! its commit (made by fortyard, numbered like it) is there and it is done.
+        ! its commit (made by fortyard, with its trailer) is there and it is done.
         call git([character(len=1024) :: 'log', '-1', '--format=%H', '--fixed-strings', &
-            '--committer=fortyard@localhost', '--grep= (#'//num//')', 'origin/main'])
+            '--committer=fortyard@localhost', '--grep=Landing: '//ident, 'origin/main'])
         if (status == 0 .and. len_trim(out) >= 40) then
             commit = first_line(out)
             log = 'Landed as '//commit//' before a restart.'
@@ -78,6 +78,7 @@ contains
         end if
         call git([character(len=1024) :: 'rev-parse', '--verify', '--quiet', 'origin/main'])
         has_main = status == 0
+        num = itoa(next_number())
 
         ! One squashed commit on top of main (or the first commit of main).
         if (has_main) then
@@ -114,6 +115,8 @@ contains
         message = message(1:k - 1)//' (#'//num//')'//message(k:)
         if (len(base_url) > 0) message = message//new_line('a')//new_line('a')// &
             'Change: '//base_url//'/'//name//'/-/changes/'//num
+        if (len(base_url) == 0) message = message//new_line('a')
+        message = message//new_line('a')//'Landing: '//ident
         call git([character(len=1024) :: 'log', '--reverse', '--format=%an <%ae>', trim(range)])
         author = first_line(out)
         call write_file(work//'/.git/LANDING_MSG', message//new_line('a'))
@@ -156,6 +159,34 @@ contains
         call run([character(len=1024) :: 'rm', '-rf', work], '')
 
     contains
+
+        integer function next_number() result(m)
+            !! One more than the highest "(#N)" ending a subject on main, so numbers
+            !! continue those of earlier landings and of pull requests before.
+            integer :: pos, e, s, v, ios
+            m = 1
+            if (.not. has_main) return
+            call git([character(len=1024) :: 'log', '--format=%s', 'origin/main'])
+            pos = 1
+            do while (pos <= len(out))
+                e = index(out(pos:), new_line('a'))
+                if (e == 0) e = len(out) - pos + 2
+                e = pos + e - 2
+                if (e - pos >= 3) then
+                    if (out(e:e) == ')') then
+                        s = index(out(pos:e), '(#', back=.true.)
+                        if (s > 0) then
+                            s = pos + s + 1
+                            if (e - 1 >= s .and. verify(out(s:e - 1), '0123456789') == 0) then
+                                read (out(s:e - 1), *, iostat=ios) v
+                                if (ios == 0) m = max(m, v + 1)
+                            end if
+                        end if
+                    end if
+                end if
+                pos = e + 2
+            end do
+        end function next_number
 
         subroutine git(args)
             character(len=*), intent(in) :: args(:)

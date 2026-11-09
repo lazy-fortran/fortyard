@@ -267,7 +267,9 @@ contains
             ! Scratch space of a landing lives in the temporary directory and is
             ! removed when the landing ends, whatever its outcome.
             work = tmp_dir()//'/fy-land-'//itoa(int(l%id))
-            call land_branch(repo_path(l%repo), work, l%repo, l%branch, int(l%id), base, &
+            ! Unique across instances and restarts: number and time of queueing.
+            call land_branch(repo_path(l%repo), work, l%repo, l%branch, &
+                itoa(int(l%id))//'@'//l%created, base, &
                 upstream, commit, log, ok)
             call execute_command_line('rm -rf '''//work//'''')
             if (ok) then
