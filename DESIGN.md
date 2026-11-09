@@ -188,6 +188,16 @@ Each repository has a mode:
 Mirrors of repositories that use Git LFS fetch only the pointer files; runners
 fetch LFS objects from the upstream LFS server when a job needs them.
 
+**Order of moving to primary.** fortyard itself is the first primary
+repository, as soon as fortyard can accept pushes, run CI on them and
+push-mirror to GitHub. It has no outside users, so problems surface on our own
+work first. fx and fo follow once native pull requests and the merge queue
+work; their GitHub repositories stay public mirrors. Other private code
+repositories follow after that. A self-hosted forge must not depend on itself
+for repair: fortyard's GitHub mirror is always current, any clone can build a
+release, and `fy deploy` (see [Releases](#releases-and-deployment)) installs
+it without going through fortyard's CI.
+
 ### CI
 
 A pipeline is derived from the project, not written as YAML:
@@ -336,7 +346,7 @@ permalink.
 
 ### Identity and authorization
 
-- **Authentication** is OpenID Connect against an existing Keycloak realm. The
+- **Authentication** is OpenID Connect against the organization's Keycloak realm. The
   fortyard client can require a Keycloak group, so only intended users complete
   a login.
 - **Accounts** are keyed on the token's subject identifier (`sub`), never on the
@@ -347,6 +357,10 @@ permalink.
 - **Tokens** are scoped (for example `repo:read`, `repo:write`, `ci:run`,
   `cache:write`, `agent:run`), have an expiry, and are stored only as hashes.
   Runner tokens and job tokens are separate kinds.
+- **Bootstrap.** `fy serve --init` creates the data directory and prints one
+  administrator token, once. It works without Keycloak, so a fresh instance is
+  usable before its OIDC client is registered, and it stays as the break-glass
+  credential (rotated with `fy token rotate --bootstrap`).
 - **Accounts deleted or disabled in Keycloak** lose access: a periodic check
   against Keycloak deactivates the fortyard account and revokes its tokens.
   Their commits, reviews and issues remain, attributed to a deleted account.
@@ -371,6 +385,44 @@ permalink.
 - The build cache is not backed up; it is regenerable.
 - A scheduled job restores the latest snapshot into a fresh data directory and
   starts a server on it read-only; a failed restore raises an alert.
+
+### Releases and deployment
+
+fortyard is released continuously from `main`. The goal is a merged change in
+production within minutes, with rollback just as fast.
+
+- **Releasable main.** Every merge leaves `main` releasable. Unfinished features
+  are merged behind server-side feature flags, off by default.
+- **Build once, promote the same artifact.** Each merge to `main` builds the
+  release artifacts once: `fy` for Linux x86-64 and macOS arm64, and the
+  WebAssembly bundle. Each gets a version `YYYY.MM.DD.N`, the commit hash and a
+  SHA-256 checksum, and goes into the server's release store. Promotion moves
+  this exact artifact; nothing is rebuilt between channels.
+- **Channels.** `edge` takes every merge and deploys automatically to the
+  staging instance. `stable` takes an `edge` release that passed its smoke tests
+  on staging and ran there for a set time without errors, and deploys
+  automatically to production. Either channel can be held or pinned to a
+  version.
+- **Atomic switch on one node.** Releases live in `releases/<version>/`; a
+  `current` symlink is switched atomically and the service restarted. systemd
+  socket activation keeps the listening socket open across the restart, so
+  requests wait in the kernel queue for the fraction of a second the restart
+  takes instead of failing. After the switch a health check and smoke tests
+  run; on failure the symlink is switched back and the previous release
+  restarted automatically. The last ten releases are kept.
+- **Database migrations** are forward-only and split into expand and contract
+  steps: a release only adds what it needs, so the previous release still runs
+  on the new schema and rollback needs no down-migration. Removing old columns
+  or tables happens in a later release. Each migration is preceded by a
+  consistent SQLite backup.
+- **Runners and clients.** The server announces the runner version it expects;
+  runners update themselves between jobs. `fy self-update` fetches the client
+  from the server. The API is versioned, so older clients keep working, and the
+  server reports the minimum client version it accepts.
+- **Who builds releases.** Until fortyard hosts itself, CI on GitHub builds
+  them. Afterwards, fortyard's own merge queue builds them and deploys itself.
+  `fy deploy <artifact>` with an administrator token installs a release on a
+  host directly, independent of fortyard's CI, as the break-glass path.
 
 ## Code layout and dependencies
 
@@ -401,25 +453,38 @@ fx deliberately has no dependencies; a dependency-free HTTP server could live
 there, while the libcurl and SQLite bindings stay in fortyard. fortyard builds
 and tests with fo.
 
-## MVP milestones
+## Milestones
 
 Each milestone is usable on its own.
 
-1. **Skeleton.** `fy serve` with HTTP, SQLite, OIDC login, accounts and tokens;
-   `fy login`, `fy whoami`; `fy mcp` exposing `whoami` with a stored token;
-   restic backup and the scheduled restore test.
+**Stage A: MVP inside the WireGuard network**, on one machine, for inspection.
+
+1. **Skeleton.** `fy serve --init` with the bootstrap token; HTTP, SQLite,
+   accounts and scoped tokens; OIDC login once the Keycloak client exists;
+   `fy login`, `fy whoami`, `fy token create`; `fy mcp` exposing `whoami`;
+   restic backup and the scheduled restore test. The release pipeline (`edge`
+   channel, atomic switch, rollback, `fy deploy`) exists from this milestone on.
 2. **CI overlay.** Mirror fx, fo and fortyard from GitHub; `fy runner` on a
    build host; `fo verify` on new heads and pull requests; logs, JUnit and test
    history; commit statuses posted to GitHub.
-3. **Shared build cache** with the trust rules above, and the client in fo.
-4. **Coverage** per commit and on changed lines.
-5. **Web interface** for repositories, CI, tests and coverage.
-6. **Native pull requests and reviews** with stacks, interdiffs and the
-   Fortran-aware views; merge queue; primary and failover modes.
-7. **Agent harness**: review first, then implement, address and watch.
-8. **Issues** with one-way import from GitHub.
-9. **Hosted deployment** behind the reverse proxy; move further code
-   repositories from GitHub to fortyard-primary.
+3. **fortyard primary for itself.** Pushes to fortyard, CI on them,
+   push-mirror to GitHub, and fortyard releasing itself to the `edge` channel.
+4. **Server-rendered HTML views** of repositories, commits, diffs, CI logs and
+   test history.
+
+Inspection gate: the MVP is reviewed before anything is hosted elsewhere.
+
+**Stage B: hosted instance** on a production host behind the reverse proxy,
+with the inspection instance as staging and both release channels active.
+
+5. **Shared build cache** with the trust rules above, and the client in fo.
+6. **Coverage** per commit and on changed lines.
+7. **Native pull requests and reviews** with stacks, interdiffs and the
+   Fortran-aware views; merge queue; failover mode. fx and fo become primary.
+8. **Agent harness**: review first, then implement, address and watch.
+9. **Issues** with one-way import from GitHub.
+10. **WebAssembly application** replacing the HTML views step by step.
+11. **Further code repositories** move from GitHub to fortyard-primary.
 
 ## Open questions
 
