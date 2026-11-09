@@ -58,8 +58,10 @@ federation between forges, public sign-up.
 | AI models | Local models behind an OpenAI-compatible gateway |
 | Agent harness | Written in Fortran inside fortyard |
 | Web interface | Target: full browser application in Fortran compiled to WebAssembly; server-rendered HTML until that exists (see [Web interface](#web-interface)) |
-| Runners | Container hosts for builds; the server host only runs light, fast checks |
+| Runners | Container hosts run all builds and tests; the server host runs none |
 | Backups | restic to a separate filesystem |
+| Implementation languages | Fortran; POSIX shell for scripts; JavaScript only where the browser requires it (the WebAssembly loader). No Python anywhere, including tests and tooling |
+| Development | Everything runs and is tested on one development machine first, with a complete local environment and no production access (see [Development environment](#development-environment)) |
 
 ## Architecture
 
@@ -192,8 +194,11 @@ fetch LFS objects from the upstream LFS server when a job needs them.
 repository, as soon as fortyard can accept pushes, run CI on them and
 push-mirror to GitHub. It has no outside users, so problems surface on our own
 work first. fx and fo follow once native pull requests and the merge queue
-work; their GitHub repositories stay public mirrors. Other private code
-repositories follow after that. A self-hosted forge must not depend on itself
+work; their GitHub repositories stay public mirrors. The first large code is
+MILCA, a plasma multiphysics code of about 240,000 lines of Fortran built with
+CMake, with several hundred commits a month; it is the test of whether fortyard
+keeps a fast-moving large code verified. Other code repositories follow after
+that. A self-hosted forge must not depend on itself
 for repair: fortyard's GitHub mirror is always current, any clone can build a
 release, and `fy deploy` (see [Releases](#releases-and-deployment)) installs
 it without going through fortyard's CI.
@@ -202,21 +207,30 @@ it without going through fortyard's CI.
 
 A pipeline is derived from the project, not written as YAML:
 
-- **Default:** `fo verify` (static checks, build, tests, lint, format check) on
-  the head, plus `fo check --json` for structured results.
+- **Default:** static checks, lint and format check, a build, and the test
+  cases the change affects within a time budget, run through fo with
+  structured JSON results. All other cases are verified afterwards in the pool
+  (see [Testing at scale](doc/testing-at-scale.md)).
 - **Configuration:** an `[extra.fortyard]` table in `fpm.toml` (fpm reserves
   `[extra]` for third-party tools), or `fortyard.toml` for CMake projects.
   It selects compilers for a matrix (gfortran, flang, ifx, LFortran), profiles,
-  coverage thresholds, slow-test tiers and extra commands.
+  coverage thresholds, the pre-merge time budget, maximum staleness per test
+  label and extra commands.
 - **Jobs** run on `fy runner` processes on build hosts. A runner long-polls the
-  server, claims a job with a lease, runs it in an ephemeral container holding
-  only a job-scoped token, streams the log, uploads JUnit, coverage and cache
-  objects, and sends heartbeats. An expired lease returns the job to the queue.
-- **Results** are stored per commit and per test: verdict (including fo's FLAKY
-  verdict for passes after retries), duration and log excerpt. Test history
-  exposes flaky and slowing tests. `fo changed` lists the tests affected by a
-  change, so pull-request runs can test affected code first and everything in
-  the merge queue.
+  server, claims a job with a lease, runs it in a container holding only a
+  job-scoped token, streams the log, uploads JUnit, coverage and cache objects,
+  and sends heartbeats. An expired lease returns the job to the queue. Jobs
+  from users with write access reuse a persistent build tree; untrusted jobs get
+  an ephemeral one.
+- **Results** are stored per test case with the hash of the case's inputs:
+  verdict (including fo's FLAKY verdict for passes after retries), CPU time,
+  peak memory and log excerpt. A trusted pass is reused for every commit with
+  the same input hash.
+- **Scale.** Pull requests and the merge queue run the cases a change affects,
+  up to a time budget; everything else is verified continuously afterwards, and
+  regressions are bisected and reported to their authors. This, together with
+  memory admission, disk-write limits and performance tracking, is described in
+  [Testing at scale](doc/testing-at-scale.md).
 - **Coverage** comes from `fo cover`, which calls
   [fortcov](https://github.com/lazy-fortran/fortcov). fortyard stores the
   report per commit and shows coverage of the changed lines in reviews.
@@ -227,11 +241,10 @@ A pipeline is derived from the project, not written as YAML:
 ### Merge queue
 
 Merges into protected branches go through a queue. The queue builds the
-candidate result of the target branch plus the queued stacks, runs the full
-pipeline on it, and fast-forwards the branch only if it passes. Rules are set
-per repository: required checks, required approvals, and optionally a passing
-run of fo's continuous watcher (Gremlin, which rebuilds and retests on every
-change) on the head. The queue applies only to fortyard-primary repositories;
+candidate result of the target branch plus the queued stacks, runs the
+pre-merge tier on it (affected cases within the budget), and fast-forwards the
+branch only if it passes. Rules are set
+per repository: required checks and required approvals. The queue applies only to fortyard-primary repositories;
 in overlay mode the merge happens upstream and fortyard provides a required
 status.
 
@@ -288,7 +301,9 @@ Task kinds:
   surrounding code and callers; or additionally building and testing the
   changed path;
 - `address` review feedback on an existing stack;
-- `watch`: alternate review and address until approval or a pass limit.
+- `watch`: alternate review and address until approval or a pass limit;
+- `fix-regression`: repair a regression that fortyard attributed to a change
+  already merged, as a new stack.
 
 Rules:
 
@@ -368,8 +383,9 @@ permalink.
 ### Security
 
 - The MVP listens only on the WireGuard interface.
-- Untrusted code (pull requests, agent tasks) runs only in ephemeral containers
-  on runner hosts, never on the server host.
+- Code from contributors without write access and agent sandboxes run only in
+  ephemeral containers on runner hosts. The server host never runs builds or
+  tests.
 - Request parsing in the server is bounds-checked and limited in size.
   Runtime checks stay enabled in the release build of the parsing modules.
 - Secrets never enter job environments for changes from contributors without
@@ -385,6 +401,27 @@ permalink.
 - The build cache is not backed up; it is regenerable.
 - A scheduled job restores the latest snapshot into a fresh data directory and
   starts a server on it read-only; a failed restore raises an alert.
+
+### Development environment
+
+Every part of fortyard can be built, run and tested on one development
+machine, without production systems or external services:
+
+- `scripts/dev-up.sh` starts a complete instance on the loopback or WireGuard
+  address with its own data directory: `fy serve`, one `fy runner` with a small
+  memory and CPU budget, and a local Keycloak container for OIDC.
+  `scripts/dev-down.sh` stops it; deleting the data directory resets it.
+- Upstream forges are simulated: local bare repositories serve as GitHub and
+  GitLab remotes, and `fy` has a stub mode that answers the parts of the
+  GitHub API fortyard uses (statuses, pull requests), so mirroring and status
+  reporting are tested without network access.
+- The model gateway is simulated by a stub that replays recorded responses, so
+  the agent harness is tested deterministically and without models.
+- The test suite of fortyard itself follows
+  [Testing at scale](doc/testing-at-scale.md): fast focused tests in the edit
+  loop, slower end-to-end tests in the pool.
+- All tooling is Fortran or POSIX shell. Nothing in the repository requires
+  Python.
 
 ### Releases and deployment
 
