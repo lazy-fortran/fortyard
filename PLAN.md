@@ -132,6 +132,16 @@ In order:
 - [ ] Release notes drafted by the agent; health watch after a switch with
       automatic rollback.
 
+### M4d Safety of the running instance
+
+- [ ] Nightly consistent database snapshot before the institute's backup, and a
+      restore test from that backup.
+- [ ] Format and repository-hygiene checks in every landing.
+- [ ] Landing checks in a runner container of their own, with their own limits
+      (the sandbox agents use later); `fy test BRANCH` on the same runner.
+- [ ] fo published as a Debian release in the instance's store, so the toolchain
+      image builds in seconds.
+
 ### M4b First background agent
 
 - [ ] One agent on the local model gateway, in a per-task sandbox (fresh

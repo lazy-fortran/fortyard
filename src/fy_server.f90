@@ -28,7 +28,7 @@ module fy_server
         store_repo_add, store_repo_list, store_repo_fetched, store_repo_set_mode, landing_t, &
         store_landing_add, store_landing_next, store_landing_requeue, store_landing_finish, &
         store_landing_list, release_t, store_release_add, store_release_ready, store_release_list, &
-        store_jobs, store_job, store_job_counts, store_jobs_state
+        store_jobs, store_job, store_job_counts, store_jobs_state, store_snapshot
     use fy_sqlite, only: db_close
     implicit none
     private
@@ -182,7 +182,7 @@ contains
         type(repo_info_t), allocatable :: repos(:)
         character(len=64), allocatable :: names(:)
         integer(int64), allocatable :: last(:)
-        integer(int64) :: now, rate
+        integer(int64) :: now, rate, last_snapshot = 0
         integer :: stat, i, k, status
         logical :: exists
 
@@ -224,6 +224,16 @@ contains
                     end if
                 end do
                 call db_close(db)
+            end if
+            ! A consistent copy of the database for the host's file backup, hourly.
+            call system_clock(now, rate)
+            if (now - last_snapshot >= 3600_int64 * rate .or. last_snapshot == 0) then
+                call store_open(db_path, db, stat)
+                if (stat == 0) then
+                    call store_snapshot(db, repos_dir//'/../fortyard-snapshot.db', stat)
+                    call db_close(db)
+                end if
+                last_snapshot = now
             end if
             call proc_sleep_ms(min(10000, 1000 * mirror_interval))
         end do

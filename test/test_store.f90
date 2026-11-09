@@ -1,7 +1,8 @@
 program test_store
     use fy_sqlite, only: db_t, db_close, db_exec
     use fy_store, only: store_open, store_bootstrap, store_token_lookup, &
-        store_token_create, store_schema_version, token_identity_t, SCHEMA_VERSION
+        store_token_create, store_schema_version, token_identity_t, SCHEMA_VERSION, &
+        store_snapshot
     implicit none
 
     character(len=*), parameter :: path = 'build/test_store.db'
@@ -10,7 +11,7 @@ program test_store
     character(len=:), allocatable :: admin, second, again
     integer :: stat
 
-    call execute_command_line('rm -f '//path//' '//path//'-wal '//path//'-shm')
+    call execute_command_line('rm -f '//path//' '//path//'-wal '//path//'-shm'//' '//path//'.snap')
     call store_open(path, db, stat)
     call check(stat == 0, 'store opens and migrates')
     call check(store_schema_version(db) == SCHEMA_VERSION, 'schema at current version')
@@ -43,10 +44,18 @@ program test_store
     call store_token_lookup(db, admin, who)
     call check(.not. who%found, 'expired token rejected')
 
+    ! A snapshot taken while the store is open is a complete database.
+    call store_snapshot(db, path//'.snap', stat)
+    call check(stat == 0, 'snapshot written')
     call db_close(db)
     call store_open(path, db, stat)
     call check(stat == 0 .and. store_schema_version(db) == SCHEMA_VERSION, &
         'reopening an existing store is a no-op migration')
+    call db_close(db)
+    call store_open(path//'.snap', db, stat)
+    call store_token_lookup(db, second, who)
+    call check(stat == 0 .and. store_schema_version(db) == SCHEMA_VERSION .and. &
+        .not. who%found, 'the snapshot holds the database as it was')
     call db_close(db)
 
 contains

@@ -253,6 +253,42 @@ before merge (see [Workflow](doc/workflow.md#the-merge-queue)). The queue applie
 in overlay mode the merge happens upstream and fortyard provides a required
 status.
 
+### fo and fy
+
+fo knows the project; fy knows the forge. Neither duplicates the other.
+
+| | fo (build and test engine) | fy (forge: server, client, runner) |
+|---|---|---|
+| Knows | modules and their graph, how to build, which tests exist and which a change affects, result keys, formatting, lint | repositories, branches, landings, changes, jobs, people, permissions, schedules, agents |
+| Runs | everywhere: developer machine, runner, agent sandbox; works offline | the server; `fy` on clients and runners |
+| State | local caches only | the database, the queue, trusted results |
+
+- **fy calls fo as a program through a versioned JSON contract** and never
+  parses Fortran or CMake itself: `fo test --plan --json` (cases with key,
+  cost, labels and properties, without building), running a given set of cases
+  with results (key, verdict, time, memory, metrics), `fo fmt --check`,
+  `fo changed --json`. The fo version is part of every result key.
+- **fo uses two optional HTTP services of the instance**, the shared build cache
+  and the trusted-result lookup ("did this key pass?"), and otherwise knows
+  nothing of landings or changes. Without a server it works as before.
+- **One login.** `fy login` stores the instance's address and token where fo
+  reads them as well.
+- **Where and when is fy's, how is fo's.** Scheduling, budgets, sandbox and
+  gates belong to fortyard; fo receives "run these cases with these limits" and
+  reports what happened.
+- **People and agents use both:** fo for the edit loop (`fo watch`,
+  `fo test --only-changed`, Gremlin), fy for everything that leaves the machine
+  (`fy push`, `fy test BRANCH`, `fy land`, `fy change`). Agents see the same
+  split through the two MCP servers.
+
+**Local and remote tests.** Local runs are for speed and are never trusted:
+only the landing check (on exactly the commit that becomes `main`) and the pool
+decide. Remote results help locally, because fo skips cases whose key already
+passed on the instance. `fy test BRANCH` runs the affected cases of a pushed
+branch on a runner and streams the results back, so testing needs no local
+toolchain and no local CPU. Local pre-commit hooks keep only the fast checks
+that the landing repeats (format, repository hygiene).
+
 ### Shared build cache
 
 fo already caches compilation results by content: the key is a SHA-256 over

@@ -9,7 +9,7 @@ module fy_store
     implicit none
     private
 
-    public :: store_open, store_migrate, store_schema_version
+    public :: store_open, store_migrate, store_schema_version, store_snapshot
     public :: store_bootstrap, store_token_lookup, store_token_create
     public :: store_token_list, store_token_revoke, store_token_revoke_hash
     public :: token_identity_t, token_info_t, random_token
@@ -74,6 +74,24 @@ contains
         if (stat /= SQLITE_OK) return
         call store_migrate(db, stat)
     end subroutine store_open
+
+    subroutine store_snapshot(db, path, stat)
+        !! A consistent copy of the database at `path`, written while the server
+        !! runs (VACUUM INTO), for file-level backups.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: path
+        integer, intent(out) :: stat
+        integer :: ignored
+
+        if (index(path, "'") > 0) then
+            stat = 1
+            return
+        end if
+        call execute_command_line('rm -f '''//path//'.new''', exitstat=ignored)
+        call db_exec(db, "VACUUM INTO '"//path//".new';", stat)
+        if (stat /= SQLITE_OK) return
+        call execute_command_line('mv -f '''//path//'.new'' '''//path//'''', exitstat=stat)
+    end subroutine store_snapshot
 
     subroutine store_migrate(db, stat)
         !! Forward-only, additive migrations, so the previous release still runs.
