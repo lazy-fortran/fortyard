@@ -71,7 +71,7 @@ INFO
         echo "$head" > "$home/web.commit"
     fi
     cp -r "$home/web.out" "$out/web"
-    for f in release.sh deploy.sh edge-update.sh self-update.sh; do
+    for f in release.sh deploy.sh edge-update.sh self-update.sh start.sh; do
         git -C "$mirror" show "$head:scripts/$f" > "$out/scripts/$f" 2>/dev/null && chmod 755 "$out/scripts/$f"
     done
     (cd "$out" && sha256sum fy > fy.sha256 && sha256sum web/* > web.sha256)

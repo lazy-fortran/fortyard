@@ -172,7 +172,8 @@ contains
         end subroutine run
 
         subroutine check(code)
-            !! fo test for an fpm project, else an executable .fortyard/check;
+            !! fo build and fo test for an fpm project (applications built, so tests
+            !! may run them), else an executable .fortyard/check;
             !! under a memory cap when systemd can give one.
             integer, intent(out) :: code
             character(len=1024), allocatable :: cmd(:)
@@ -182,7 +183,7 @@ contains
 
             inquire (file=work//'/fpm.toml', exist=exists)
             if (exists) then
-                cmd = [character(len=1024) :: 'fo', 'test']
+                cmd = [character(len=1024) :: 'sh', '-c', 'fo build && fo test']
             else
                 inquire (file=work//'/.fortyard/check', exist=exists)
                 if (.not. exists) then
