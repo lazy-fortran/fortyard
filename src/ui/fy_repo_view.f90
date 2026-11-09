@@ -10,7 +10,8 @@ module fy_repo_view
     implicit none
     private
 
-    public :: repo_view_open, repo_view_compose, repo_view_receive
+    public :: repo_view_open, repo_view_compose, repo_view_receive, repo_view_load, &
+        repo_view_reset
 
     type :: line_t
         character(len=:), allocatable :: s
@@ -54,6 +55,28 @@ contains
         call fetch_start(repos_req, 'GET', '/api/v1/repos')
     end subroutine repo_view_open
 
+    subroutine repo_view_reset()
+        !! Forgets everything: the server renders pages for different people.
+        loaded = .false.
+        if (allocated(repos)) deallocate (repos)
+        if (allocated(entries)) deallocate (entries)
+        if (allocated(commits)) deallocate (commits)
+        if (allocated(file_lines)) deallocate (file_lines)
+        if (allocated(diff_lines)) deallocate (diff_lines)
+        sub_tab = 1
+        file_cut = .false.
+        diff_cut = .false.
+        call init()
+    end subroutine repo_view_reset
+
+    subroutine repo_view_load(json)
+        !! Shows the repository list from a response already at hand.
+        character(len=*), intent(in) :: json
+        call init()
+        repo = ''
+        call parse_repos(json)
+    end subroutine repo_view_load
+
     subroutine init()
         if (loaded) return
         loaded = .true.
@@ -95,8 +118,8 @@ contains
             if (button("open", repos(k)%name, size=CTRL, enabled=repos(k)%ready, &
                 width=200.0, ellipsis=.true.)) call open_repo(repos(k)%name)
             call text(state_of(repos(k)), size=SMALL, style=UI_CAPTION, width=150.0)
-            call text(repos(k)%upstream, size=SMALL, style=UI_CAPTION, &
-                width=max(0.0, page_w - 350.0 - 2.0 * GAP), ellipsis=.true.)
+            call text(repos(k)%upstream, size=SMALL, style=UI_CAPTION, width=UI_FILL, &
+                ellipsis=.true.)
             call row_end()
         end do
         call column_end()
@@ -109,7 +132,7 @@ contains
             size=CTRL)) continue
         if (text_input("newupstream", new_upstream, &
             placeholder="git@github.com:org/repo.git or https://...", submitted=submitted, &
-            width=max(120.0, min(460.0, page_w - 160.0 - 100.0 - 2.0 * GAP)), size=CTRL)) continue
+            width=UI_FILL, size=CTRL)) continue
         if (button("add", "Add", size=CTRL) .or. submitted) then
             if (len_trim(new_repo) > 0 .and. len_trim(new_upstream) > 0) then
                 call fetch_start(add_req, 'POST', '/api/v1/repos', '{"name":"'// &
@@ -229,8 +252,7 @@ contains
         do k = 1, size(file_lines)
             call row_begin(10.0, id="l"//ui_str(k))
             call text(ui_str(k), style=UI_CODE, size=CODE, width=gutter, tone=UI_TONE_MUTED)
-            call text(file_lines(k)%s, style=UI_CODE, size=CODE, &
-                width=max(0.0, page_w - gutter - 10.0))
+            call text(file_lines(k)%s, style=UI_CODE, size=CODE, width=UI_FILL)
             call row_end()
         end do
         call column_end()
@@ -242,10 +264,6 @@ contains
         real, intent(in) :: page_w
         logical, intent(in) :: narrow
         integer :: k
-        real :: subject_w
-
-        subject_w = page_w - 90.0 - GAP
-        if (.not. narrow) subject_w = subject_w - 180.0 - 110.0 - 2.0 * GAP
         call column_begin(2.0)
         do k = 1, size(commits)
             call row_begin(GAP, id="c"//ui_str(k), height=ROW_H)
@@ -255,7 +273,7 @@ contains
                 call fetch_start(commit_req, 'GET', '/api/v1/repos/'//repo//'/commits/'// &
                     commit_id)
             end if
-            call text(commits(k)%subject, size=BODY, width=max(60.0, subject_w), ellipsis=.true.)
+            call text(commits(k)%subject, size=BODY, width=UI_FILL, ellipsis=.true.)
             if (.not. narrow) then
                 call text(commits(k)%author, size=SMALL, style=UI_CAPTION, width=180.0, &
                     ellipsis=.true.)
@@ -275,7 +293,7 @@ contains
             commit_id = ''
             return
         end if
-        call text(commit_head, size=BODY, width=page_w, ellipsis=.true.)
+        call text(commit_head, size=BODY, width=UI_FILL, ellipsis=.true.)
         call text(commit_id, style=UI_CODE, size=SMALL, tone=UI_TONE_MUTED)
         call column_begin(0.0)
         do k = 1, size(diff_lines)
@@ -293,7 +311,7 @@ contains
                         tone = UI_TONE_ACCENT
                     end if
                 end if
-                call text(s, style=UI_CODE, size=CODE, width=page_w, tone=tone, &
+                call text(s, style=UI_CODE, size=CODE, width=UI_FILL, tone=tone, &
                     id="d"//ui_str(k))
             end associate
         end do

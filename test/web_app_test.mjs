@@ -76,15 +76,27 @@ try {
   await send('Runtime.enable');
   await send('Page.enable');
   await send('Network.enable');
+  // Marks the server's elements once the HTML is parsed, before the
+  // WebAssembly composes its first frame.
+  await send('Page.addScriptToEvaluateOnNewDocument', { source: `document.addEventListener('DOMContentLoaded', () => {
+    document.querySelectorAll('[data-key]').forEach((e) => { e.__ssr = 1; });
+    window.__ssrCount = document.querySelectorAll('[data-key]').length;
+    window.__ssrTexts = [...document.querySelectorAll('.fui')].map((e) => e.textContent); });` });
+  const adopted = async () => {
+    await until(`window.Module && typeof Module._fortui_web_step === 'function'`, 'WebAssembly running');
+    await sleep(500);
+    return evaluate(`(() => { const all = [...document.querySelectorAll('[data-key]')];
+      return all.length === window.__ssrCount && all.every((e) => e.__ssr === 1); })()`);
+  };
   await send('Page.navigate', { url });
-  await until(`!!document.querySelector('[data-id="token"]')`, 'sign-in form');
-  check(true, 'the application loads and asks to sign in');
+  await until(`window.__ssrCount > 0`, 'page parsed');
+  check(await evaluate(`!!document.querySelector('[data-id="token"]')`), 'the server sends the sign-in form in the page');
+  check(await adopted(), 'the WebAssembly adopts the page from the server');
 
-  // Pasted, with the line break a terminal copy adds, as people sign in.
+  // Pasted, as people sign in.
   await click('[data-id="token"]');
-  await evaluate(`(() => { const dt = new DataTransfer(); dt.setData('text/plain', ${JSON.stringify(admin + '\n')});
-    document.querySelector('[data-id="token"]').dispatchEvent(new ClipboardEvent('paste',
-      { clipboardData: dt, bubbles: true, cancelable: true })); })()`);
+  // The field is native: the browser inserts the text as on paste.
+  await send('Input.insertText', { text: admin });
   await until(`document.querySelector('[data-id="token"]').value === ${JSON.stringify(admin)}`, 'pasted token');
   check(true, 'a pasted token stays in the field');
   await click('[data-id="signin"]');
@@ -140,6 +152,13 @@ try {
   await click('[data-id$="/id#1"]');
   await until(`[...document.querySelectorAll('[data-tone="1"]')].some((e) => e.textContent === '+program hello')`, 'diff');
   check(true, 'the commit shows its diff with added lines marked');
+
+  // A signed-in reload: the server renders account and repositories.
+  await send('Page.navigate', { url });
+  await until(`window.__ssrCount > 0`, 'page parsed');
+  check(await evaluate(`window.__ssrTexts.includes('admin') && window.__ssrTexts.includes('demo')`),
+    'a reload shows account and repositories straight from the server');
+  check(await adopted(), 'and the WebAssembly adopts that page too');
 
   if (shot) {
     const png = await send('Page.captureScreenshot', { format: 'png' });

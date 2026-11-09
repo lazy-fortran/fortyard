@@ -68,7 +68,13 @@ first consumer of fortui's browser backend, which is built in fortui itself.
       session cookie; requests that change state with it must be JSON.
 - [x] Screens: server status, account, tokens (list, create, revoke), checked
       end to end in headless Chromium (`test/web_app_test.mjs`).
-- [ ] Visual design of the application; layout beyond plain rows.
+- [x] Pages show before the WebAssembly loads: the server composes the first
+      frame with the application's own Fortran code (fortui headless and
+      `fortui_html`) and embeds the data it used; the browser adopts that page.
+      Assets have content-hashed names and are cached for good; the browser
+      lays out the page natively (fortui DOM layout, no Asyncify).
+- [ ] Visual design of the application.
+- [ ] Virtualized views of long files and diffs.
 - [ ] Canvas surface in fortui for diffs and plots (needed from M5 on).
 
 ### M3 CI overlay

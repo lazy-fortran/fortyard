@@ -6,6 +6,10 @@ module fy_server
     use fy_build_info, only: FY_VERSION, FY_COMMIT, FY_BUILT
     use fy_http, only: http_request_t, http_read_request, http_send_response, &
         http_bearer_token, http_cookie, http_query_param
+    use fortui, only: ui_init, ui_frame_begin, ui_present, ui_shutdown
+    use fortui_backend_headless, only: headless_backend_t
+    use fortui_html, only: ui_frame_html
+    use fy_ui_app, only: app_start, app_compose
     use fy_repo, only: repo_name_ok, repo_ref_ok, repo_path_ok, repo_log_json, repo_tree_json, &
         repo_blob, repo_commit_json, repo_refs_json, repo_clone, repo_fetch
     use fy_posix, only: tcp_accept, sock_close, sock_set_timeouts
@@ -205,16 +209,7 @@ contains
                 return
             end if
             if (.not. method_is(req, 'GET', res)) return
-            call store_repo_list(db, repos, stat)
-            res%body = '{"repos":['
-            do i = 1, size(repos)
-                inquire (file=repo_path(repos(i)%name)//'/HEAD', exist=exists)
-                if (i > 1) res%body = res%body//','
-                res%body = res%body//'{"name":"'//repos(i)%name//'","upstream":"'// &
-                    json_escape_string(repos(i)%upstream)//'","fetched":"'// &
-                    repos(i)%fetched_at//'","ready":'//json_bool(exists)//'}'
-            end do
-            res%body = res%body//']}'
+            res%body = repos_json(db)
             return
         end if
 
@@ -345,7 +340,8 @@ contains
             res%body = 'ok '//FY_VERSION//' '//FY_COMMIT//new_line('a')
         case ('/', '/index.html')
             if (.not. method_is(req, 'GET', res)) return
-            call static_file(req, 'index.html', res)
+            res%code = 404
+            if (allocated(web_dir)) call render_page(req, db, res)
             if (res%code == 404) then
                 res%code = 200
                 res%ctype = 'text/html; charset=utf-8'
@@ -565,6 +561,105 @@ contains
         res%body = '{"closed":true}'
     end subroutine close_session
 
+    function repos_json(db) result(s)
+        !! The mirrored repositories as GET /api/v1/repos returns them.
+        type(db_t), intent(in) :: db
+        character(len=:), allocatable :: s
+        type(repo_info_t), allocatable :: repos(:)
+        integer :: i, stat
+        logical :: exists
+
+        call store_repo_list(db, repos, stat)
+        s = '{"repos":['
+        do i = 1, size(repos)
+            inquire (file=repo_path(repos(i)%name)//'/HEAD', exist=exists)
+            if (i > 1) s = s//','
+            s = s//'{"name":"'//repos(i)%name//'","upstream":"'// &
+                json_escape_string(repos(i)%upstream)//'","fetched":"'// &
+                repos(i)%fetched_at//'","ready":'//json_bool(exists)//'}'
+        end do
+        s = s//']}'
+    end function repos_json
+
+    subroutine render_page(req, db, res)
+        !! The web application's page with its first frame already in it,
+        !! composed here by the same Fortran code the browser runs, and the data
+        !! that frame was made from, so the WebAssembly continues without asking
+        !! again. Personal, so never cached.
+        type(http_request_t), intent(in) :: req
+        type(db_t), intent(in) :: db
+        type(response_t), intent(inout) :: res
+        type(token_identity_t) :: who
+        character(len=:), allocatable :: template, version, whoami, repos, frame, data
+        integer :: at
+        logical :: ok
+
+        call read_file(web_dir//'/index.html', template, ok)
+        if (.not. ok) return
+        version = version_json()
+        whoami = ''
+        repos = ''
+        call store_token_lookup(db, http_cookie(req, SESSION_COOKIE), who)
+        if (who%found) then
+            whoami = '{"account":"'//json_escape_string(who%account)// &
+                '","token":"'//json_escape_string(who%token_name)// &
+                '","scopes":"'//json_escape_string(who%scopes)//'"}'
+            repos = repos_json(db)
+        end if
+        ! fortui keeps one composition at a time.
+        !$omp critical (fortui_render)
+        frame = first_frame(version, whoami, repos)
+        !$omp end critical (fortui_render)
+        data = json_script('fy-version', version)
+        if (len(whoami) > 0) data = data//json_script('fy-whoami', whoami)// &
+            json_script('fy-repos', repos)
+        at = index(template, '<div id="app"></div>')
+        if (at == 0) return
+        template = template(1:at - 1)//'<div id="app">'//frame//'</div>'// &
+            template(at + len('<div id="app"></div>'):)
+        at = index(template, '<!--fy-data-->')
+        if (at > 0) template = template(1:at - 1)//data//template(at + len('<!--fy-data-->'):)
+        res%code = 200
+        res%ctype = 'text/html; charset=utf-8'
+        res%cache = 'no-store'
+        res%body = template
+    end subroutine render_page
+
+    function first_frame(version, whoami, repos) result(html)
+        character(len=*), intent(in) :: version, whoami, repos
+        character(len=:), allocatable :: html
+        integer :: stat
+
+        call ui_init(headless_backend_t(), 1000, 800, "fortyard", stat=stat)
+        html = ''
+        if (stat /= 0) return
+        call app_start(version, whoami, repos)
+        call ui_frame_begin()
+        call app_compose()
+        call ui_present()
+        html = ui_frame_html()
+        call ui_shutdown()
+    end function first_frame
+
+    function json_script(id, json) result(s)
+        !! JSON in a page; '</' would end the script element early.
+        character(len=*), intent(in) :: id, json
+        character(len=:), allocatable :: s
+        integer :: k
+
+        s = '<script type="application/json" id="'//id//'">'
+        do k = 1, len(json)
+            if (json(k:k) == '/' .and. k > 1) then
+                if (json(k - 1:k - 1) == '<') then
+                    s = s//'\/'
+                    cycle
+                end if
+            end if
+            s = s//json(k:k)
+        end do
+        s = s//'</script>'
+    end function json_script
+
     subroutine static_file(req, name, res)
         !! A file of the web application from the release's web directory. Names
         !! are plain file names, so no path leaves that directory. A gzip copy
@@ -596,6 +691,8 @@ contains
         end if
         res%code = 200
         res%cache = 'no-cache'
+        ! A name with a content hash never changes: browsers keep it for good.
+        if (hashed(name)) res%cache = 'public, max-age=31536000, immutable'
         res%headers = res%headers//'Vary: Accept-Encoding'//CRLF
         if (len(etag) > 0) then
             res%headers = res%headers//'ETag: '//etag//CRLF
@@ -641,6 +738,18 @@ contains
             s = 'false'
         end if
     end function json_bool
+
+    pure logical function hashed(name)
+        !! NAME.<12 hex digits>.EXT, as the web build names its assets.
+        character(len=*), intent(in) :: name
+        integer :: dot
+
+        hashed = .false.
+        dot = index(name, '.')
+        if (dot == 0 .or. dot + 13 > len(name)) return
+        hashed = verify(name(dot + 1:dot + 12), '0123456789abcdef') == 0 .and. &
+            name(dot + 13:dot + 13) == '.'
+    end function hashed
 
     pure logical function ends_with(s, suffix)
         character(len=*), intent(in) :: s, suffix

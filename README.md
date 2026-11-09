@@ -25,10 +25,12 @@ build/fo/bin/fy whoami
 scripts/dev-down.sh
 ```
 
-The web application is Fortran compiled to WebAssembly and drawn with fortui:
+The web application is Fortran compiled to WebAssembly and drawn with fortui.
+The server composes the first frame of each page with the same Fortran code and
+sends it as HTML, so pages show before the WebAssembly loads:
 
 ```sh
-scripts/build-web.sh . build/web               # fortui at the commit in web/fortui.rev
+scripts/build-web.sh . build/web               # fortui at the version fpm.toml pins
 build/fo/bin/fy serve --data DIR --web build/web
 node test/web_app_test.mjs build/fo/bin/fy build/web
 ```

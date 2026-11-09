@@ -33,6 +33,17 @@ addToLibrary({
     return id;
   },
 
+  // The text of <script type="application/json" id=NAME>: its byte length,
+  // copied into buf when it fits in cap.
+  fy_page_data__deps: ['$UTF8ToString'],
+  fy_page_data: function (namePtr, nameLen, bufPtr, cap) {
+    var el = document.getElementById(UTF8ToString(namePtr, nameLen));
+    if (!el) return 0;
+    var bytes = new TextEncoder().encode(el.textContent);
+    if (bytes.length <= cap) HEAPU8.set(bytes, bufPtr);
+    return bytes.length;
+  },
+
   // -1 while pending, else the HTTP status (0 when the server was not reached).
   fy_fetch_status__deps: ['$FY'],
   fy_fetch_status: function (id) {

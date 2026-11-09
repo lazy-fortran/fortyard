@@ -12,7 +12,7 @@ program test_server_roundtrip
     character(len=2), parameter :: CRLF = achar(13)//achar(10)
     type(db_t) :: db
     character(len=:), allocatable :: token, reply, cookie
-    integer :: lfd, port, stat, k
+    integer :: lfd, port, stat, k, u
 
     call execute_command_line('rm -f '//path//' '//path//'-wal '//path//'-shm')
     call store_open(path, db, stat)
@@ -86,11 +86,26 @@ program test_server_roundtrip
 
     reply = exchange('GET / HTTP/1.1'//CRLF//CRLF)
     call check(index(reply, '<h1>fortyard</h1>') > 0, 'status page at / without a web application')
-    call execute_command_line('rm -rf build/test_web && mkdir -p build/test_web && printf app > build/test_web/index.html' // &
+    call execute_command_line('rm -rf build/test_web && mkdir -p build/test_web' // &
         ' && printf code > build/test_web/fy_app.wasm')
+    open (newunit=u, file='build/test_web/index.html', status='replace', action='write')
+    write (u, '(a)') '<p>page</p><div id="app"></div><!--fy-data-->'
+    close (u)
     call server_set_web_dir('build/test_web')
     reply = exchange('GET / HTTP/1.1'//CRLF//CRLF)
-    call check(index(reply, CRLF//CRLF//'app') > 0, 'web application at /')
+    call check(index(reply, '<p>page</p><div id="app"><div class="fui-root') > 0 .and. &
+        index(reply, 'data-id="token"') > 0, 'the page carries its first frame: sign-in')
+    call check(index(reply, 'id="fy-version"') > 0 .and. index(reply, 'fy-whoami') == 0 &
+        .and. index(reply, 'Cache-Control: no-store') > 0, 'anonymous page: version only, not cached')
+    reply = exchange('POST /api/v1/session HTTP/1.1'//CRLF// &
+        'Content-Type: application/json'//CRLF//'Content-Length: 79'//CRLF//CRLF// &
+        '{"token":"'//token//'"}')
+    k = index(reply, 'Set-Cookie: fy_session=')
+    cookie = reply(k + 12:k + 12 + len('fy_session=') + 67 - 1)
+    reply = exchange('GET / HTTP/1.1'//CRLF//'Cookie: '//cookie//CRLF//CRLF)
+    call check(index(reply, 'id="fy-whoami">{"account":"admin"') > 0 .and. &
+        index(reply, 'id="fy-repos">{"repos":[]}') > 0 .and. index(reply, 'data-id="signout"') > 0, &
+        'signed-in page: account, repositories and their first frame')
     reply = exchange('GET /app/fy_app.wasm HTTP/1.1'//CRLF//CRLF)
     call check(index(reply, 'application/wasm') > 0 .and. index(reply, CRLF//CRLF//'code') > 0, &
         'WebAssembly served with its type')
