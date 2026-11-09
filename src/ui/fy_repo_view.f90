@@ -32,6 +32,8 @@ module fy_repo_view
 
     type :: repo_t
         character(len=:), allocatable :: name, upstream, fetched
+        !! "primary" (takes pushes here, pushed on to upstream) or "mirror".
+        character(len=:), allocatable :: mode
         logical :: ready = .false.
     end type repo_t
 
@@ -270,7 +272,8 @@ contains
                 else
                     call text(repos(k)%name, size=16.0, style=UI_HEADING, tone=UI_TONE_MUTED)
                 end if
-                call text(repos(k)%upstream, size=SMALL, tone=UI_TONE_MUTED, width=UI_FILL)
+                if (len(repos(k)%upstream) > 0) call text(origin_of(repos(k)), size=SMALL, &
+                    tone=UI_TONE_MUTED, width=UI_FILL)
                 call text(state_of(repos(k)), size=SMALL, tone=UI_TONE_MUTED)
                 call column_end()
                 call row_end()
@@ -307,7 +310,9 @@ contains
     function state_of(r) result(s)
         type(repo_t), intent(in) :: r
         character(len=:), allocatable :: s
-        if (r%ready .and. len(r%fetched) == 0) then
+        if (r%mode == 'primary') then
+            s = "Hosted here"
+        else if (r%ready .and. len(r%fetched) == 0) then
             s = "Mirrored"
         else if (r%ready) then
             s = "Updated "//ago(r%fetched)
@@ -316,13 +321,24 @@ contains
         end if
     end function state_of
 
+    function origin_of(r) result(s)
+        !! Where a repository's history comes from or goes to.
+        type(repo_t), intent(in) :: r
+        character(len=:), allocatable :: s
+        if (r%mode == 'primary') then
+            s = "Pushed on to "//r%upstream
+        else
+            s = "Mirror of "//r%upstream
+        end if
+    end function origin_of
+
     function upstream_of(name) result(s)
         character(len=*), intent(in) :: name
         character(len=:), allocatable :: s
         integer :: k
         s = ''
         do k = 1, size(repos)
-            if (repos(k)%name == name) s = repos(k)%upstream
+            if (repos(k)%name == name .and. len(repos(k)%upstream) > 0) s = origin_of(repos(k))
         end do
     end function upstream_of
 
@@ -392,12 +408,13 @@ contains
             call text(basename(file), size=HEADING, style=UI_HEADING)
         end if
         call row_end()
-        if (len(dir) == 0 .and. len(file) == 0 .and. len(upstream_of(repo)) > 0) then
+        if (len(dir) == 0 .and. len(file) == 0) then
             call text("", width=UI_FILL)
             if (copied) then
                 if (button("clone", "Copied", height=36.0, size=BODY)) continue
             else if (button("clone", "Copy clone URL", height=36.0, size=BODY)) then
-                call nav_copy(upstream_of(repo))
+                ! The browser makes the address absolute; git asks for a token.
+                call nav_copy('/'//url_encode(repo)//'.git')
                 copied = .true.
             end if
         end if
@@ -409,7 +426,7 @@ contains
         end if
 
         if (len(dir) == 0 .and. len(upstream_of(repo)) > 0) &
-            call text("Mirror of "//upstream_of(repo), size=SMALL, tone=UI_TONE_MUTED, &
+            call text(upstream_of(repo), size=SMALL, tone=UI_TONE_MUTED, &
             width=UI_FILL, id="upstream")
 
         ! The latest commit, as a bar above the files.
@@ -904,7 +921,7 @@ contains
 
         deallocate (repos)
         allocate (repos(0))
-        r = repo_t('', '', '', .false.)
+        r = repo_t('', '', '', 'mirror', .false.)
         key = ''
         call json_parser_init(p, body)
         do
@@ -918,11 +935,12 @@ contains
                 if (key == 'name') r%name = ev%string_val
                 if (key == 'upstream') r%upstream = ev%string_val
                 if (key == 'fetched') r%fetched = ev%string_val
+                if (key == 'mode') r%mode = ev%string_val
             case (JSON_BOOL)
                 if (key == 'ready') r%ready = ev%bool_val
             case (JSON_OBJECT_END)
                 if (len(r%name) > 0) repos = [repos, r]
-                r = repo_t('', '', '', .false.)
+                r = repo_t('', '', '', 'mirror', .false.)
             end select
         end do
     end subroutine parse_repos

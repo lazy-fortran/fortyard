@@ -72,7 +72,8 @@ contains
     end function nav_pref
 
     subroutine nav_copy(text)
-        !! Puts `text` on the clipboard.
+        !! Puts `text` on the clipboard; a path from the root becomes this
+        !! site's absolute address.
         character(len=*), intent(in) :: text
         call js_call(DO_COPY, text, len(text, c_int), text, 0_c_int)
     end subroutine nav_copy

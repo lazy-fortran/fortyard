@@ -98,6 +98,7 @@ addToLibrary({
         break;
       }
       case 5:
+        if (s.charAt(0) === '/') s = location.origin + s;
         if (navigator.clipboard) navigator.clipboard.writeText(s).catch(function () {});
         break;
     }
