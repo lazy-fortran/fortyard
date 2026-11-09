@@ -80,8 +80,13 @@ try {
   await until(`!!document.querySelector('[data-id="token"]')`, 'sign-in form');
   check(true, 'the application loads and asks to sign in');
 
+  // Pasted, with the line break a terminal copy adds, as people sign in.
   await click('[data-id="token"]');
-  await type(admin);
+  await evaluate(`(() => { const dt = new DataTransfer(); dt.setData('text/plain', ${JSON.stringify(admin + '\n')});
+    document.querySelector('[data-id="token"]').dispatchEvent(new ClipboardEvent('paste',
+      { clipboardData: dt, bubbles: true, cancelable: true })); })()`);
+  await until(`document.querySelector('[data-id="token"]').value === ${JSON.stringify(admin)}`, 'pasted token');
+  check(true, 'a pasted token stays in the field');
   await click('[data-id="signin"]');
   await until(hasText('admin'), 'signed in');
   check(true, 'signing in with a token shows the account');
@@ -89,7 +94,7 @@ try {
   const session = cookies.find((c) => c.name === 'fy_session');
   check(session && session.httpOnly && session.sameSite === 'Strict', 'the session is an HttpOnly, SameSite=Strict cookie');
   check(await evaluate(`document.cookie === ''`), 'scripts on the page cannot read it');
-  check(await evaluate(hasText('Commit ' + (await (await fetch(url + 'api/v1/version')).json()).commit)),
+  check(await evaluate(hasText((await (await fetch(url + 'api/v1/version')).json()).commit)),
     'the overview shows the server commit');
 
   await click('[data-id$="#2"]');

@@ -17,6 +17,8 @@ module fy_http
         character(len=:), allocatable :: authorization
         character(len=:), allocatable :: cookie
         character(len=:), allocatable :: content_type
+        character(len=:), allocatable :: accept_encoding
+        character(len=:), allocatable :: if_none_match
         character(len=:), allocatable :: body
         integer :: content_length = 0
     end type http_request_t
@@ -39,6 +41,8 @@ contains
         req%authorization = ''
         req%cookie = ''
         req%content_type = ''
+        req%accept_encoding = ''
+        req%if_none_match = ''
         req%body = ''
         status = 400
         eol = index(head, CRLF)
@@ -77,6 +81,10 @@ contains
                 req%cookie = value
             case ('content-type')
                 req%content_type = lower(value)
+            case ('accept-encoding')
+                req%accept_encoding = lower(value)
+            case ('if-none-match')
+                req%if_none_match = value
             case ('content-length')
                 read (value, *, iostat=ios) req%content_length
                 if (ios /= 0 .or. req%content_length < 0) return
@@ -199,6 +207,8 @@ contains
         select case (code)
         case (200); text = 'OK'
         case (201); text = 'Created'
+        case (304); text = 'Not Modified'
+        case (415); text = 'Unsupported Media Type'
         case (400); text = 'Bad Request'
         case (401); text = 'Unauthorized'
         case (403); text = 'Forbidden'

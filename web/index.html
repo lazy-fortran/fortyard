@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>fortyard</title>
+<link rel="icon" href="data:,">
 <style>
   :root {
     color-scheme: light dark;
@@ -18,13 +19,26 @@
   }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); }
   #app { position: fixed; inset: 24px 16px; margin: 0 auto; max-width: 1000px; }
-  .fui-k2, .fui-k5 {
+  .fui-k2 {
     border: 1px solid var(--line); border-radius: 6px; background: var(--ctl);
     color: var(--fg); cursor: pointer;
   }
-  .fui-k5[aria-selected="true"] { border-color: var(--acc); color: var(--acc); }
-  .fui-hover { background: var(--hover); }
-  .fui-focus { outline: 2px solid var(--acc); outline-offset: 1px; }
+  .fui-k2.fui-hover { background: var(--hover); }
+  .fui-k2.fui-active { border-color: var(--acc); }
+  .fui-k5 {
+    border: 0; border-bottom: 2px solid var(--line); background: transparent;
+    color: var(--mut); cursor: pointer;
+  }
+  .fui-k5.fui-hover { color: var(--fg); }
+  .fui-k5[aria-selected="true"] { border-bottom-color: var(--acc); color: var(--fg); }
+  .fui:focus, .fui:focus-visible { outline: none; }
+  .fui-keyboard .fui-focus, .fui-k8.fui-focus { outline: 2px solid var(--acc); outline-offset: 1px; }
+  .fui-k1 { color: var(--fg); }
+  .fui[data-style="2"] { color: var(--mut); }
+  #app::before {
+    content: ""; position: absolute; left: 0; right: 0; top: 56px;
+    border-top: 1px solid var(--line);
+  }
   .fui-k8 {
     border: 1px solid var(--line); border-radius: 4px; padding: 0 6px;
     background: var(--ctl); color: var(--fg);

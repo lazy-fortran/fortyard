@@ -20,4 +20,6 @@ FORTUI_WEB_SOURCES="$fx/fx_string.f90 $fx/fx_json_build.f90 $fx/fx_json_parse.f9
 FORTUI_WEB_JS="$src/web/fy_web.js" \
     "$FORTUI_DIR/web/build.sh" "$src/web/fy_app.f90" "$out" >/dev/null
 rm -rf "$out/obj"
+# Served to browsers that accept gzip; about a third of the size.
+gzip -9 -k -f "$out/fy_app.wasm" "$out/fy_app.js"
 ls "$out"

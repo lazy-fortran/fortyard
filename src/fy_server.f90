@@ -165,7 +165,7 @@ contains
             res%body = 'ok '//FY_VERSION//' '//FY_COMMIT//new_line('a')
         case ('/', '/index.html')
             if (.not. method_is(req, 'GET', res)) return
-            call static_file('index.html', res)
+            call static_file(req, 'index.html', res)
             if (res%code == 404) then
                 res%code = 200
                 res%ctype = 'text/html; charset=utf-8'
@@ -205,7 +205,7 @@ contains
         case default
             if (index(req%path, '/app/') == 1) then
                 if (.not. method_is(req, 'GET', res)) return
-                call static_file(req%path(6:), res)
+                call static_file(req, req%path(6:), res)
             else if (index(req%path, '/api/v1/tokens/') == 1) then
                 rest = req%path(16:)
                 if (index(rest, '/revoke') /= len(rest) - 6 .or. len(rest) < 8) then
@@ -383,32 +383,45 @@ contains
         res%body = '{"closed":true}'
     end subroutine close_session
 
-    subroutine static_file(name, res)
+    subroutine static_file(req, name, res)
         !! A file of the web application from the release's web directory. Names
-        !! are plain file names, so no path leaves that directory.
+        !! are plain file names, so no path leaves that directory. A gzip copy
+        !! (`name.gz`) is sent to clients that accept it; the release commit is
+        !! the ETag, so a reload of an unchanged release transfers nothing.
+        type(http_request_t), intent(in) :: req
         character(len=*), intent(in) :: name
         type(response_t), intent(inout) :: res
-        character(len=:), allocatable :: path
-        integer :: u, ios, size_
-        logical :: exists
+        character(len=:), allocatable :: etag
+        logical :: ok
 
         call fail(res, 404, 'not found')
         if (.not. allocated(web_dir)) return
         if (len(web_dir) == 0 .or. len(name) == 0 .or. len(name) > 64) return
         if (name(1:1) == '.' .or. verify(name, &
             'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-') /= 0) return
-        path = web_dir//'/'//name
-        inquire (file=path, exist=exists, size=size_)
-        if (.not. exists .or. size_ < 0) return
-        res%body = repeat(' ', size_)
-        open (newunit=u, file=path, access='stream', form='unformatted', action='read', &
-            iostat=ios)
-        if (ios /= 0) return
-        if (size_ > 0) read (u, iostat=ios) res%body
-        close (u)
-        if (ios /= 0) return
+        etag = ''
+        if (FY_COMMIT /= 'unknown') etag = '"'//FY_COMMIT//'"'
+        ok = .false.
+        if (index(req%accept_encoding, 'gzip') > 0) then
+            call read_file(web_dir//'/'//name//'.gz', res%body, ok)
+            if (ok) res%headers = 'Content-Encoding: gzip'//CRLF
+        end if
+        if (.not. ok) call read_file(web_dir//'/'//name, res%body, ok)
+        if (.not. ok) then
+            res%headers = ''
+            res%body = '{"error":"not found"}'
+            return
+        end if
         res%code = 200
         res%cache = 'no-cache'
+        res%headers = res%headers//'Vary: Accept-Encoding'//CRLF
+        if (len(etag) > 0) then
+            res%headers = res%headers//'ETag: '//etag//CRLF
+            if (req%if_none_match == etag) then
+                res%code = 304
+                res%body = ''
+            end if
+        end if
         res%ctype = 'application/octet-stream'
         if (ends_with(name, '.html')) res%ctype = 'text/html; charset=utf-8'
         if (ends_with(name, '.js')) res%ctype = 'text/javascript; charset=utf-8'
@@ -416,6 +429,26 @@ contains
         if (ends_with(name, '.css')) res%ctype = 'text/css; charset=utf-8'
         if (ends_with(name, '.svg')) res%ctype = 'image/svg+xml'
     end subroutine static_file
+
+    subroutine read_file(path, content, ok)
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable, intent(out) :: content
+        logical, intent(out) :: ok
+        integer :: u, ios, size_
+        logical :: exists
+
+        ok = .false.
+        content = ''
+        inquire (file=path, exist=exists, size=size_)
+        if (.not. exists .or. size_ < 0) return
+        content = repeat(' ', size_)
+        open (newunit=u, file=path, access='stream', form='unformatted', action='read', &
+            iostat=ios)
+        if (ios /= 0) return
+        if (size_ > 0) read (u, iostat=ios) content
+        close (u)
+        ok = ios == 0
+    end subroutine read_file
 
     pure function json_bool(b) result(s)
         logical, intent(in) :: b

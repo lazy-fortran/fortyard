@@ -24,6 +24,12 @@ program fy_app
         "Access tokens"]
     integer :: tab, stat, i
     logical :: signed_in, checked, submitted
+    logical :: narrow
+    real :: page_w, page_h
+    ! Logical text sizes and spacing of the page.
+    real, parameter :: TITLE = 22.0, HEADING = 17.0, BODY = 15.0, SMALL = 13.0, CTRL = 15.0
+    real, parameter :: GAP = 12.0, SECTION_GAP = 24.0, ROW_H = 36.0
+    real, parameter :: STATUS_W = 150.0, DATE_W = 110.0
     character(len=16) :: action
 
     version = ''
@@ -48,24 +54,17 @@ program fy_app
     do while (.not. ui_should_close())
         call ui_frame_begin()
         call receive()
+        call ui_window_size(page_w, page_h)
+        narrow = page_w < 600.0
 
-        call row_begin(16.0)
-        call text("fortyard", style=UI_TITLE)
-        if (signed_in) then
-            call text(account, style=UI_CAPTION)
-            if (button("signout", "Sign out")) then
-                call fetch_start(action_req, 'DELETE', '/api/v1/session')
-                action = 'signout'
-            end if
-        end if
-        call row_end()
-
+        call column_begin(SECTION_GAP)
+        call header()
         if (.not. checked) then
-            call text("Loading...")
+            call text("Loading...", size=BODY)
         else if (.not. signed_in) then
             call sign_in_view()
         else
-            if (tabs("tabs", tab_labels, tab)) message = ''
+            if (tabs("tabs", tab_labels, tab, width=min(360.0, page_w), size=CTRL)) message = ''
             select case (tab)
             case (1)
                 call overview_view()
@@ -73,45 +72,87 @@ program fy_app
                 call tokens_view()
             end select
         end if
-        if (len(message) > 0) call text(message, style=UI_CAPTION)
+        if (len(message) > 0) call text(message, size=SMALL, style=UI_CAPTION)
+        call column_end()
         call ui_present()
     end do
     call ui_shutdown()
 
 contains
 
+    subroutine header()
+        real :: used
+
+        call row_begin(GAP, height=44.0)
+        call text("fortyard", size=TITLE, style=UI_TITLE)
+        if (signed_in) then
+            ! Account and sign-out sit at the right edge of the page.
+            used = ui_text_width("fortyard", TITLE, UI_TITLE) + &
+                ui_text_width(account, SMALL) + button_width("Sign out") + 3.0 * GAP
+            call text("", width=max(0.0, page_w - used))
+            call text(account, size=SMALL, style=UI_CAPTION)
+            if (button("signout", "Sign out", size=CTRL)) then
+                call fetch_start(action_req, 'DELETE', '/api/v1/session')
+                action = 'signout'
+            end if
+        end if
+        call row_end()
+    end subroutine header
+
     subroutine sign_in_view()
-        call text("Sign in with an access token. The browser keeps only a session " // &
-            "cookie, not the token.")
-        call row_begin(8.0)
+        real :: field_w
+
+        call column_begin(GAP)
+        call text("Sign in", size=HEADING, style=UI_HEADING)
+        call text("Paste an access token. The browser keeps only a session cookie.", &
+            size=BODY, width=page_w, ellipsis=.true.)
+        field_w = min(520.0, page_w - button_width("Sign in") - GAP)
+        if (narrow) field_w = page_w
+        if (.not. narrow) call row_begin(GAP, height=ROW_H)
         if (text_input("token", token_input, placeholder="fy_...", submitted=submitted, &
-            width=520.0)) continue
-        if (button("signin", "Sign in") .or. submitted) then
+            width=field_w, size=CTRL)) continue
+        if (button("signin", "Sign in", size=CTRL) .or. submitted) then
             if (len_trim(token_input) > 0) then
                 call fetch_start(action_req, 'POST', '/api/v1/session', &
                     '{"token":"' // json_escape_string(trim(token_input)) // '"}')
                 action = 'signin'
             end if
         end if
-        call row_end()
+        if (.not. narrow) call row_end()
+        call column_end()
     end subroutine sign_in_view
 
     subroutine overview_view()
-        call text("Server", style=UI_HEADING)
-        call text("Version " // version)
-        call text("Commit " // commit)
-        call text("Account", style=UI_HEADING)
-        call text(account // " (" // scopes // ")")
+        call column_begin(GAP)
+        call text("Server", size=HEADING, style=UI_HEADING)
+        call field("Version", version)
+        call field("Commit", commit)
+        call text("Account", size=HEADING, style=UI_HEADING)
+        call field("Name", account)
+        call field("Scopes", scopes)
+        call column_end()
     end subroutine overview_view
 
+    subroutine field(label, value)
+        character(len=*), intent(in) :: label, value
+
+        call row_begin(GAP, height=24.0)
+        call text(label, size=SMALL, style=UI_CAPTION, width=90.0)
+        call text(value, size=BODY, width=max(0.0, page_w - 90.0 - GAP), ellipsis=.true.)
+        call row_end()
+    end subroutine field
+
     subroutine tokens_view()
+        real :: name_w, field_w
         integer :: k
 
-        call text("Create a token", style=UI_HEADING)
-        call row_begin(8.0)
+        call column_begin(GAP)
+        call text("New token", size=HEADING, style=UI_HEADING)
+        field_w = min(320.0, page_w - button_width("Create") - GAP)
+        call row_begin(GAP, height=ROW_H)
         if (text_input("newname", new_name, placeholder="Name, e.g. laptop", &
-            submitted=submitted, width=320.0)) continue
-        if (button("create", "Create") .or. submitted) then
+            submitted=submitted, width=field_w, size=CTRL)) continue
+        if (button("create", "Create", size=CTRL) .or. submitted) then
             if (len_trim(new_name) > 0) then
                 call fetch_start(action_req, 'POST', '/api/v1/tokens', &
                     '{"name":"' // json_escape_string(trim(new_name)) // '"}')
@@ -120,27 +161,58 @@ contains
         end if
         call row_end()
         if (len(new_token) > 0) then
-            call text("New token, shown once:", style=UI_CAPTION)
-            call text(new_token)
+            call text("Copy it now; it is shown only once:", size=SMALL, style=UI_CAPTION)
+            call text(new_token, size=BODY, width=page_w, ellipsis=.true., id="newtoken")
         end if
+        call column_end()
 
-        call text("Tokens", style=UI_HEADING)
+        call column_begin(4.0)
+        call text("Tokens", size=HEADING, style=UI_HEADING)
+        if (narrow) then
+            name_w = page_w - button_width("Revoke") - GAP
+        else
+            name_w = max(140.0, page_w - STATUS_W - DATE_W - button_width("Revoke") - &
+                3.0 * GAP)
+            call row_begin(GAP, height=24.0)
+            call text("Name", size=SMALL, style=UI_CAPTION, width=name_w)
+            call text("Status", size=SMALL, style=UI_CAPTION, width=STATUS_W)
+            call text("Created", size=SMALL, style=UI_CAPTION, width=DATE_W)
+            call row_end()
+        end if
         do k = 1, size(tokens)
-            call row_begin(12.0, id="row" // ui_str(tokens(k)%id))
-            call text(tokens(k)%name, width=220.0, ellipsis=.true.)
-            call text(status_of(tokens(k)), style=UI_CAPTION, width=200.0)
-            call text("created " // tokens(k)%created(1:min(10, len(tokens(k)%created))), &
-                style=UI_CAPTION, width=180.0)
+            call row_begin(GAP, id="row" // ui_str(tokens(k)%id), height=ROW_H)
+            call text(tokens(k)%name, size=BODY, width=name_w, ellipsis=.true.)
+            if (.not. narrow) then
+                call text(status_of(tokens(k)), size=SMALL, style=UI_CAPTION, &
+                    width=STATUS_W)
+                call text(day(tokens(k)%created), size=SMALL, style=UI_CAPTION, &
+                    width=DATE_W)
+            end if
             if (.not. tokens(k)%revoked .and. .not. tokens(k)%current) then
-                if (button("revoke", "Revoke", key=tokens(k)%id)) then
+                if (button("revoke", "Revoke", key=tokens(k)%id, size=CTRL)) then
                     call fetch_start(action_req, 'POST', '/api/v1/tokens/' // &
                         ui_str(tokens(k)%id) // '/revoke', '{}')
                     action = 'revoke'
                 end if
             end if
             call row_end()
+            if (narrow) call text(status_of(tokens(k)) // ", created " // &
+                day(tokens(k)%created), size=SMALL, style=UI_CAPTION)
         end do
+        call column_end()
     end subroutine tokens_view
+
+    real function button_width(label)
+        !! As fortui sizes a button: its label plus padding, at least 72.
+        character(len=*), intent(in) :: label
+        button_width = max(72.0, ui_text_width(label, CTRL) + 24.0)
+    end function button_width
+
+    function day(stamp) result(s)
+        character(len=*), intent(in) :: stamp
+        character(len=:), allocatable :: s
+        s = stamp(1:min(10, len(stamp)))
+    end function day
 
     function status_of(t) result(s)
         type(token_row_t), intent(in) :: t
@@ -151,7 +223,7 @@ contains
         else if (t%current) then
             s = "this session"
         else if (len(t%expires) > 0) then
-            s = "expires " // t%expires(1:min(10, len(t%expires)))
+            s = "expires " // day(t%expires)
         else
             s = "active"
         end if

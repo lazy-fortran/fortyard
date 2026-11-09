@@ -86,7 +86,7 @@ program test_server_roundtrip
 
     reply = exchange('GET / HTTP/1.1'//CRLF//CRLF)
     call check(index(reply, '<h1>fortyard</h1>') > 0, 'status page at / without a web application')
-    call execute_command_line('mkdir -p build/test_web && printf app > build/test_web/index.html' // &
+    call execute_command_line('rm -rf build/test_web && mkdir -p build/test_web && printf app > build/test_web/index.html' // &
         ' && printf code > build/test_web/fy_app.wasm')
     call server_set_web_dir('build/test_web')
     reply = exchange('GET / HTTP/1.1'//CRLF//CRLF)
@@ -94,6 +94,13 @@ program test_server_roundtrip
     reply = exchange('GET /app/fy_app.wasm HTTP/1.1'//CRLF//CRLF)
     call check(index(reply, 'application/wasm') > 0 .and. index(reply, CRLF//CRLF//'code') > 0, &
         'WebAssembly served with its type')
+    call execute_command_line('printf zipped > build/test_web/fy_app.wasm.gz')
+    reply = exchange('GET /app/fy_app.wasm HTTP/1.1'//CRLF//'Accept-Encoding: gzip, br'//CRLF//CRLF)
+    call check(index(reply, 'Content-Encoding: gzip') > 0 .and. index(reply, CRLF//CRLF//'zipped') > 0, &
+        'the gzip copy goes to clients that accept it')
+    reply = exchange('GET /app/fy_app.wasm HTTP/1.1'//CRLF//CRLF)
+    call check(index(reply, 'Content-Encoding') == 0 .and. index(reply, CRLF//CRLF//'code') > 0, &
+        'the plain file goes to the others')
     reply = exchange('GET /app/..%2ffortyard.db HTTP/1.1'//CRLF//CRLF)
     call check(index(reply, 'HTTP/1.1 404') == 1, 'no path leaves the web directory')
     reply = exchange('GET /app/../test_store.db HTTP/1.1'//CRLF//CRLF)
