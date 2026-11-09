@@ -1,7 +1,9 @@
 module fy_repo_view
     !! Repository pages: the list of mirrored repositories, a repository's
-    !! files with its README, a file with highlighted lines, the history, and a
-    !! commit with its diff per file.
+    !! files with its README, a file with highlighted lines (Markdown rendered),
+    !! the history, and a commit with its diff per file. Every page has its own
+    !! location (fy_route); a page already loaded for the same location is shown
+    !! again without asking the server.
     use fortui
     use fx_json_build, only: json_escape_string
     use fx_json_parse, only: json_extract_string, json_parser_t, json_event_t, &
@@ -11,12 +13,15 @@ module fy_repo_view
     use fy_highlight, only: highlight, lang_of
     use fy_diff, only: diff_file_t, parse_patch, DL_ADDED, DL_REMOVED, DL_HUNK, DL_NOTE
     use fy_markdown, only: md_doc_t, md_parse, md_compose
-    use fy_time, only: ago
+    use fy_route, only: route_t, route_href, url_encode, go, R_TREE, R_BLOB, R_COMMITS, &
+        R_COMMIT
+    use fy_time, only: ago, day_of
     implicit none
     private
 
-    public :: repo_view_open, repo_view_compose, repo_view_receive, repo_view_load, &
-        repo_view_reset
+    public :: repo_view_reset, repo_view_show, repo_view_list, repo_view_compose, &
+        repo_view_list_compose, repo_view_receive, repo_view_title, repo_view_repo, &
+        repo_view_kind, repo_view_missing
 
     type :: line_t
         character(len=:), allocatable :: s
@@ -46,8 +51,8 @@ module fy_repo_view
     end type shown_file_t
 
     integer, parameter :: MAX_FILE_LINES = 5000, MAX_DIFF_LINES = 6000
-    real, parameter :: BODY = 15.0, SMALL = 13.0, HEADING = 17.0, CTRL = 15.0, CODE = 13.5
-    real, parameter :: GAP = 12.0, ROW_H = 30.0
+    real, parameter :: BODY = 14.0, SMALL = 12.0, HEADING = 16.0, CODE = 12.0
+    real, parameter :: GAP = 8.0, ROW_H = 40.0
 
     type(request_t) :: repos_req, refs_req, tree_req, blob_req, readme_req, log_req, &
         commit_req, add_req
@@ -56,22 +61,19 @@ module fy_repo_view
     type(commit_t), allocatable :: commits(:)
     type(line_t), allocatable :: file_lines(:)
     type(shown_file_t), allocatable :: diff_files(:)
-    type(md_doc_t) :: readme
+    type(md_doc_t) :: readme, file_md
+    !! The page shown: repository, its directory, file or commit.
     character(len=:), allocatable :: repo, dir, file, commit_id, branch, note
+    !! What is loaded, so going back to it needs no request.
+    character(len=:), allocatable :: refs_of, log_of, tree_of, blob_of, commit_of
     character(len=:), allocatable :: new_repo, new_upstream, readme_name, file_info
     character(len=:), allocatable :: c_subject, c_body, c_author, c_date
     logical :: file_cut = .false., diff_cut = .false., loaded = .false., has_readme = .false.
-    integer :: sub_tab = 1, file_bytes = 0
-    character(len=16), parameter :: sub_labels(2) = [character(len=16) :: "Code", "History"]
+    logical :: as_code = .false., is_md = .false., repos_loaded = .false., missing = .false.
+    logical :: tree_ready = .false., log_ready = .false.
+    integer :: kind = R_TREE, file_bytes = 0
 
 contains
-
-    subroutine repo_view_open()
-        !! Shows the repository list, loading it again.
-        call init()
-        repo = ''
-        call fetch_start(repos_req, 'GET', '/api/v1/repos')
-    end subroutine repo_view_open
 
     subroutine repo_view_reset()
         !! Forgets everything: the server renders pages for different people.
@@ -82,31 +84,26 @@ contains
         if (allocated(file_lines)) deallocate (file_lines)
         if (allocated(diff_files)) deallocate (diff_files)
         if (allocated(readme%blocks)) deallocate (readme%blocks)
-        sub_tab = 1
-        file_cut = .false.
-        diff_cut = .false.
-        has_readme = .false.
+        if (allocated(file_md%blocks)) deallocate (file_md%blocks)
         call init()
     end subroutine repo_view_reset
-
-    subroutine repo_view_load(json)
-        !! Shows the repository list from a response already at hand.
-        character(len=*), intent(in) :: json
-        call init()
-        repo = ''
-        call parse_repos(json)
-    end subroutine repo_view_load
 
     subroutine init()
         if (loaded) return
         loaded = .true.
         allocate (repos(0), entries(0), commits(0), file_lines(0), diff_files(0))
+        allocate (readme%blocks(0), file_md%blocks(0))
         repo = ''
         dir = ''
         file = ''
         commit_id = ''
         branch = ''
         note = ''
+        refs_of = ''
+        log_of = ''
+        tree_of = ''
+        blob_of = ''
+        commit_of = ''
         new_repo = ''
         new_upstream = ''
         readme_name = ''
@@ -115,58 +112,183 @@ contains
         c_body = ''
         c_author = ''
         c_date = ''
+        file_cut = .false.
+        diff_cut = .false.
+        has_readme = .false.
+        as_code = .false.
+        is_md = .false.
+        repos_loaded = .false.
+        missing = .false.
+        tree_ready = .false.
+        log_ready = .false.
+        kind = R_TREE
     end subroutine init
 
-    subroutine repo_view_compose(page_w, narrow, admin)
-        real, intent(in) :: page_w
-        logical, intent(in) :: narrow, admin
+    subroutine repo_view_list()
+        !! The repository list, asked for again (it changes as mirrors are added).
+        call init()
+        repo = ''
+        note = ''
+        call fetch_start(repos_req, 'GET', '/api/v1/repos')
+    end subroutine repo_view_list
+
+    subroutine repo_view_show(r)
+        !! A page of a repository.
+        type(route_t), intent(in) :: r
+        character(len=:), allocatable :: key
 
         call init()
-        if (len(repo) == 0) then
-            call list_view(admin)
-        else
-            call repo_page(page_w, narrow)
+        if (r%repo /= repo) branch = ''
+        repo = r%repo
+        kind = r%kind
+        as_code = r%plain
+        note = ''
+        missing = .false.
+        if (refs_of /= repo) then
+            refs_of = repo
+            call fetch_start(refs_req, 'GET', api(repo, 'refs'))
         end if
-        if (len(note) > 0) call text(note, size=SMALL, style=UI_CAPTION, tone=UI_TONE_NEGATIVE)
-    end subroutine repo_view_compose
+        if (log_of /= repo) then
+            log_of = repo
+            log_ready = .false.
+            deallocate (commits)
+            allocate (commits(0))
+            call fetch_start(log_req, 'GET', api(repo, 'log'))
+        end if
+        if (.not. repos_loaded) call fetch_start(repos_req, 'GET', '/api/v1/repos')
+        select case (kind)
+        case (R_TREE)
+            dir = r%path
+            file = ''
+            key = repo//':'//dir
+            if (tree_of /= key) then
+                tree_of = key
+                tree_ready = .false.
+                has_readme = .false.
+                deallocate (entries)
+                allocate (entries(0))
+                call fetch_start(tree_req, 'GET', api(repo, 'tree')//'?path='//url_encode(dir))
+            end if
+        case (R_BLOB)
+            file = r%path
+            dir = parent_of(file)
+            is_md = lang_of(file) == lang_of('x.md')
+            key = repo//':'//file
+            if (blob_of /= key) then
+                blob_of = key
+                file_info = ''
+                call plain_lines(file_lines, 'Loading...')
+                if (allocated(file_md%blocks)) deallocate (file_md%blocks)
+                allocate (file_md%blocks(0))
+                call fetch_start(blob_req, 'GET', api(repo, 'blob')//'?path='//url_encode(file))
+            end if
+        case (R_COMMIT)
+            commit_id = r%path
+            key = repo//':'//commit_id
+            if (commit_of /= key) then
+                commit_of = key
+                c_subject = 'Loading...'
+                c_body = ''
+                c_author = ''
+                c_date = ''
+                deallocate (diff_files)
+                allocate (diff_files(0))
+                call fetch_start(commit_req, 'GET', api(repo, 'commits/'//url_encode(commit_id)))
+            end if
+        end select
+    end subroutine repo_view_show
+
+    function api(name, sub) result(path)
+        !! The API location of a repository's resource; the one place that maps
+        !! repository paths to the API.
+        character(len=*), intent(in) :: name, sub
+        character(len=:), allocatable :: path
+        path = '/api/v1/repos/'//url_encode(name)//'/'//sub
+    end function api
+
+    function repo_view_repo() result(s)
+        character(len=:), allocatable :: s
+        call init()
+        s = repo
+    end function repo_view_repo
+
+    integer function repo_view_kind()
+        repo_view_kind = kind
+    end function repo_view_kind
+
+    logical function repo_view_missing()
+        !! Whether the repository, path or commit shown does not exist.
+        repo_view_missing = missing
+    end function repo_view_missing
+
+    function repo_view_title() result(s)
+        !! The page's title, as the browser shows it in tabs and history.
+        character(len=:), allocatable :: s
+        call init()
+        select case (kind)
+        case (R_BLOB)
+            s = file//' · '//repo
+        case (R_COMMITS)
+            s = 'History · '//repo
+        case (R_COMMIT)
+            s = c_subject//' · '//repo//'@'//short(commit_id)
+        case default
+            s = repo
+            if (len(dir) > 0) s = repo//'/'//dir
+        end select
+    end function repo_view_title
 
     ! ---- repository list --------------------------------------------------------
 
-    subroutine list_view(admin)
+    subroutine repo_view_list_compose(admin)
         logical, intent(in) :: admin
         integer :: k
         logical :: submitted
 
-        call column_begin(10.0)
-        call text("Repositories", size=HEADING, style=UI_HEADING)
+        call init()
+        call row_begin(GAP, id="pagehead", height=ROW_H)
+        call text("Repositories", size=20.0, style=UI_HEADING)
+        if (size(repos) > 0) call text(ui_str(size(repos)), size=SMALL, id="count")
+        call row_end()
         if (size(repos) == 0) then
-            call text("No repositories are mirrored yet.", size=BODY, tone=UI_TONE_MUTED)
+            if (repos_loaded) then
+                call text("No repositories are mirrored yet.", size=BODY, tone=UI_TONE_MUTED)
+            else
+                call text("Loading...", size=BODY, tone=UI_TONE_MUTED)
+            end if
         else
             call column_begin(0.0, id="card-repos")
             do k = 1, size(repos)
-                call row_begin(GAP, id="row-r"//ui_str(k), height=48.0)
+                call row_begin(12.0, id="row-r"//ui_str(k), height=64.0)
                 call text("", id="icon-repo")
-                if (button("open", repos(k)%name, size=BODY, enabled=repos(k)%ready)) &
-                    call open_repo(repos(k)%name)
-                call text(repos(k)%upstream, size=SMALL, tone=UI_TONE_MUTED, width=UI_FILL, &
-                    ellipsis=.true.)
+                call column_begin(4.0)
+                if (repos(k)%ready) then
+                    if (link("name", repos(k)%name, route_href(R_TREE, repos(k)%name), &
+                        size=16.0, style=UI_HEADING)) call go(route_href(R_TREE, repos(k)%name))
+                else
+                    call text(repos(k)%name, size=16.0, style=UI_HEADING, tone=UI_TONE_MUTED)
+                end if
+                call text(repos(k)%upstream, size=SMALL, tone=UI_TONE_MUTED, width=UI_FILL)
                 call text(state_of(repos(k)), size=SMALL, tone=UI_TONE_MUTED)
+                call column_end()
                 call row_end()
             end do
             call column_end()
         end if
-        call column_end()
 
-        if (.not. admin) return
-        call column_begin(8.0)
+        if (.not. admin) then
+            if (len(note) > 0) call text(note, size=SMALL, tone=UI_TONE_NEGATIVE)
+            return
+        end if
+        call column_begin(8.0, id="mirror")
         call text("Mirror a repository", size=HEADING, style=UI_HEADING)
-        call row_begin(GAP, height=ROW_H + 4.0)
+        call row_begin(GAP, id="addform", height=ROW_H)
         if (text_input("newrepo", new_repo, placeholder="Name, e.g. fx", width=180.0, &
-            size=CTRL)) continue
+            size=BODY)) continue
         if (text_input("newupstream", new_upstream, &
             placeholder="git@github.com:org/repo.git or https://...", submitted=submitted, &
-            width=UI_FILL, size=CTRL)) continue
-        if (button("add", "Add", size=CTRL) .or. submitted) then
+            width=UI_FILL, size=BODY)) continue
+        if (button("add", "Add mirror", size=BODY) .or. submitted) then
             if (len_trim(new_repo) > 0 .and. len_trim(new_upstream) > 0) then
                 call fetch_start(add_req, 'POST', '/api/v1/repos', '{"name":"'// &
                     json_escape_string(trim(new_repo))//'","upstream":"'// &
@@ -176,62 +298,74 @@ contains
         call row_end()
         call text("The server clones it within a few seconds and then fetches it every minute.", &
             size=SMALL, tone=UI_TONE_MUTED)
+        if (len(note) > 0) call text(note, size=SMALL, tone=UI_TONE_NEGATIVE)
         call column_end()
-    end subroutine list_view
+    end subroutine repo_view_list_compose
 
     function state_of(r) result(s)
         type(repo_t), intent(in) :: r
         character(len=:), allocatable :: s
-        if (r%ready) then
-            s = "updated "//ago(r%fetched)
+        if (r%ready .and. len(r%fetched) == 0) then
+            s = "Mirrored"
+        else if (r%ready) then
+            s = "Updated "//ago(r%fetched)
         else
-            s = "cloning..."
+            s = "Cloning..."
         end if
     end function state_of
 
+    function upstream_of(name) result(s)
+        character(len=*), intent(in) :: name
+        character(len=:), allocatable :: s
+        integer :: k
+        s = ''
+        do k = 1, size(repos)
+            if (repos(k)%name == name) s = repos(k)%upstream
+        end do
+    end function upstream_of
+
     ! ---- one repository ---------------------------------------------------------------
 
-    subroutine repo_page(page_w, narrow)
-        real, intent(in) :: page_w
-        logical, intent(in) :: narrow
-        logical :: back
+    subroutine repo_view_compose()
+        logical :: on_code
 
-        call column_begin(16.0)
-        call row_begin(6.0, id="repohead", height=ROW_H)
-        call text("", id="icon-repo")
-        back = button("back", "Repositories", size=HEADING)
-        call text("/", size=HEADING, tone=UI_TONE_MUTED)
-        call text(repo, size=HEADING, style=UI_HEADING)
+        call init()
+        on_code = kind == R_TREE .or. kind == R_BLOB
+        call row_begin(0.0, id="repotabs", height=48.0)
+        if (link("code", "Code", route_href(R_TREE, repo), size=BODY, &
+            tone=merge(UI_TONE_STRONG, UI_TONE_NORMAL, on_code))) &
+            call go(route_href(R_TREE, repo))
+        if (link("history", "History", route_href(R_COMMITS, repo), size=BODY, &
+            tone=merge(UI_TONE_NORMAL, UI_TONE_STRONG, on_code))) &
+            call go(route_href(R_COMMITS, repo))
         call row_end()
-        if (back) then
-            call column_end()
-            call repo_view_open()
-            return
-        end if
-        if (tabs("sub", sub_labels, sub_tab, width=min(240.0, page_w), size=CTRL)) then
-            file = ''
-            commit_id = ''
-            if (sub_tab == 2 .and. size(commits) <= 1) call load_log()
-        end if
-        if (sub_tab == 1) then
-            call code_view(narrow)
-        else if (len(commit_id) > 0) then
-            call commit_view(narrow)
-        else
-            call history_view(narrow)
-        end if
-        call column_end()
-    end subroutine repo_page
+        select case (kind)
+        case (R_TREE)
+            call code_view()
+        case (R_BLOB)
+            call code_view()
+        case (R_COMMIT)
+            call commit_view()
+        case default
+            call history_view()
+        end select
+        if (len(note) > 0) call text(note, size=BODY, tone=UI_TONE_NEGATIVE, id="note")
+    end subroutine repo_view_compose
 
-    subroutine code_view(narrow)
-        logical, intent(in) :: narrow
+    subroutine code_view()
         integer :: k, start
-        character(len=:), allocatable :: here
+        character(len=:), allocatable :: here, up
 
         ! Branch and path.
-        call row_begin(6.0, id="pathbar", height=ROW_H)
+        call row_begin(GAP, id="pathbar", height=ROW_H)
         if (len(branch) > 0) call text(branch, size=SMALL, id="branch")
-        if (button("root", repo, size=BODY)) call open_dir('')
+        call row_begin(4.0, id="crumbs")
+        if (len(dir) == 0 .and. len(file) == 0) then
+            call text(leaf(repo), size=HEADING, style=UI_HEADING)
+        else
+            if (link("root", leaf(repo), route_href(R_TREE, repo), size=HEADING)) &
+                call go(route_href(R_TREE, repo))
+        end if
         here = ''
         start = 1
         do k = 1, len(dir) + 1
@@ -241,15 +375,21 @@ contains
             if (k > start) then
                 if (len(here) > 0) here = here//'/'
                 here = here//dir(start:k - 1)
-                call text("/", size=BODY, tone=UI_TONE_MUTED)
-                if (button("seg", dir(start:k - 1), key=k, size=BODY)) call open_dir(here)
+                call text("/", size=HEADING, tone=UI_TONE_MUTED)
+                if (k > len(dir) .and. len(file) == 0) then
+                    call text(dir(start:k - 1), size=HEADING, style=UI_HEADING)
+                else if (link("seg", dir(start:k - 1), route_href(R_TREE, repo, here), &
+                        key=k, size=HEADING)) then
+                    call go(route_href(R_TREE, repo, here))
+                end if
             end if
             start = k + 1
         end do
         if (len(file) > 0) then
-            call text("/", size=BODY, tone=UI_TONE_MUTED)
-            call text(basename(file), size=BODY, style=UI_HEADING)
+            call text("/", size=HEADING, tone=UI_TONE_MUTED)
+            call text(basename(file), size=HEADING, style=UI_HEADING)
         end if
+        call row_end()
         call row_end()
 
         if (len(file) > 0) then
@@ -257,35 +397,54 @@ contains
             return
         end if
 
+        if (len(dir) == 0 .and. len(upstream_of(repo)) > 0) &
+            call text("Mirror of "//upstream_of(repo), size=SMALL, tone=UI_TONE_MUTED, &
+            width=UI_FILL, id="upstream")
+
         ! The latest commit, as a bar above the files.
         if (size(commits) > 0) then
-            call row_begin(10.0, id="card-lastcommit", height=44.0)
-            call text(commits(1)%author, size=SMALL, style=UI_HEADING)
-            if (button("lastsubject", commits(1)%subject, size=SMALL, width=UI_FILL, &
-                ellipsis=.true.)) call open_commit(commits(1)%id)
-            if (.not. narrow) call text(commits(1)%id(1:min(7, len(commits(1)%id))), &
-                style=UI_CODE, size=12.0, tone=UI_TONE_MUTED)
-            call text(ago(commits(1)%date), size=SMALL, tone=UI_TONE_MUTED)
+            call row_begin(GAP, id="card-lastcommit", height=48.0)
+            call text(commits(1)%author, size=SMALL, style=UI_HEADING, id="author")
+            if (link("lastsubject", commits(1)%subject, &
+                route_href(R_COMMIT, repo, commits(1)%id), size=SMALL, width=UI_FILL, &
+                ellipsis=.true., tone=UI_TONE_MUTED)) &
+                call go(route_href(R_COMMIT, repo, commits(1)%id))
+            if (link("lastid", short(commits(1)%id), route_href(R_COMMIT, repo, commits(1)%id), &
+                size=SMALL, style=UI_CODE, tone=UI_TONE_MUTED)) &
+                call go(route_href(R_COMMIT, repo, commits(1)%id))
+            call text(ago(commits(1)%date), size=SMALL, tone=UI_TONE_MUTED, id="when")
+            if (link("count", ui_str(size(commits))//merge(" commits", " commit ", &
+                size(commits) /= 1), route_href(R_COMMITS, repo), size=SMALL, &
+                style=UI_HEADING)) call go(route_href(R_COMMITS, repo))
             call row_end()
         end if
 
         call column_begin(0.0, id="card-files")
         if (len(dir) > 0) then
-            call row_begin(GAP, id="row-up", height=36.0)
+            up = parent_of(dir)
+            call row_begin(GAP, id="row-up", height=ROW_H)
             call text("", id="icon-dir")
-            if (button("open", "..", size=BODY)) call open_dir(parent_of(dir))
+            if (link("open", "..", route_href(R_TREE, repo, up), size=BODY)) &
+                call go(route_href(R_TREE, repo, up))
+            call row_end()
+        end if
+        if (.not. tree_ready .and. len(note) == 0) then
+            call row_begin(GAP, id="row-wait", height=ROW_H)
+            call text("Loading...", size=BODY, tone=UI_TONE_MUTED)
             call row_end()
         end if
         do k = 1, size(entries)
-            call row_begin(GAP, id="row-e"//ui_str(k), height=36.0)
+            call row_begin(GAP, id="row-e"//ui_str(k), height=ROW_H)
             if (entries(k)%kind == 'tree') then
                 call text("", id="icon-dir")
-                if (button("open", entries(k)%name, size=BODY)) &
-                    call open_dir(join(dir, entries(k)%name))
+                if (link("open", entries(k)%name, &
+                    route_href(R_TREE, repo, join(dir, entries(k)%name)), size=BODY)) &
+                    call go(route_href(R_TREE, repo, join(dir, entries(k)%name)))
             else
                 call text("", id="icon-file")
-                if (button("open", entries(k)%name, size=BODY)) &
-                    call open_file(join(dir, entries(k)%name))
+                if (link("open", entries(k)%name, &
+                    route_href(R_BLOB, repo, join(dir, entries(k)%name)), size=BODY)) &
+                    call go(route_href(R_BLOB, repo, join(dir, entries(k)%name)))
             end if
             call text("", width=UI_FILL)
             if (entries(k)%kind /= 'tree') call text(human_size(entries(k)%size), size=SMALL, &
@@ -296,11 +455,13 @@ contains
 
         if (has_readme) then
             call column_begin(0.0, id="card-readme")
-            call row_begin(8.0, id="readmehead", height=40.0)
+            call row_begin(GAP, id="readmehead", height=ROW_H)
             call text("", id="icon-book")
-            call text(readme_name, size=SMALL, style=UI_HEADING)
+            if (link("readme", readme_name, route_href(R_BLOB, repo, join(dir, readme_name)), &
+                size=BODY, style=UI_HEADING, tone=UI_TONE_NORMAL)) &
+                call go(route_href(R_BLOB, repo, join(dir, readme_name)))
             call row_end()
-            call column_begin(12.0, id="readme")
+            call column_begin(16.0, id="markdown")
             call md_compose(readme)
             call column_end()
             call column_end()
@@ -309,43 +470,89 @@ contains
 
     subroutine file_view()
         integer :: k
+        logical :: preview
 
+        preview = is_md .and. .not. as_code
+        if (missing) then
+            call text("This file does not exist.", size=BODY, tone=UI_TONE_MUTED, id="note")
+            return
+        end if
         call column_begin(0.0, id="card-file")
-        call row_begin(GAP, id="filehead", height=40.0)
-        call text(file, style=UI_CODE, size=SMALL, width=UI_FILL, ellipsis=.true.)
-        call text(file_info, size=SMALL, tone=UI_TONE_MUTED)
+        call row_begin(GAP, id="filehead", height=48.0)
+        if (is_md) then
+            call row_begin(0.0, id="seg")
+            if (link("preview", "Preview", route_href(R_BLOB, repo, file), size=BODY, &
+                tone=merge(UI_TONE_STRONG, UI_TONE_NORMAL, preview))) &
+                call go(route_href(R_BLOB, repo, file))
+            if (link("code", "Code", route_href(R_BLOB, repo, file, plain=.true.), size=BODY, &
+                tone=merge(UI_TONE_NORMAL, UI_TONE_STRONG, preview))) &
+                call go(route_href(R_BLOB, repo, file, plain=.true.))
+            call row_end()
+        end if
+        call text(file_info, size=SMALL, tone=UI_TONE_MUTED, width=UI_FILL, id="info")
+        if (link("raw", "Raw", api(repo, 'blob')//'?path='//url_encode(file), size=SMALL)) &
+            call go(api(repo, 'blob')//'?path='//url_encode(file))
         call row_end()
-        call column_begin(0.0, id="code")
-        do k = 1, size(file_lines)
-            call text(file_lines(k)%s, style=UI_CODE, size=CODE, width=UI_FILL, &
-                ends=file_lines(k)%ends, tones=file_lines(k)%tones)
-        end do
+        if (preview .and. size(file_md%blocks) > 0) then
+            call column_begin(16.0, id="markdown")
+            call md_compose(file_md)
+            call column_end()
+        else
+            call column_begin(0.0, id="code")
+            do k = 1, size(file_lines)
+                call text(file_lines(k)%s, style=UI_CODE, size=CODE, width=UI_FILL, &
+                    ends=file_lines(k)%ends, tones=file_lines(k)%tones)
+            end do
+            call column_end()
+        end if
         call column_end()
-        call column_end()
-        if (file_cut) call text("Only the first "//ui_str(MAX_FILE_LINES)//" lines are shown.", &
-            size=SMALL, tone=UI_TONE_MUTED)
+        if (file_cut .and. .not. preview) call text("Only the first "//ui_str(MAX_FILE_LINES)// &
+            " lines are shown.", size=SMALL, tone=UI_TONE_MUTED)
     end subroutine file_view
 
-    subroutine history_view(narrow)
-        logical, intent(in) :: narrow
+    subroutine history_view()
         integer :: k
+        character(len=:), allocatable :: href
 
-        call column_begin(0.0, id="card-commits")
+        if (.not. log_ready) then
+            call text("Loading...", size=BODY, tone=UI_TONE_MUTED)
+            return
+        end if
+        if (size(commits) == 0) then
+            call text("No commits.", size=BODY, tone=UI_TONE_MUTED)
+            return
+        end if
         do k = 1, size(commits)
-            call row_begin(GAP, id="row-c"//ui_str(k), height=52.0)
-            if (button("subject", commits(k)%subject, size=BODY, width=UI_FILL, &
-                ellipsis=.true.)) call open_commit(commits(k)%id)
-            if (.not. narrow) call text(commits(k)%author, size=SMALL, tone=UI_TONE_MUTED)
-            call text(ago(commits(k)%date), size=SMALL, tone=UI_TONE_MUTED)
-            if (button("id", commits(k)%id(1:min(7, len(commits(k)%id))), key=k, size=12.0)) &
-                call open_commit(commits(k)%id)
+            ! Commits of one day under one heading, as forges list them.
+            if (k == 1) then
+                call column_begin(0.0, id="card-commits"//ui_str(k))
+            else if (day_of(commits(k)%date) /= day_of(commits(k - 1)%date)) then
+                call column_end()
+                call column_begin(0.0, id="card-commits"//ui_str(k))
+            end if
+            if (k == 1) then
+                call text("Commits on "//day_of(commits(k)%date), size=SMALL, id="day", &
+                    width=UI_FILL)
+            else if (day_of(commits(k)%date) /= day_of(commits(k - 1)%date)) then
+                call text("Commits on "//day_of(commits(k)%date), size=SMALL, id="day", &
+                    width=UI_FILL)
+            end if
+            href = route_href(R_COMMIT, repo, commits(k)%id)
+            call row_begin(12.0, id="row-c"//ui_str(k), height=60.0)
+            call column_begin(4.0)
+            if (link("subject", commits(k)%subject, href, size=BODY, style=UI_HEADING, &
+                tone=UI_TONE_NORMAL, width=UI_FILL)) call go(href)
+            call text(commits(k)%author//" committed "//ago(commits(k)%date), size=SMALL, &
+                tone=UI_TONE_MUTED, width=UI_FILL)
+            call column_end()
+            if (link("id", short(commits(k)%id), href, size=SMALL, style=UI_CODE, &
+                tone=UI_TONE_MUTED)) call go(href)
             call row_end()
         end do
         call column_end()
     end subroutine history_view
 
-    subroutine commit_view(narrow)
-        logical, intent(in) :: narrow
+    subroutine commit_view()
         integer :: f, k, adds, dels
 
         adds = 0
@@ -355,40 +562,37 @@ contains
             dels = dels + diff_files(f)%deletions
         end do
 
-        call column_begin(10.0, id="card-commithead")
-        if (button("history", "Back to history", size=SMALL)) then
-            commit_id = ''
-            call column_end()
-            return
-        end if
-        call text(c_subject, size=20.0, style=UI_HEADING, width=UI_FILL)
+        call column_begin(8.0, id="card-commithead")
+        call text(c_subject, size=20.0, style=UI_HEADING, width=UI_FILL, id="subject")
         if (len(c_body) > 0) call text(c_body, size=BODY, width=UI_FILL, tone=UI_TONE_MUTED, &
             id="commitbody")
-        call row_begin(8.0, id="commitmeta")
+        call row_begin(GAP, id="commitmeta")
         call text(c_author, size=SMALL, style=UI_HEADING)
         call text("committed "//ago(c_date), size=SMALL, tone=UI_TONE_MUTED)
         call text("", width=UI_FILL)
-        if (.not. narrow) call text(commit_id, style=UI_CODE, size=12.0, tone=UI_TONE_MUTED)
+        call text("commit", size=SMALL, tone=UI_TONE_MUTED)
+        call text(commit_id, style=UI_CODE, size=SMALL, id="sha")
         call row_end()
         call column_end()
 
-        call row_begin(10.0, id="diffstat", height=ROW_H)
-        if (size(diff_files) == 1) then
-            call text("1 file changed", size=SMALL)
-        else
-            call text(ui_str(size(diff_files))//" files changed", size=SMALL)
+        if (len(c_author) > 0) then
+            call row_begin(GAP, id="diffstat", height=ROW_H)
+            if (size(diff_files) == 1) then
+                call text("1 file changed", size=BODY)
+            else
+                call text(ui_str(size(diff_files))//" files changed", size=BODY)
+            end if
+            call text("+"//ui_str(adds), size=BODY, tone=UI_TONE_POSITIVE)
+            call text("−"//ui_str(dels), size=BODY, tone=UI_TONE_NEGATIVE)
+            call row_end()
         end if
-        call text("+"//ui_str(adds), size=SMALL, tone=UI_TONE_POSITIVE)
-        call text("−"//ui_str(dels), size=SMALL, tone=UI_TONE_NEGATIVE)
-        call row_end()
 
         do f = 1, size(diff_files)
             call column_begin(0.0, id="card-diff"//ui_str(f))
-            call row_begin(10.0, id="dhead", height=40.0)
-            if (diff_files(f)%status /= 'modified') call text(diff_files(f)%status, size=12.0, &
+            call row_begin(GAP, id="dhead", height=ROW_H)
+            if (diff_files(f)%status /= 'modified') call text(diff_files(f)%status, size=SMALL, &
                 id="badge", tone=badge_tone(diff_files(f)%status))
-            call text(diff_files(f)%path, style=UI_CODE, size=SMALL, width=UI_FILL, &
-                ellipsis=.true.)
+            call text(diff_files(f)%path, style=UI_CODE, size=SMALL, width=UI_FILL, id="path")
             call text("+"//ui_str(diff_files(f)%additions), size=SMALL, tone=UI_TONE_POSITIVE)
             call text("−"//ui_str(diff_files(f)%deletions), size=SMALL, tone=UI_TONE_NEGATIVE)
             call row_end()
@@ -415,55 +619,7 @@ contains
         end select
     end function badge_tone
 
-    ! ---- navigation and requests ------------------------------------------------------
-
-    subroutine open_repo(name)
-        character(len=*), intent(in) :: name
-        repo = name
-        sub_tab = 1
-        deallocate (commits)
-        allocate (commits(0))
-        commit_id = ''
-        branch = ''
-        call fetch_start(refs_req, 'GET', '/api/v1/repos/'//repo//'/refs')
-        call load_log()
-        call open_dir('')
-    end subroutine open_repo
-
-    subroutine load_log()
-        call fetch_start(log_req, 'GET', '/api/v1/repos/'//repo//'/log')
-    end subroutine load_log
-
-    subroutine open_dir(path)
-        character(len=*), intent(in) :: path
-        dir = path
-        file = ''
-        note = ''
-        has_readme = .false.
-        call fetch_start(tree_req, 'GET', '/api/v1/repos/'//repo//'/tree?path='//encode(path))
-    end subroutine open_dir
-
-    subroutine open_file(path)
-        character(len=*), intent(in) :: path
-        file = path
-        note = ''
-        file_info = ''
-        call plain_lines(file_lines, 'Loading...')
-        call fetch_start(blob_req, 'GET', '/api/v1/repos/'//repo//'/blob?path='//encode(path))
-    end subroutine open_file
-
-    subroutine open_commit(id)
-        character(len=*), intent(in) :: id
-        sub_tab = 2
-        commit_id = id
-        c_subject = 'Loading...'
-        c_body = ''
-        c_author = ''
-        c_date = ''
-        deallocate (diff_files)
-        allocate (diff_files(0))
-        call fetch_start(commit_req, 'GET', '/api/v1/repos/'//repo//'/commits/'//id)
-    end subroutine open_commit
+    ! ---- responses ----------------------------------------------------------------------
 
     subroutine repo_view_receive()
         !! Applies finished requests to the repository pages.
@@ -473,7 +629,10 @@ contains
 
         call init()
         if (fetch_ready(repos_req)) then
-            if (repos_req%status == 200) call parse_repos(repos_req%body)
+            if (repos_req%status == 200) then
+                call parse_repos(repos_req%body)
+                repos_loaded = .true.
+            end if
         end if
         if (fetch_ready(add_req)) then
             if (add_req%status == 201) then
@@ -488,23 +647,29 @@ contains
             call fetch_start(repos_req, 'GET', '/api/v1/repos')
         end if
         if (fetch_ready(refs_req)) then
-            if (refs_req%status == 200) call json_extract_string(refs_req%body, 'default', &
-                branch, found)
+            if (refs_req%status == 200) then
+                call json_extract_string(refs_req%body, 'default', branch, found)
+            else
+                refs_of = ''
+                if (refs_req%status == 404) call lost('This repository does not exist.')
+            end if
         end if
         if (fetch_ready(tree_req)) then
+            tree_ready = .true.
             if (tree_req%status == 200) then
                 call parse_entries(tree_req%body)
                 do k = 1, size(entries)
                     if (entries(k)%kind == 'blob' .and. (lower(entries(k)%name) == 'readme.md' &
                         .or. lower(entries(k)%name) == 'readme')) then
                         readme_name = entries(k)%name
-                        call fetch_start(readme_req, 'GET', '/api/v1/repos/'//repo// &
-                            '/blob?path='//encode(join(dir, readme_name)))
+                        call fetch_start(readme_req, 'GET', api(repo, 'blob')//'?path='// &
+                            url_encode(join(dir, readme_name)))
                         exit
                     end if
                 end do
             else
-                note = 'That directory could not be read.'
+                tree_of = ''
+                call lost('This directory does not exist.')
             end if
         end if
         if (fetch_ready(readme_req)) then
@@ -517,15 +682,24 @@ contains
             if (blob_req%status == 200) then
                 file_bytes = len(blob_req%body)
                 call code_lines(blob_req%body, lang_of(file))
-                file_info = ui_str(size(file_lines))//" lines · "//human_size(file_bytes)
+                if (is_md) call md_parse(blob_req%body, file_md)
+                file_info = ui_str(size(file_lines))//merge(" lines", " line ", &
+                    size(file_lines) /= 1)//" · "//human_size(file_bytes)
             else if (blob_req%status == 413) then
                 call plain_lines(file_lines, 'This file is larger than 1 MiB.')
             else
-                call plain_lines(file_lines, 'This file could not be read.')
+                blob_of = ''
+                call plain_lines(file_lines, 'This file does not exist.')
+                missing = .true.
             end if
         end if
         if (fetch_ready(log_req)) then
-            if (log_req%status == 200) call parse_commits(log_req%body)
+            log_ready = .true.
+            if (log_req%status == 200) then
+                call parse_commits(log_req%body)
+            else
+                log_of = ''
+            end if
         end if
         if (fetch_ready(commit_req)) then
             if (commit_req%status == 200) then
@@ -547,10 +721,18 @@ contains
                 call json_extract_string(commit_req%body, 'patch', s, found)
                 call diff_lines(s)
             else
-                c_subject = 'This commit could not be read.'
+                commit_of = ''
+                c_subject = 'This commit does not exist.'
+                missing = .true.
             end if
         end if
     end subroutine repo_view_receive
+
+    subroutine lost(message)
+        character(len=*), intent(in) :: message
+        note = message
+        missing = .true.
+    end subroutine lost
 
     ! ---- turning content into lines ----------------------------------------------------
 
@@ -700,7 +882,7 @@ contains
         end do
     end function untab
 
-    ! ---- responses ----------------------------------------------------------------------
+    ! ---- parsing responses --------------------------------------------------------------
 
     subroutine parse_repos(body)
         character(len=*), intent(in) :: body
@@ -800,25 +982,18 @@ contains
 
     ! ---- small helpers ----------------------------------------------------------------
 
+    function short(id) result(s)
+        character(len=*), intent(in) :: id
+        character(len=:), allocatable :: s
+        s = id(1:min(7, len(id)))
+    end function short
 
-    function encode(s) result(e)
-        !! Percent-encoding for a query value; '/' stays readable.
-        character(len=*), intent(in) :: s
-        character(len=:), allocatable :: e
-        character(len=*), parameter :: hexd = '0123456789ABCDEF'
-        integer :: k, c
-
-        e = ''
-        do k = 1, len(s)
-            c = iachar(s(k:k))
-            if (index('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~/-', &
-                s(k:k)) > 0) then
-                e = e//s(k:k)
-            else
-                e = e//'%'//hexd(c / 16 + 1:c / 16 + 1)//hexd(mod(c, 16) + 1:mod(c, 16) + 1)
-            end if
-        end do
-    end function encode
+    function leaf(path) result(s)
+        !! The repository's own name, the last segment of its path.
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: s
+        s = path(index(path, '/', back=.true.) + 1:)
+    end function leaf
 
     function join(a, b) result(s)
         character(len=*), intent(in) :: a, b

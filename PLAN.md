@@ -96,8 +96,10 @@ first consumer of fortui's browser backend, which is built in fortui itself.
 
 - [x] Repository list, file browser, history and commits with coloured diffs
       in the application, from a read-only API over the mirrors.
-- [ ] CI logs, test history; browser URLs and back button for these pages;
-      server-rendered HTML as permalinks and a fallback without JavaScript.
+- [x] Every page has its own address (repositories at /GROUP/.../REPO, their
+      pages after /-/ as in GitLab), Back and Forward, and server-rendered
+      HTML for every address, so links can be bookmarked and opened in new tabs.
+- [ ] CI logs and test history, with their own addresses.
 
 **Inspection gate:** the instance is reviewed before anything is hosted
 elsewhere.

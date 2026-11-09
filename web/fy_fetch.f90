@@ -4,7 +4,7 @@ module fy_fetch
     implicit none
     private
 
-    public :: request_t, fetch_start, fetch_ready, page_data
+    public :: request_t, fetch_start, fetch_ready
 
     type :: request_t
         integer :: id = 0
@@ -30,14 +30,6 @@ module fy_fetch
             integer(c_int), value :: id
         end function js_length
 
-        integer(c_int) function js_page_data(name, nname, buf, cap) bind(C, name="fy_page_data")
-            import :: c_int, c_char
-            character(kind=c_char), intent(in) :: name(*)
-            integer(c_int), value :: nname
-            character(kind=c_char), intent(out) :: buf(*)
-            integer(c_int), value :: cap
-        end function js_page_data
-
         integer(c_int) function js_take(id, buf, cap) bind(C, name="fy_fetch_take")
             import :: c_int, c_char
             integer(c_int), value :: id
@@ -47,25 +39,6 @@ module fy_fetch
     end interface
 
 contains
-
-    function page_data(name) result(text)
-        !! The text of the page's <script type="application/json" id="NAME">, or
-        !! empty: data the server sent with the page.
-        character(len=*), intent(in) :: name
-        character(len=:), allocatable :: text
-        character(kind=c_char), allocatable :: buf(:)
-        integer :: n, k
-
-        allocate (buf(1))
-        n = int(js_page_data(name, len(name, c_int), buf, 0_c_int))
-        deallocate (buf)
-        allocate (buf(max(n, 1)))
-        n = int(js_page_data(name, len(name, c_int), buf, int(size(buf), c_int)))
-        allocate (character(len=max(n, 0)) :: text)
-        do k = 1, n
-            text(k:k) = buf(k)
-        end do
-    end function page_data
 
     subroutine fetch_start(req, method, path, body)
         !! Starts a request; `req%id` is 0 again once `fetch_ready` saw it finish.

@@ -29,7 +29,7 @@ module fy_store
     type :: token_info_t
         integer(int64) :: id = 0
         character(len=:), allocatable :: name, scopes, created_at, expires_at
-        logical :: revoked = .false.
+        logical :: revoked = .false., expired = .false.
     end type token_info_t
 
     type :: repo_info_t
@@ -199,7 +199,8 @@ contains
 
         allocate (tokens(0))
         call db_prepare(db, 'SELECT id, name, scopes, created_at, coalesce(expires_at, ''''),'// &
-            ' revoked FROM tokens WHERE account_id = ?1 ORDER BY id DESC;', st, stat)
+            ' revoked, coalesce(expires_at <= '//NOW//', 0) FROM tokens WHERE account_id = ?1'// &
+            ' ORDER BY id DESC;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, account_id, stat)
         do while (stmt_step(st) == SQLITE_ROW)
@@ -209,6 +210,7 @@ contains
             t%created_at = stmt_text(st, 3)
             t%expires_at = stmt_text(st, 4)
             t%revoked = stmt_int(st, 5) /= 0
+            t%expired = stmt_int(st, 6) /= 0
             tokens = [tokens, t]
         end do
         call stmt_finalize(st)

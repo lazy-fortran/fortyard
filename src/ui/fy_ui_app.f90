@@ -1,54 +1,67 @@
 module fy_ui_app
-    !! The fortyard application's state and frames: sign-in, repositories,
-    !! access tokens and server status. Compiled to WebAssembly for the browser
-    !! and natively into the server, which composes the first frame of a page
-    !! and sends it as HTML with the state that produced it.
+    !! The fortyard application's state and frames: sign-in, the navigation
+    !! drawer, repositories, access tokens and server status, each at its own
+    !! location (fy_route). Compiled to WebAssembly for the browser and natively
+    !! into the server, which composes the first frame of a page with the same
+    !! code and sends it as HTML with the responses that produced it.
     use fortui
     use fx_json_build, only: json_escape_string
     use fx_json_parse, only: json_extract_string, json_parser_t, json_event_t, &
         json_parser_init, json_parser_next, JSON_KEY, JSON_STRING, JSON_INTEGER, &
         JSON_BOOL, JSON_OBJECT_END, JSON_END_OF_INPUT, JSON_ERROR
     use fy_fetch, only: request_t, fetch_start, fetch_ready
-    use fy_repo_view, only: repo_view_open, repo_view_compose, repo_view_receive, &
-        repo_view_load, repo_view_reset
+    use fy_nav, only: nav_push, nav_popped, nav_title, nav_assign, nav_set_pref, nav_copy
+    use fy_route, only: route_t, route_parse, route_href, go, go_take, R_REPOS, R_TOKENS, &
+        R_SERVER, R_TREE, R_BLOB, R_COMMITS, R_COMMIT, R_MISSING
+    use fy_repo_view, only: repo_view_reset, repo_view_show, repo_view_list, &
+        repo_view_compose, repo_view_list_compose, repo_view_receive, repo_view_title, &
+        repo_view_repo, repo_view_missing
+    use fy_time, only: ago, day_of, when
     implicit none
     private
 
-    public :: app_start, app_compose
+    public :: app_start, app_compose, app_title, app_missing
 
     type :: token_row_t
         integer :: id = 0
-        character(len=:), allocatable :: name, scopes, created, expires
-        logical :: revoked = .false., current = .false.
+        character(len=:), allocatable :: name, scopes, created, expires, kind
+        logical :: revoked = .false., current = .false., expired = .false.
     end type token_row_t
 
     type(request_t) :: version_req, whoami_req, tokens_req, action_req
     type(token_row_t), allocatable :: tokens(:)
-    character(len=:), allocatable :: version, commit, account, scopes, message
-    character(len=:), allocatable :: token_input, new_name, new_token
-    character(len=16), parameter :: tab_labels(3) = [character(len=16) :: "Repositories", &
-        "Access tokens", "Server"]
-    integer :: tab = 1
-    logical :: signed_in = .false., checked = .false., submitted = .false.
-    logical :: narrow = .false.
-    real :: page_w = 1000.0, page_h = 800.0
-    ! Logical text sizes and spacing of the page.
-    real, parameter :: TITLE = 22.0, HEADING = 17.0, BODY = 15.0, SMALL = 13.0, CTRL = 15.0
-    real, parameter :: GAP = 12.0, SECTION_GAP = 24.0, ROW_H = 36.0
-    real, parameter :: STATUS_W = 150.0, DATE_W = 110.0
+    character(len=:), allocatable :: version, commit, built, account, scopes, message
+    character(len=:), allocatable :: token_input, new_name, new_token, here, theme
     character(len=16) :: action = ''
+    integer :: page = R_REPOS, theme_choice = 1
+    logical :: signed_in = .false., checked = .false., submitted = .false.
+    logical :: pinned = .false., drawer_open = .false., copied = .false.
+    real :: page_w = 1000.0, page_h = 800.0
+    ! Text sizes and spacing of the page, in CSS pixels as forges use them.
+    real, parameter :: BODY = 14.0, SMALL = 12.0, HEADING = 16.0, TITLE = 20.0
+    real, parameter :: GAP = 8.0, ROW_H = 40.0
+    !! From this width on a pinned sidebar stands beside the page (as in the CSS).
+    real, parameter :: WIDE = 1012.0
+    !! Rounds of answers to apply before the first frame: version and whoami,
+    !! then a page's requests, then those they start (a README).
+    integer, parameter :: SETTLE = 6
+    character(len=8), parameter :: THEMES(3) = [character(len=8) :: 'system', 'light', 'dark']
 
 contains
 
-    subroutine app_start(version_json, whoami_json, repos_json)
-        !! Starts from the responses the server embedded in the page (as the API
-        !! returns them; whoami empty when nobody is signed in), or, when the page
-        !! carries none, asks the server.
-        character(len=*), intent(in) :: version_json, whoami_json, repos_json
+    subroutine app_start(location, sidebar, theme_pref)
+        !! Starts at `location` (path and query), with the sidebar preference
+        !! ('pinned' or not) and the colour theme ('light', 'dark' or the
+        !! system's). Answers already at hand (the server's own, or those it sent
+        !! with the page) are applied at once, so server and browser compose the
+        !! same first frame.
+        character(len=*), intent(in) :: location, sidebar, theme_pref
+        integer :: k
 
         ! Everything starts afresh: the server renders pages for different people.
         version = ''
         commit = ''
+        built = ''
         account = ''
         scopes = ''
         message = ''
@@ -56,212 +69,470 @@ contains
         new_name = ''
         new_token = ''
         action = ''
-        tab = 1
+        here = location
+        theme = theme_pref
+        theme_choice = 1
+        do k = 1, size(THEMES)
+            if (theme == trim(THEMES(k))) theme_choice = k
+        end do
+        pinned = sidebar == 'pinned'
+        drawer_open = .false.
+        copied = .false.
         signed_in = .false.
         checked = .false.
         submitted = .false.
+        call set_page(location)
         if (allocated(tokens)) deallocate (tokens)
         allocate (tokens(0))
         call repo_view_reset()
-        if (len_trim(version_json) == 0) then
-            call fetch_start(version_req, 'GET', '/api/v1/version')
-            call fetch_start(whoami_req, 'GET', '/api/v1/whoami')
+        call fetch_start(version_req, 'GET', '/api/v1/version')
+        call fetch_start(whoami_req, 'GET', '/api/v1/whoami')
+        do k = 1, SETTLE
+            call receive()
+        end do
+    end subroutine app_start
+
+    subroutine set_page(location)
+        character(len=*), intent(in) :: location
+        type(route_t) :: r
+        call route_parse(location, r)
+        page = r%kind
+    end subroutine set_page
+
+    subroutine show(location)
+        !! Shows the page at `location`, asking the server only for what is not
+        !! already loaded.
+        character(len=*), intent(in) :: location
+        type(route_t) :: r
+
+        here = location
+        call route_parse(location, r)
+        page = r%kind
+        drawer_open = .false.
+        message = ''
+        if (.not. signed_in) return
+        select case (page)
+        case (R_REPOS)
+            call repo_view_list()
+        case (R_TOKENS)
+            copied = .false.
+            call fetch_start(tokens_req, 'GET', '/api/v1/tokens')
+        case (R_TREE, R_BLOB, R_COMMITS, R_COMMIT)
+            call repo_view_show(r)
+        end select
+    end subroutine show
+
+    subroutine follow(href)
+        !! A followed link: a page of the application gets its own history
+        !! entry; anything else is left to the browser.
+        character(len=*), intent(in) :: href
+        type(route_t) :: r
+
+        call route_parse(href, r)
+        if (r%kind == R_MISSING .and. (index(href, '/api/') == 1 .or. &
+            href == '/status' .or. href == '/healthz')) then
+            call nav_assign(href)
+        else
+            call nav_push(href)
+            call show(href)
+        end if
+    end subroutine follow
+
+    function app_title() result(s)
+        !! The page's title for the browser's tab and history.
+        character(len=:), allocatable :: s
+        if (.not. signed_in) then
+            s = 'Sign in · fortyard'
             return
         end if
-        call apply_version(version_json)
-        if (len_trim(whoami_json) == 0) then
-            call apply_whoami('', 401)
-        else
-            call apply_whoami(whoami_json, 200)
-            if (len_trim(repos_json) > 0) call repo_view_load(repos_json)
-        end if
-    end subroutine app_start
+        select case (page)
+        case (R_REPOS)
+            s = 'Repositories · fortyard'
+        case (R_TOKENS)
+            s = 'Access tokens · fortyard'
+        case (R_SERVER)
+            s = 'Server · fortyard'
+        case (R_MISSING)
+            s = 'Page not found · fortyard'
+        case default
+            s = repo_view_title()//' · fortyard'
+        end select
+    end function app_title
+
+    logical function app_missing()
+        !! Whether the page shown does not exist (the server answers 404).
+        app_missing = signed_in .and. (page == R_MISSING .or. (page >= R_TREE .and. &
+            repo_view_missing()))
+    end function app_missing
 
     subroutine app_compose()
         !! One frame.
-        call receive()
-        call ui_window_size(page_w, page_h)
-        narrow = page_w < 600.0
+        character(len=:), allocatable :: href
 
-        call column_begin(SECTION_GAP)
-        call header()
+        call receive()
+        if (go_take(href)) call follow(href)
+        if (nav_popped(href)) call show(href)
+        if (drawer_open .and. ui_key_pressed(KEY_ESCAPE)) drawer_open = .false.
+        call nav_title(app_title())
+        call ui_window_size(page_w, page_h)
+
+        call column_begin(0.0)
+        call topbar()
+        call row_begin(0.0, id="shell")
+        if (signed_in .and. drawer_open) then
+            if (button("scrim", "Close menu")) drawer_open = .false.
+            call drawer("drawer")
+        else if (signed_in .and. pinned) then
+            call drawer("sidebar")
+        end if
+        call column_begin(0.0, id="main")
+        call column_begin(16.0)
         if (.not. checked) then
-            call text("Loading...", size=BODY)
+            call text("Loading...", size=BODY, tone=UI_TONE_MUTED)
         else if (.not. signed_in) then
             call sign_in_view()
         else
-            if (tabs("tabs", tab_labels, tab, width=min(420.0, page_w), size=CTRL)) then
-                message = ''
-                if (tab == 1) call repo_view_open()
-                if (tab == 2) call fetch_start(tokens_req, 'GET', '/api/v1/tokens')
-            end if
-            select case (tab)
-            case (1)
-                call repo_view_compose(page_w, narrow, index(scopes, 'admin') > 0)
-            case (2)
+            select case (page)
+            case (R_REPOS)
+                call repo_view_list_compose(index(scopes, 'admin') > 0)
+            case (R_TOKENS)
                 call tokens_view()
+            case (R_SERVER)
+                call server_view()
+            case (R_MISSING)
+                call missing_view()
             case default
-                call overview_view()
+                call repo_view_compose()
             end select
         end if
-        if (len(message) > 0) call text(message, size=SMALL, style=UI_CAPTION)
+        if (len(message) > 0) call text(message, size=BODY, tone=UI_TONE_NEGATIVE, id="message")
+        call column_end()
+        call column_end()
+        call row_end()
         call column_end()
     end subroutine app_compose
 
-    subroutine apply_version(body)
-        character(len=*), intent(in) :: body
-        logical :: found
-        call json_extract_string(body, 'version', version, found)
-        if (.not. found) version = ''
-        call json_extract_string(body, 'commit', commit, found)
-        if (.not. found) commit = ''
-    end subroutine apply_version
+    ! ---- frame of every page -------------------------------------------------------
 
-    subroutine apply_whoami(body, status)
-        character(len=*), intent(in) :: body
-        integer, intent(in) :: status
-        logical :: found
-        checked = .true.
-        signed_in = status == 200
-        if (.not. signed_in) return
-        call json_extract_string(body, 'account', account, found)
-        call json_extract_string(body, 'scopes', scopes, found)
-    end subroutine apply_whoami
+    subroutine topbar()
+        character(len=:), allocatable :: repo, rest
+        integer :: slash
 
-
-    subroutine header()
-        call row_begin(GAP, height=44.0)
-        call text("fortyard", size=TITLE, style=UI_TITLE)
+        call row_begin(GAP, id="top", height=64.0)
         if (signed_in) then
-            ! Account and sign-out sit at the right edge of the page.
-            call text("", width=UI_FILL)
-            call text(account, size=SMALL, style=UI_CAPTION)
-            if (button("signout", "Sign out", size=CTRL)) then
-                call fetch_start(action_req, 'DELETE', '/api/v1/session')
-                action = 'signout'
+            if (button("menu", "Open menu", width=40.0, height=40.0)) then
+                if (pinned .and. page_w >= WIDE) then
+                    call pin(.false.)
+                else
+                    drawer_open = .not. drawer_open
+                end if
             end if
         end if
+        if (link("home", "fortyard", "/", size=HEADING, style=UI_HEADING, &
+            tone=UI_TONE_NORMAL)) call go("/")
+        if (signed_in .and. checked) then
+            ! Where the page is: the repository's groups and name, or the page.
+            call row_begin(4.0, id="context")
+            if (page >= R_TREE .and. page <= R_COMMIT) then
+                repo = repo_view_repo()
+                rest = repo
+                call text("/", size=HEADING, tone=UI_TONE_MUTED)
+                do
+                    slash = index(rest, '/')
+                    if (slash == 0) exit
+                    call text(rest(1:slash - 1), size=HEADING, tone=UI_TONE_MUTED, &
+                        id="group"//ui_str(len(rest)))
+                    call text("/", size=HEADING, tone=UI_TONE_MUTED)
+                    rest = rest(slash + 1:)
+                end do
+                if (link("repo", rest, route_href(R_TREE, repo), size=HEADING, &
+                    style=UI_HEADING, tone=UI_TONE_NORMAL, ellipsis=.true.)) &
+                    call go(route_href(R_TREE, repo))
+            else if (page /= R_MISSING) then
+                call text("/", size=HEADING, tone=UI_TONE_MUTED)
+                call text(page_name(page), size=HEADING)
+            end if
+            call row_end()
+        end if
+        call text("", width=UI_FILL)
+        if (signed_in) call text(account, size=BODY, tone=UI_TONE_MUTED, id="account")
         call row_end()
-    end subroutine header
+    end subroutine topbar
+
+    function page_name(kind) result(s)
+        integer, intent(in) :: kind
+        character(len=:), allocatable :: s
+        select case (kind)
+        case (R_TOKENS); s = "Access tokens"
+        case (R_SERVER); s = "Server"
+        case default; s = "Repositories"
+        end select
+    end function page_name
+
+    subroutine drawer(name)
+        !! The navigation: an overlay drawer, or pinned beside the page.
+        character(len=*), intent(in) :: name
+        character(len=:), allocatable :: repo
+        call column_begin(2.0, id=name)
+        if (name == "drawer") then
+            call row_begin(GAP, id="drawerhead", height=48.0)
+            if (link("home", "fortyard", "/", size=HEADING, style=UI_HEADING, &
+                tone=UI_TONE_NORMAL)) call go("/")
+            call text("", width=UI_FILL)
+            if (button("close", "Close menu", width=40.0, height=40.0)) drawer_open = .false.
+            call row_end()
+        end if
+        if (page >= R_TREE .and. page <= R_COMMIT) then
+            repo = repo_view_repo()
+            call text(repo, size=SMALL, style=UI_HEADING, tone=UI_TONE_MUTED, id="section", &
+                width=UI_FILL)
+            call side_link("code", "Code", route_href(R_TREE, repo), &
+                page == R_TREE .or. page == R_BLOB)
+            call side_link("history", "History", route_href(R_COMMITS, repo), &
+                page == R_COMMITS .or. page == R_COMMIT)
+            call text("", width=UI_FILL, id="hr1")
+        end if
+        call side_link("repos", "Repositories", "/", page == R_REPOS)
+        call side_link("tokens", "Access tokens", "/tokens", page == R_TOKENS)
+        call side_link("server", "Server", "/server", page == R_SERVER)
+        call text("", width=UI_FILL, id="hr2")
+        call text("Theme", size=SMALL, style=UI_HEADING, tone=UI_TONE_MUTED, id="section2")
+        if (tabs("theme", [character(len=6) :: "System", "Light", "Dark"], theme_choice, &
+            size=SMALL)) then
+            theme = trim(THEMES(theme_choice))
+            call nav_set_pref('fy_theme', theme)
+        end if
+        if (pinned) then
+            if (button("pin", "Unpin sidebar", width=UI_FILL, height=ROW_H, size=BODY)) &
+                call pin(.false.)
+        else
+            if (button("pin", "Keep sidebar open", width=UI_FILL, height=ROW_H, size=BODY)) &
+                call pin(.true.)
+        end if
+        if (button("signout", "Sign out", width=UI_FILL, height=ROW_H, size=BODY)) call sign_out()
+        call column_end()
+    end subroutine drawer
+
+    subroutine side_link(id, label, href, selected)
+        character(len=*), intent(in) :: id, label, href
+        logical, intent(in) :: selected
+        if (link(id, label, href, size=BODY, width=UI_FILL, &
+            tone=merge(UI_TONE_STRONG, UI_TONE_NORMAL, selected))) then
+            drawer_open = .false.
+            call go(href)
+        end if
+    end subroutine side_link
+
+    subroutine pin(on)
+        logical, intent(in) :: on
+        pinned = on
+        drawer_open = .false.
+        if (on) then
+            call nav_set_pref('fy_sidebar', 'pinned')
+        else
+            call nav_set_pref('fy_sidebar', '')
+        end if
+    end subroutine pin
+
+    subroutine sign_out()
+        drawer_open = .false.
+        call fetch_start(action_req, 'DELETE', '/api/v1/session')
+        action = 'signout'
+    end subroutine sign_out
+
+    ! ---- pages ----------------------------------------------------------------------
 
     subroutine sign_in_view()
-        call column_begin(GAP)
-        call text("Sign in", size=HEADING, style=UI_HEADING)
+        call column_begin(12.0, id="card-signin")
+        call text("Sign in to fortyard", size=TITLE, style=UI_HEADING)
         call text("Paste an access token. The browser keeps only a session cookie.", &
-            size=BODY)
-        call row_begin(GAP, height=ROW_H)
+            size=BODY, tone=UI_TONE_MUTED, width=UI_FILL)
+        call text("Access token", size=BODY, style=UI_HEADING)
         if (text_input("token", token_input, placeholder="fy_...", submitted=submitted, &
-            width=UI_FILL, size=CTRL)) continue
-        if (button("signin", "Sign in", size=CTRL) .or. submitted) then
+            width=UI_FILL, size=BODY)) continue
+        if (button("signin", "Sign in", width=UI_FILL, height=ROW_H, size=BODY) &
+            .or. submitted) then
             if (len_trim(token_input) > 0) then
                 call fetch_start(action_req, 'POST', '/api/v1/session', &
-                    '{"token":"' // json_escape_string(trim(token_input)) // '"}')
+                    '{"token":"'//json_escape_string(trim(token_input))//'"}')
                 action = 'signin'
             end if
         end if
-        call row_end()
+        call text("An administrator creates the first token with fy serve --init; "// &
+            "fy token create makes more.", size=SMALL, tone=UI_TONE_MUTED, width=UI_FILL)
         call column_end()
     end subroutine sign_in_view
 
-    subroutine overview_view()
-        call column_begin(GAP)
-        call text("Server", size=HEADING, style=UI_HEADING)
-        call field("Version", version)
-        call field("Commit", commit)
-        call text("Account", size=HEADING, style=UI_HEADING)
-        call field("Name", account)
-        call field("Scopes", scopes)
+    subroutine missing_view()
+        call text("Page not found", size=TITLE, style=UI_HEADING)
+        call text("This page does not exist.", size=BODY, tone=UI_TONE_MUTED)
+        if (link("back", "Go to the repositories", "/", size=BODY)) call go("/")
+    end subroutine missing_view
+
+    subroutine server_view()
+
+        call text("Server", size=TITLE, style=UI_HEADING, id="title")
+        call column_begin(0.0, id="card-server")
+        call field("Version", version, .false.)
+        call field("Commit", commit, .true.)
+        if (len(built) >= 16) then
+            call field("Built", when(built)//' UTC', .false.)
+        else
+            call field("Built", "unknown", .false.)
+        end if
         call column_end()
-    end subroutine overview_view
+        call text("Your account", size=HEADING, style=UI_HEADING, id="heading2")
+        call column_begin(0.0, id="card-account")
+        call field("Account", account, .false.)
+        call row_begin(12.0, id="row-scopes", height=ROW_H)
+        call text("Scopes", size=BODY, tone=UI_TONE_MUTED, width=120.0)
+        call scope_badges(scopes)
+        call row_end()
+        call column_end()
+        call text("Health", size=HEADING, style=UI_HEADING, id="heading3")
+        call row_begin(16.0, id="links")
+        if (link("status", "Status page", "/status", size=BODY)) call go("/status")
+        if (link("healthz", "Health check", "/healthz", size=BODY)) call go("/healthz")
+        if (link("versionapi", "Version (JSON)", "/api/v1/version", size=BODY)) &
+            call go("/api/v1/version")
+        call row_end()
+    end subroutine server_view
 
-    subroutine field(label, value)
+    subroutine field(label, value, code)
         character(len=*), intent(in) :: label, value
+        logical, intent(in) :: code
 
-        call row_begin(GAP, height=24.0)
-        call text(label, size=SMALL, style=UI_CAPTION, width=90.0)
-        call text(value, size=BODY, width=UI_FILL, ellipsis=.true.)
+        call row_begin(12.0, id="row-"//label, height=ROW_H)
+        call text(label, size=BODY, tone=UI_TONE_MUTED, width=120.0)
+        if (code) then
+            call text(value, size=SMALL, style=UI_CODE, width=UI_FILL)
+        else
+            call text(value, size=BODY, width=UI_FILL)
+        end if
         call row_end()
     end subroutine field
 
     subroutine tokens_view()
-        real, parameter :: ACTION_W = 90.0
-        integer :: k
+        integer :: k, n
 
-        call column_begin(GAP)
-        call text("New token", size=HEADING, style=UI_HEADING)
-        call row_begin(GAP, height=ROW_H)
-        if (text_input("newname", new_name, placeholder="Name, e.g. laptop", &
-            submitted=submitted, width=320.0, size=CTRL)) continue
-        if (button("create", "Create", size=CTRL) .or. submitted) then
+        call text("Access tokens", size=TITLE, style=UI_HEADING, id="title")
+        call text("Tokens let the command line (fy login) and other programs act as you, "// &
+            "with your scopes.", size=BODY, tone=UI_TONE_MUTED, width=UI_FILL, id="intro")
+        call row_begin(GAP, id="createform", height=ROW_H)
+        if (text_input("newname", new_name, placeholder="Token name, e.g. laptop", &
+            submitted=submitted, width=UI_FILL, size=BODY)) continue
+        if (button("create", "Create token", height=ROW_H, size=BODY) .or. submitted) then
             if (len_trim(new_name) > 0) then
                 call fetch_start(action_req, 'POST', '/api/v1/tokens', &
-                    '{"name":"' // json_escape_string(trim(new_name)) // '"}')
+                    '{"name":"'//json_escape_string(trim(new_name))//'"}')
                 action = 'create'
             end if
         end if
         call row_end()
         if (len(new_token) > 0) then
-            call text("Copy it now; it is shown only once:", size=SMALL, style=UI_CAPTION)
-            call text(new_token, size=BODY, width=UI_FILL, ellipsis=.true., id="newtoken")
+            call column_begin(GAP, id="card-newtoken")
+            call text("Copy your new token now. It is shown only once.", size=BODY, &
+                style=UI_HEADING, width=UI_FILL)
+            call row_begin(GAP, id="tokenrow", height=ROW_H)
+            call text(new_token, size=SMALL, style=UI_CODE, width=UI_FILL, id="newtoken")
+            if (button("copy", merge("Copied", "Copy  ", copied), height=ROW_H, size=BODY)) then
+                call nav_copy(new_token)
+                copied = .true.
+            end if
+            call row_end()
+            call column_end()
+        end if
+
+        call text("Tokens", size=HEADING, style=UI_HEADING, id="heading-tokens")
+        call column_begin(0.0, id="card-tokens")
+        n = 0
+        do k = 1, size(tokens)
+            if (tokens(k)%kind == 'session' .or. tokens(k)%revoked) cycle
+            n = n + 1
+            call row_begin(12.0, id="row-t"//ui_str(tokens(k)%id), height=64.0)
+            call column_begin(4.0)
+            call row_begin(GAP)
+            call text(tokens(k)%name, size=BODY, style=UI_HEADING)
+            call scope_badges(tokens(k)%scopes)
+            call row_end()
+            call text(token_dates(tokens(k)), size=SMALL, tone=UI_TONE_MUTED, width=UI_FILL)
+            call column_end()
+            if (tokens(k)%current) then
+                call text("used here", size=SMALL, id="here")
+            else if (button("revoke", "Revoke", key=tokens(k)%id, height=ROW_H, size=BODY)) then
+                call revoke(tokens(k)%id)
+            end if
+            call row_end()
+        end do
+        if (n == 0) then
+            call row_begin(12.0, id="row-none", height=ROW_H)
+            call text("No access tokens.", size=BODY, tone=UI_TONE_MUTED)
+            call row_end()
         end if
         call column_end()
 
-        call column_begin(4.0)
-        call text("Tokens", size=HEADING, style=UI_HEADING)
-        if (.not. narrow) then
-            call row_begin(GAP, height=24.0)
-            call text("Name", size=SMALL, style=UI_CAPTION, width=UI_FILL)
-            call text("Status", size=SMALL, style=UI_CAPTION, width=STATUS_W)
-            call text("Created", size=SMALL, style=UI_CAPTION, width=DATE_W)
-            call text("", width=ACTION_W)
-            call row_end()
-        end if
+        call text("Sessions", size=HEADING, style=UI_HEADING, id="heading-sessions")
+        call text("Browsers signed in to your account. Signing a session out ends it there.", &
+            size=BODY, tone=UI_TONE_MUTED, width=UI_FILL, id="intro2")
+        call column_begin(0.0, id="card-sessions")
         do k = 1, size(tokens)
-            call row_begin(GAP, id="row" // ui_str(tokens(k)%id), height=ROW_H)
-            call text(tokens(k)%name, size=BODY, width=UI_FILL, ellipsis=.true.)
-            if (.not. narrow) then
-                call text(status_of(tokens(k)), size=SMALL, style=UI_CAPTION, &
-                    width=STATUS_W)
-                call text(day(tokens(k)%created), size=SMALL, style=UI_CAPTION, &
-                    width=DATE_W)
-            end if
-            if (.not. tokens(k)%revoked .and. .not. tokens(k)%current) then
-                if (button("revoke", "Revoke", key=tokens(k)%id, size=CTRL, &
-                    width=ACTION_W)) then
-                    call fetch_start(action_req, 'POST', '/api/v1/tokens/' // &
-                        ui_str(tokens(k)%id) // '/revoke', '{}')
-                    action = 'revoke'
-                end if
-            else
-                call text("", width=ACTION_W)
+            if (tokens(k)%kind /= 'session' .or. tokens(k)%revoked .or. tokens(k)%expired) cycle
+            call row_begin(12.0, id="row-s"//ui_str(tokens(k)%id), height=64.0)
+            call column_begin(4.0)
+            call row_begin(GAP)
+            call text("Browser session", size=BODY, style=UI_HEADING)
+            if (tokens(k)%current) call text("this browser", size=SMALL, id="current")
+            call row_end()
+            call text("Signed in "//ago(tokens(k)%created)//" · expires "// &
+                day_of(tokens(k)%expires), size=SMALL, tone=UI_TONE_MUTED, width=UI_FILL)
+            call column_end()
+            if (tokens(k)%current) then
+                if (button("signouthere", "Sign out", height=ROW_H, size=BODY)) call sign_out()
+            else if (button("revoke", "Sign out", key=tokens(k)%id, height=ROW_H, size=BODY)) then
+                call revoke(tokens(k)%id)
             end if
             call row_end()
-            if (narrow) call text(status_of(tokens(k)) // ", created " // &
-                day(tokens(k)%created), size=SMALL, style=UI_CAPTION)
         end do
         call column_end()
     end subroutine tokens_view
 
-    function day(stamp) result(s)
-        character(len=*), intent(in) :: stamp
-        character(len=:), allocatable :: s
-        s = stamp(1:min(10, len(stamp)))
-    end function day
+    subroutine scope_badges(list)
+        character(len=*), intent(in) :: list
+        character(len=:), allocatable :: rest
+        integer :: k, sp
 
-    function status_of(t) result(s)
+        rest = trim(adjustl(list))
+        k = 0
+        do while (len(rest) > 0)
+            k = k + 1
+            sp = index(rest, ' ')
+            if (sp == 0) sp = len(rest) + 1
+            call text(rest(1:sp - 1), size=SMALL, id="scope"//ui_str(k))
+            if (sp > len(rest)) exit
+            rest = trim(adjustl(rest(sp + 1:)))
+        end do
+    end subroutine scope_badges
+
+    function token_dates(t) result(s)
         type(token_row_t), intent(in) :: t
         character(len=:), allocatable :: s
-
-        if (t%revoked) then
-            s = "revoked"
-        else if (t%current) then
-            s = "this session"
+        s = "Created "//ago(t%created)
+        if (t%expired) then
+            s = s//" · expired "//day_of(t%expires)
         else if (len(t%expires) > 0) then
-            s = "expires " // day(t%expires)
+            s = s//" · expires "//day_of(t%expires)
         else
-            s = "active"
+            s = s//" · never expires"
         end if
-    end function status_of
+    end function token_dates
+
+    subroutine revoke(id)
+        integer, intent(in) :: id
+        call fetch_start(action_req, 'POST', '/api/v1/tokens/'//ui_str(id)//'/revoke', '{}')
+        action = 'revoke'
+    end subroutine revoke
+
+    ! ---- responses ------------------------------------------------------------------
 
     subroutine receive()
         !! Applies finished requests to the application state.
@@ -270,10 +541,7 @@ contains
         if (fetch_ready(version_req)) call apply_version(version_req%body)
         if (fetch_ready(whoami_req)) then
             call apply_whoami(whoami_req%body, whoami_req%status)
-            if (signed_in) then
-                call fetch_start(tokens_req, 'GET', '/api/v1/tokens')
-                call repo_view_open()
-            end if
+            if (signed_in) call show(here)
         end if
         call repo_view_receive()
         if (fetch_ready(tokens_req)) then
@@ -294,11 +562,16 @@ contains
                 new_token = ''
                 deallocate (tokens)
                 allocate (tokens(0))
+                call repo_view_reset()
+                call nav_push('/')
+                here = '/'
+                page = R_REPOS
             case ('create')
                 if (action_req%status == 201) then
                     call json_extract_string(action_req%body, 'token', new_token, found)
                     new_name = ''
                     message = ''
+                    copied = .false.
                 else
                     message = "The token was not created."
                 end if
@@ -310,6 +583,28 @@ contains
             action = ''
         end if
     end subroutine receive
+
+    subroutine apply_version(body)
+        character(len=*), intent(in) :: body
+        logical :: found
+        call json_extract_string(body, 'version', version, found)
+        if (.not. found) version = ''
+        call json_extract_string(body, 'commit', commit, found)
+        if (.not. found) commit = ''
+        call json_extract_string(body, 'built', built, found)
+        if (.not. found) built = ''
+    end subroutine apply_version
+
+    subroutine apply_whoami(body, status)
+        character(len=*), intent(in) :: body
+        integer, intent(in) :: status
+        logical :: found
+        checked = .true.
+        signed_in = status == 200
+        if (.not. signed_in) return
+        call json_extract_string(body, 'account', account, found)
+        call json_extract_string(body, 'scopes', scopes, found)
+    end subroutine apply_whoami
 
     subroutine parse_tokens(body)
         character(len=*), intent(in) :: body
@@ -336,12 +631,14 @@ contains
                 case ('scopes'); row%scopes = ev%string_val
                 case ('created'); row%created = ev%string_val
                 case ('expires'); row%expires = ev%string_val
+                case ('kind'); row%kind = ev%string_val
                 end select
             case (JSON_INTEGER)
                 if (key == 'id') row%id = ev%int_val
             case (JSON_BOOL)
                 if (key == 'revoked') row%revoked = ev%bool_val
                 if (key == 'current') row%current = ev%bool_val
+                if (key == 'expired') row%expired = ev%bool_val
             case (JSON_OBJECT_END)
                 if (row%id > 0) tokens = [tokens, row]
                 call reset_row()
@@ -356,8 +653,10 @@ contains
             row%scopes = ''
             row%created = ''
             row%expires = ''
+            row%kind = 'token'
             row%revoked = .false.
             row%current = .false.
+            row%expired = .false.
         end subroutine reset_row
 
     end subroutine parse_tokens

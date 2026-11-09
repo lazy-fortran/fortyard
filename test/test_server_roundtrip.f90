@@ -89,23 +89,41 @@ program test_server_roundtrip
     call execute_command_line('rm -rf build/test_web && mkdir -p build/test_web' // &
         ' && printf code > build/test_web/fy_app.wasm')
     open (newunit=u, file='build/test_web/index.html', status='replace', action='write')
-    write (u, '(a)') '<p>page</p><div id="app"></div><!--fy-data-->'
+    write (u, '(a)') '<title>t</title><p>page</p><div id="app"></div><!--fy-data-->'
     close (u)
     call server_set_web_dir('build/test_web')
     reply = exchange('GET / HTTP/1.1'//CRLF//CRLF)
     call check(index(reply, '<p>page</p><div id="app"><div class="fui-root') > 0 .and. &
-        index(reply, 'data-id="token"') > 0, 'the page carries its first frame: sign-in')
-    call check(index(reply, 'id="fy-version"') > 0 .and. index(reply, 'fy-whoami') == 0 &
-        .and. index(reply, 'Cache-Control: no-store') > 0, 'anonymous page: version only, not cached')
+        index(reply, '/token"') > 0, 'the page carries its first frame: sign-in')
+    call check(index(reply, '"p":"/api/v1/version","s":200') > 0 .and. &
+        index(reply, '"p":"/api/v1/whoami","s":401') > 0 .and. &
+        index(reply, 'Cache-Control: no-store') > 0, 'anonymous page: the answers it used, not cached')
+    call check(index(reply, '<title>Sign in · fortyard</title>') > 0, 'the page has its own title')
     reply = exchange('POST /api/v1/session HTTP/1.1'//CRLF// &
         'Content-Type: application/json'//CRLF//'Content-Length: 79'//CRLF//CRLF// &
         '{"token":"'//token//'"}')
     k = index(reply, 'Set-Cookie: fy_session=')
     cookie = reply(k + 12:k + 12 + len('fy_session=') + 67 - 1)
     reply = exchange('GET / HTTP/1.1'//CRLF//'Cookie: '//cookie//CRLF//CRLF)
-    call check(index(reply, 'id="fy-whoami">{"account":"admin"') > 0 .and. &
-        index(reply, 'id="fy-repos">{"repos":[]}') > 0 .and. index(reply, 'data-id="signout"') > 0, &
+    call check(index(reply, '"p":"/api/v1/whoami","s":200,"b":"{'//achar(92)//'"account'//achar(92)//'":'// &
+        achar(92)//'"admin') > 0 .and. &
+        index(reply, '"p":"/api/v1/repos","s":200') > 0 .and. index(reply, '/account"') > 0, &
         'signed-in page: account, repositories and their first frame')
+    reply = exchange('POST /api/v1/tokens HTTP/1.1'//CRLF//'Cookie: '//cookie//CRLF// &
+        'Content-Type: application/json'//CRLF//'Content-Length: 22'//CRLF//CRLF//'{"name":"a</script>b"}')
+    call check(index(reply, 'HTTP/1.1 201') == 1, 'a token named with markup')
+    reply = exchange('GET /tokens HTTP/1.1'//CRLF//'Cookie: '//cookie//CRLF//CRLF)
+    call check(index(reply, 'HTTP/1.1 200') == 1 .and. &
+        index(reply, '<title>Access tokens · fortyard</title>') > 0 .and. &
+        index(reply, '"p":"/api/v1/tokens"') > 0, 'a deep link renders its own page')
+    call check(index(reply, '</script>b') == 0 .and. index(reply, achar(92)//'u003c/script>b') > 0, &
+        'data in the page cannot end its script element')
+    reply = exchange('GET /no/such/-/thing HTTP/1.1'//CRLF//'Cookie: '//cookie//CRLF//CRLF)
+    call check(index(reply, 'HTTP/1.1 404') == 1 .and. index(reply, 'Page not found') > 0, &
+        'an unknown location is a page that says so, with 404')
+    reply = exchange('GET /healthz/x HTTP/1.1'//CRLF//CRLF)
+    call check(index(reply, 'HTTP/1.1 404') == 1 .and. index(reply, 'fui-root') == 0, &
+        'reserved names are never pages')
     reply = exchange('GET /app/fy_app.wasm HTTP/1.1'//CRLF//CRLF)
     call check(index(reply, 'application/wasm') > 0 .and. index(reply, CRLF//CRLF//'code') > 0, &
         'WebAssembly served with its type')

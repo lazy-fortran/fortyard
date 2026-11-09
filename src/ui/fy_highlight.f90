@@ -43,8 +43,10 @@ module fy_highlight
         &in import from as with try except finally raise pass break continue lambda yield &
         &None True False and or not is global nonlocal assert del async await '
     character(len=*), parameter :: SH_KEYWORDS = ' if then else elif fi for in do done &
-        &while until case esac function return local export set unset echo exit shift &
-        &read cd test trap source eval exec '
+        &while until case esac function '
+    !! Builtins count only as commands, not as arguments (fo test).
+    character(len=*), parameter :: SH_BUILTINS = ' return local export set unset echo exit &
+        &shift read cd test trap source eval exec '
     character(len=*), parameter :: LITERALS = ' true false yes no on off null '
 
 contains
@@ -345,6 +347,7 @@ contains
                             call classify(line(i:j), PY_KEYWORDS, ' ', i, j)
                         else if (lang == LANG_SHELL) then
                             call classify(line(i:j), SH_KEYWORDS, ' ', i, j)
+                            if (command_at(i)) call classify(line(i:j), SH_BUILTINS, ' ', i, j)
                         else if (index(LITERALS, ' '//lower(line(i:j))//' ') > 0) then
                             tone(i:j) = UI_TONE_NUMBER
                         end if
@@ -381,6 +384,16 @@ contains
                 end if
             end do
         end subroutine markdown_line
+
+        logical function command_at(a)
+            !! Whether a word at `a` is in command position.
+            integer, intent(in) :: a
+            integer :: p
+            p = verify(line(1:a - 1), ' ', back=.true.)
+            command_at = p == 0
+            if (p > 0) command_at = index(';|&(', line(p:p)) > 0 .or. &
+                line(max(1, p - 3):p) == 'then' .or. line(max(1, p - 1):p) == 'do'
+        end function command_at
 
         subroutine classify(word, keywords, types, a, b)
             character(len=*), intent(in) :: word, keywords, types

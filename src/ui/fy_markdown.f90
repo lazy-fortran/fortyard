@@ -10,7 +10,7 @@ module fy_markdown
     public :: md_doc_t, md_parse, md_compose
 
     integer, parameter :: B_PARA = 1, B_HEAD = 2, B_ITEM = 3, B_QUOTE = 4, B_CODE = 5, &
-        B_RULE = 6
+        B_RULE = 6, B_CELL = 7, B_HEAD_CELL = 8
 
     type :: md_block_t
         integer :: kind = B_PARA
@@ -28,13 +28,16 @@ contains
     subroutine md_parse(source, doc)
         character(len=*), intent(in) :: source
         type(md_doc_t), intent(out) :: doc
-        character(len=:), allocatable :: line, para, fence_lang
-        integer :: pos, nl, t, level, state, lang
-        logical :: in_fence
+        character(len=:), allocatable :: line, para, fence_lang, item
+        integer :: pos, nl, t, level, state, lang, item_level
+        logical :: in_fence, have_item
 
         allocate (doc%blocks(0))
         para = ''
         in_fence = .false.
+        have_item = .false.
+        item = ""
+        item_level = 0
         state = 0
         lang = 0
         pos = 1
@@ -90,16 +93,15 @@ contains
                 cycle
             end if
             if (line(t:t) == '|') then
-                ! Tables keep their alignment as code.
                 call flush_para()
-                call code_block(line(t:), 0, state)
+                call table_row(trim(line(t:)))
                 cycle
             end if
             if (len(line) >= t + 1) then
                 if ((line(t:t) == '-' .or. line(t:t) == '*' .or. line(t:t) == '+') .and. &
                     line(t + 1:t + 1) == ' ') then
                     call flush_para()
-                    call inline_block(B_ITEM, t / 2, trim(line(t + 2:)))
+                    call start_item(t / 2, trim(line(t + 2:)))
                     cycle
                 end if
             end if
@@ -107,7 +109,7 @@ contains
             if (level > 1 .and. t + level <= len(line)) then
                 if (line(t + level - 1:t + level) == '. ') then
                     call flush_para()
-                    call inline_block(B_ITEM, t / 2, line(t:t + level - 1)//' '// &
+                    call start_item(t / 2, line(t:t + level - 1)//' '// &
                         trim(line(t + level + 1:)))
                     cycle
                 end if
@@ -115,6 +117,11 @@ contains
             if (line(t:t) == '>') then
                 call flush_para()
                 call inline_block(B_QUOTE, 0, trim(adjustl(line(t + 1:))))
+                cycle
+            end if
+            ! A line after a list item continues it, as on GitHub.
+            if (have_item) then
+                item = item//' '//trim(line(t:))
                 cycle
             end if
             if (len(para) > 0) para = para//' '
@@ -125,10 +132,52 @@ contains
     contains
 
         subroutine flush_para()
+            if (have_item) call inline_block(B_ITEM, item_level, item)
+            have_item = .false.
             if (len(para) == 0) return
             call inline_block(B_PARA, 0, para)
             para = ''
         end subroutine flush_para
+
+        subroutine table_row(row)
+            !! One row of a table as its cells; the first row is the header and
+            !! the delimiter row (|---|:--:|) is dropped.
+            character(len=*), intent(in) :: row
+            character(len=:), allocatable :: rest
+            integer :: col, bar, kind
+
+            if (verify(row, '|-: ') == 0) return
+            kind = B_CELL
+            if (size(doc%blocks) == 0) then
+                kind = B_HEAD_CELL
+            else if (doc%blocks(size(doc%blocks))%kind /= B_CELL .and. &
+                    doc%blocks(size(doc%blocks))%kind /= B_HEAD_CELL) then
+                kind = B_HEAD_CELL
+            end if
+            rest = row(2:)
+            if (len(rest) > 0) then
+                if (rest(len(rest):) == '|') rest = rest(1:len(rest) - 1)
+            end if
+            col = 0
+            do
+                col = col + 1
+                bar = index(rest, '|')
+                if (bar == 0) then
+                    call inline_block(kind, col, trim(adjustl(rest)))
+                    exit
+                end if
+                call inline_block(kind, col, trim(adjustl(rest(1:bar - 1))))
+                rest = rest(bar + 1:)
+            end do
+        end subroutine table_row
+
+        subroutine start_item(level, text)
+            integer, intent(in) :: level
+            character(len=*), intent(in) :: text
+            have_item = .true.
+            item_level = level
+            item = text
+        end subroutine start_item
 
         subroutine inline_block(kind, level, text)
             integer, intent(in) :: kind, level
@@ -241,7 +290,7 @@ contains
         !! one code block.
         type(md_doc_t), intent(in) :: doc
         integer :: k
-        real, parameter :: HEAD_SIZE(6) = [26.0, 21.0, 18.0, 16.0, 15.0, 14.0]
+        real, parameter :: HEAD_SIZE(6) = [32.0, 24.0, 20.0, 16.0, 14.0, 13.6], BODY = 16.0
 
         k = 1
         do while (k <= size(doc%blocks))
@@ -249,16 +298,19 @@ contains
                 select case (b%kind)
                 case (B_HEAD)
                     call text(b%text, style=UI_HEADING, size=HEAD_SIZE(b%level), &
-                        width=UI_FILL, ends=b%ends, tones=b%tones)
+                        id="h"//ui_str(b%level)//"-"//ui_str(k), width=UI_FILL, ends=b%ends, tones=b%tones)
                 case (B_ITEM)
                     call row_begin(6.0, id="li"//ui_str(k))
-                    call text(repeat("  ", b%level)//"•", style=UI_BODY, size=15.0, &
+                    call text(repeat("  ", b%level)//"•", style=UI_BODY, size=BODY, &
                         tone=UI_TONE_MUTED)
-                    call text(b%text, size=15.0, width=UI_FILL, ends=b%ends, tones=b%tones)
+                    call text(b%text, size=BODY, width=UI_FILL, ends=b%ends, tones=b%tones)
                     call row_end()
                 case (B_QUOTE)
-                    call text(b%text, size=15.0, width=UI_FILL, tone=UI_TONE_MUTED, &
+                    call text(b%text, size=BODY, width=UI_FILL, tone=UI_TONE_MUTED, &
                         ends=b%ends, tones=b%tones)
+                case (B_CELL, B_HEAD_CELL)
+                    call table(doc, k)
+                    cycle
                 case (B_RULE)
                     call text("", width=UI_FILL, id="hr"//ui_str(k))
                 case (B_CODE)
@@ -272,11 +324,40 @@ contains
                     call column_end()
                     cycle
                 case default
-                    call text(b%text, size=15.0, width=UI_FILL, ends=b%ends, tones=b%tones)
+                    call text(b%text, size=BODY, width=UI_FILL, ends=b%ends, tones=b%tones)
                 end select
             end associate
             k = k + 1
         end do
     end subroutine md_compose
+
+    subroutine table(doc, k)
+        !! The table whose first cell is block k; k ends after its last cell.
+        type(md_doc_t), intent(in) :: doc
+        integer, intent(inout) :: k
+        integer :: row
+
+        call column_begin(0.0, id="mdtable"//ui_str(k))
+        row = 0
+        do while (k <= size(doc%blocks))
+            associate (b => doc%blocks(k))
+                if (b%kind /= B_CELL .and. b%kind /= B_HEAD_CELL) exit
+                if (b%level == 1) then
+                    if (row > 0) call row_end()
+                    row = row + 1
+                    call row_begin(0.0, id="tr"//ui_str(row))
+                end if
+                if (b%kind == B_HEAD_CELL) then
+                    call text(b%text, style=UI_HEADING, size=14.0, width=UI_FILL, &
+                        ends=b%ends, tones=b%tones)
+                else
+                    call text(b%text, size=14.0, width=UI_FILL, ends=b%ends, tones=b%tones)
+                end if
+            end associate
+            k = k + 1
+        end do
+        if (row > 0) call row_end()
+        call column_end()
+    end subroutine table
 
 end module fy_markdown

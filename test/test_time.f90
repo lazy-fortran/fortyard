@@ -13,7 +13,7 @@ program test_time
     call check(ago(stamp('-3 hours')) == '3 hours ago', 'hours ago')
     call check(ago(stamp('-30 hours')) == 'yesterday', 'yesterday')
     call check(ago(stamp('-4 days')) == '4 days ago', 'days ago')
-    call check(ago('2001-02-03T04:05:06+01:00') == 'on 3 Feb 2001', 'a date when long ago')
+    call check(ago('2001-02-03T04:05:06+01:00') == 'on Feb 3, 2001', 'a date when long ago')
     call check(ago(offset_stamp('-2 hours')) == '2 hours ago', 'a time with a zone offset')
 
 contains

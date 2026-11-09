@@ -9,7 +9,9 @@ module fy_server
     use fortui, only: ui_init, ui_frame_begin, ui_present, ui_shutdown
     use fortui_backend_headless, only: headless_backend_t
     use fortui_html, only: ui_frame_html
-    use fy_ui_app, only: app_start, app_compose
+    use fy_ui_app, only: app_start, app_compose, app_title, app_missing
+    use fy_fetch, only: fetch_serve, fetch_served_json
+    use fy_route, only: route_is_page
     use fy_repo, only: repo_name_ok, repo_ref_ok, repo_path_ok, repo_log_json, repo_tree_json, &
         repo_blob, repo_commit_json, repo_refs_json, repo_clone, repo_fetch
     use fy_posix, only: tcp_accept, sock_close, sock_set_timeouts
@@ -31,6 +33,10 @@ module fy_server
     character(len=*), parameter :: SESSION_COOKIE = 'fy_session'
     integer, parameter :: SESSION_DAYS = 14
     character(len=*), parameter :: SESSION_MAX_AGE = '1209600'
+    !! Name of the tokens that are browser sessions.
+    character(len=*), parameter :: SESSION_NAME = 'browser session'
+    !! Preferences the browser keeps in cookies, read for the first frame.
+    character(len=*), parameter :: SIDEBAR_COOKIE = 'fy_sidebar', THEME_COOKIE = 'fy_theme'
     character(len=2), parameter :: CRLF = achar(13)//achar(10)
 
     type :: response_t
@@ -44,6 +50,9 @@ module fy_server
     character(len=:), allocatable :: repos_dir
     !! Seconds between fetches of a mirror.
     integer :: mirror_interval = 60
+    !! Database and cookie of the page being composed (in critical fortui_render).
+    type(db_t) :: page_db
+    character(len=:), allocatable :: page_cookie
 
 contains
 
@@ -329,7 +338,7 @@ contains
         flush (error_unit)
     end subroutine serve_connection
 
-    subroutine route(req, db, res)
+    recursive subroutine route(req, db, res)
         type(http_request_t), intent(in) :: req
         type(db_t), intent(in) :: db
         type(response_t), intent(out) :: res
@@ -410,6 +419,8 @@ contains
                 call revoke_token(db, who, id, res)
             else
                 call fail(res, 404, 'not found')
+                if (route_is_page(req%path) .and. allocated(web_dir) .and. req%method == 'GET') &
+                    call render_page(req, db, res)
             end if
         end select
     end subroutine route
@@ -505,7 +516,9 @@ contains
                 '","created":"'//tokens(i)%created_at// &
                 '","expires":"'//tokens(i)%expires_at// &
                 '","revoked":'//json_bool(tokens(i)%revoked)// &
-                ',"current":'//json_bool(tokens(i)%id == who%token_id)//'}'
+                ',"current":'//json_bool(tokens(i)%id == who%token_id)// &
+                ',"expired":'//json_bool(tokens(i)%expired)//',"kind":"'// &
+                trim(merge('session', 'token  ', tokens(i)%name == SESSION_NAME))//'"}'
         end do
         res%body = res%body//']}'
     end subroutine list_tokens
@@ -547,7 +560,7 @@ contains
             call fail(res, 401, 'missing or invalid token')
             return
         end if
-        call store_token_create(db, who%account_id, 'browser session', who%scopes, session, &
+        call store_token_create(db, who%account_id, SESSION_NAME, who%scopes, session, &
             stat, days=SESSION_DAYS)
         if (stat /= 0) then
             call fail(res, 500, 'session not created')
@@ -591,83 +604,152 @@ contains
         s = s//']}'
     end function repos_json
 
-    subroutine render_page(req, db, res)
-        !! The web application's page with its first frame already in it,
-        !! composed here by the same Fortran code the browser runs, and the data
-        !! that frame was made from, so the WebAssembly continues without asking
-        !! again. Personal, so never cached.
+    recursive subroutine render_page(req, db, res)
+        !! The web application's page at the request's location with its first
+        !! frame already in it, composed here by the same Fortran code the
+        !! browser runs, and the API answers that frame was made from, so the
+        !! WebAssembly continues without asking again. Personal, so never cached.
         type(http_request_t), intent(in) :: req
         type(db_t), intent(in) :: db
         type(response_t), intent(inout) :: res
-        type(token_identity_t) :: who
-        character(len=:), allocatable :: template, version, whoami, repos, frame, data
-        integer :: at
+        character(len=:), allocatable :: template, location, frame, data, title
+        integer :: at, a2, code
         logical :: ok
 
         call read_file(web_dir//'/index.html', template, ok)
         if (.not. ok) return
-        version = version_json()
-        whoami = ''
-        repos = ''
-        call store_token_lookup(db, http_cookie(req, SESSION_COOKIE), who)
-        if (who%found) then
-            whoami = '{"account":"'//json_escape_string(who%account)// &
-                '","token":"'//json_escape_string(who%token_name)// &
-                '","scopes":"'//json_escape_string(who%scopes)//'"}'
-            repos = repos_json(db)
-        end if
-        ! fortui keeps one composition at a time.
+        location = req%path
+        if (len(req%query) > 0) location = location//'?'//req%query
+        ! fortui keeps one composition at a time, and the page's requests are
+        ! answered through module state.
         !$omp critical (fortui_render)
-        frame = first_frame(version, whoami, repos)
+        page_db = db
+        page_cookie = req%cookie
+        call fetch_serve(page_fetch)
+        frame = first_frame(location, http_cookie(req, SIDEBAR_COOKIE), &
+            http_cookie(req, THEME_COOKIE), title, code)
+        data = json_script('fy-pre', fetch_served_json())
+        call fetch_serve()
         !$omp end critical (fortui_render)
-        data = json_script('fy-version', version)
-        if (len(whoami) > 0) data = data//json_script('fy-whoami', whoami)// &
-            json_script('fy-repos', repos)
         at = index(template, '<div id="app"></div>')
         if (at == 0) return
         template = template(1:at - 1)//'<div id="app">'//frame//'</div>'// &
             template(at + len('<div id="app"></div>'):)
         at = index(template, '<!--fy-data-->')
         if (at > 0) template = template(1:at - 1)//data//template(at + len('<!--fy-data-->'):)
-        res%code = 200
+        at = index(template, '<title>')
+        a2 = index(template, '</title>')
+        if (at > 0 .and. a2 > at) template = template(1:at + 6)//html_text(title)//template(a2:)
+        at = index(template, '<html lang="en"')
+        if (at > 0) template = template(1:at + 14)//theme_attr(http_cookie(req, THEME_COOKIE))// &
+            template(at + 15:)
+        res%code = code
         res%ctype = 'text/html; charset=utf-8'
         res%cache = 'no-store'
         res%body = template
     end subroutine render_page
 
-    function first_frame(version, whoami, repos) result(html)
-        character(len=*), intent(in) :: version, whoami, repos
+    recursive subroutine page_fetch(path, status, body)
+        !! A GET request of the page being composed, answered as the browser's
+        !! would be: with the request's own session.
+        character(len=*), intent(in) :: path
+        integer, intent(out) :: status
+        character(len=:), allocatable, intent(out) :: body
+        type(http_request_t) :: sub
+        type(response_t) :: res
+        integer :: q
+
+        q = index(path, '?')
+        sub%method = 'GET'
+        if (q > 0) then
+            sub%path = path(1:q - 1)
+            sub%query = path(q + 1:)
+        else
+            sub%path = path
+            sub%query = ''
+        end if
+        sub%authorization = ''
+        sub%cookie = page_cookie
+        sub%content_type = ''
+        sub%accept_encoding = ''
+        sub%if_none_match = ''
+        sub%body = ''
+        status = 404
+        body = ''
+        ! Only the API: a page never composes another page.
+        if (index(sub%path, '/api/') /= 1) return
+        call route(sub, page_db, res)
+        status = res%code
+        body = res%body
+    end subroutine page_fetch
+
+    function theme_attr(theme) result(s)
+        character(len=*), intent(in) :: theme
+        character(len=:), allocatable :: s
+        s = ''
+        if (theme == 'light' .or. theme == 'dark') s = ' data-theme="'//theme//'"'
+    end function theme_attr
+
+    pure function html_text(s) result(r)
+        character(len=*), intent(in) :: s
+        character(len=:), allocatable :: r
+        integer :: k
+        r = ''
+        do k = 1, len(s)
+            select case (s(k:k))
+            case ('<'); r = r//'&lt;'
+            case ('>'); r = r//'&gt;'
+            case ('&'); r = r//'&amp;'
+            case default; r = r//s(k:k)
+            end select
+        end do
+    end function html_text
+
+    function first_frame(location, sidebar, theme, title, code) result(html)
+        character(len=*), intent(in) :: location, sidebar, theme
+        character(len=:), allocatable, intent(out) :: title
+        integer, intent(out) :: code
         character(len=:), allocatable :: html
         integer :: stat
 
+        title = 'fortyard'
+        code = 200
         call ui_init(headless_backend_t(), 1000, 800, "fortyard", stat=stat)
         html = ''
         if (stat /= 0) return
-        call app_start(version, whoami, repos)
+        call app_start(location, sidebar, theme)
         call ui_frame_begin()
         call app_compose()
         call ui_present()
         html = ui_frame_html()
+        title = app_title()
+        if (app_missing()) code = 404
         call ui_shutdown()
     end function first_frame
 
     function json_script(id, json) result(s)
-        !! JSON in a page; '</' would end the script element early.
+        !! JSON in a page. Every '<' is written as \u003c (the same inside JSON
+        !! strings), so nothing in it can end the script element.
         character(len=*), intent(in) :: id, json
         character(len=:), allocatable :: s
-        integer :: k
+        integer :: k, n
 
-        s = '<script type="application/json" id="'//id//'">'
+        n = 0
         do k = 1, len(json)
-            if (json(k:k) == '/' .and. k > 1) then
-                if (json(k - 1:k - 1) == '<') then
-                    s = s//'\/'
-                    cycle
-                end if
-            end if
-            s = s//json(k:k)
+            if (json(k:k) == '<') n = n + 1
         end do
-        s = s//'</script>'
+        allocate (character(len=len(json) + 5 * n) :: s)
+        n = 0
+        do k = 1, len(json)
+            if (json(k:k) == '<') then
+                s(n + 1:n + 6) = achar(92)//'u003c'
+                n = n + 6
+            else
+                s(n + 1:n + 1) = json(k:k)
+                n = n + 1
+            end if
+        end do
+        s = '<script type="application/json" id="'//id//'">'//s//'</script>'
     end function json_script
 
     subroutine static_file(req, name, res)

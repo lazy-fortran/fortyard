@@ -1,6 +1,6 @@
 program test_highlight
     use fortui, only: UI_TONE_KEYWORD, UI_TONE_STRING, UI_TONE_COMMENT, UI_TONE_NUMBER, &
-        UI_TONE_TYPE, UI_TONE_PREPROC, UI_TONE_STRONG
+        UI_TONE_TYPE, UI_TONE_PREPROC, UI_TONE_STRONG, UI_TONE_NORMAL
     use fy_highlight, only: highlight, lang_of, LANG_FORTRAN, LANG_C, LANG_PYTHON, &
         LANG_TOML, LANG_SHELL, LANG_NONE, LANG_CMAKE
     implicit none
@@ -41,6 +41,9 @@ program test_highlight
         'for', 'in', '$FILES', 'do', 'echo', '"${f}"', 'done'], [UI_TONE_KEYWORD, &
         UI_TONE_KEYWORD, UI_TONE_TYPE, UI_TONE_KEYWORD, UI_TONE_KEYWORD, UI_TONE_STRING, &
         UI_TONE_KEYWORD])
+    ! A builtin's name as an argument is no command.
+    call expect('fo test; test -f x', LANG_SHELL, [character(len=4) :: 'test', 'test'], &
+        [UI_TONE_NORMAL, UI_TONE_KEYWORD])
 
 contains
 

@@ -5,7 +5,7 @@ module fy_time
     implicit none
     private
 
-    public :: ago, when, epoch
+    public :: ago, when, epoch, day_of
 
 contains
 
@@ -14,8 +14,6 @@ contains
         !! it is a month or more.
         character(len=*), intent(in) :: stamp
         character(len=:), allocatable :: s
-        character(len=3), parameter :: MONTHS(12) = [character(len=3) :: 'Jan', 'Feb', &
-            'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
         integer :: v(8), d, m
         integer(int64) :: t, now
 
@@ -50,8 +48,7 @@ contains
         else if (d < 30 * 86400) then
             s = ui_str(d / 86400)//' days ago'
         else
-            m = max(1, min(12, digits(stamp(6:7))))
-            s = 'on '//ui_str(digits(stamp(9:10)))//' '//MONTHS(m)//' '//stamp(1:4)
+            s = 'on '//day_of(stamp)
         end if
     end function ago
 
@@ -77,6 +74,21 @@ contains
             digits = 10 * digits + iachar(s(i:i)) - 48
         end do
     end function digits
+
+    function day_of(stamp) result(s)
+        !! "Nov 9, 2026" from an ISO 8601 time.
+        character(len=*), intent(in) :: stamp
+        character(len=:), allocatable :: s
+        character(len=3), parameter :: MONTHS(12) = [character(len=3) :: 'Jan', 'Feb', &
+            'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        integer :: m
+
+        s = stamp(1:min(10, len(stamp)))
+        if (len(stamp) < 10) return
+        m = digits(stamp(6:7))
+        if (m < 1 .or. m > 12) return
+        s = MONTHS(m)//' '//ui_str(digits(stamp(9:10)))//', '//stamp(1:4)
+    end function day_of
 
     function when(stamp) result(s)
         !! "2026-11-09 14:34" from an ISO 8601 time.
