@@ -106,7 +106,9 @@ In order:
       `.fortyard/check`) passed on that commit under a memory cap.
 - [ ] Batched merge queue, `Change-Id` trailers, landing from a change page.
 - [x] Push of `main` to the repository's upstream after each landing.
-- [ ] Tags to the upstream; the edge timer follows the instance's own `main`.
+- [x] The edge timer follows the instance's own `main`; fortyard is primary on
+      its development instance and GitHub is its mirror.
+- [ ] Tags to the upstream.
 - [ ] `fy` and `fy mcp` grow with each step (push, change list and view, land,
       queue status).
 - [ ] Audit log (append-only, hash-chained) from the first landing on.
