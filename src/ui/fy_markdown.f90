@@ -254,7 +254,7 @@ contains
                             if (img) then
                                 call run(src(i + 2:i + close_ - 2), UI_TONE_MUTED)
                             else
-                                call run(src(i + 1:i + close_ - 2), UI_TONE_LINK)
+                                call run(unticked(src(i + 1:i + close_ - 2)), UI_TONE_LINK)
                             end if
                             i = i + close_ + k + 1
                             cycle
@@ -267,6 +267,17 @@ contains
         end do
 
     contains
+
+        function unticked(s) result(t)
+            !! Link text without the backticks of code inside it.
+            character(len=*), intent(in) :: s
+            character(len=:), allocatable :: t
+            integer :: j
+            t = ''
+            do j = 1, len(s)
+                if (s(j:j) /= '`') t = t//s(j:j)
+            end do
+        end function unticked
 
         subroutine run(s, tone)
             character(len=*), intent(in) :: s

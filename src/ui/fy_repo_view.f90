@@ -16,6 +16,7 @@ module fy_repo_view
     use fy_route, only: route_t, route_href, url_encode, go, R_TREE, R_BLOB, R_COMMITS, &
         R_COMMIT
     use fy_time, only: ago, day_of
+    use fy_nav, only: nav_copy
     implicit none
     private
 
@@ -70,7 +71,7 @@ module fy_repo_view
     character(len=:), allocatable :: c_subject, c_body, c_author, c_date
     logical :: file_cut = .false., diff_cut = .false., loaded = .false., has_readme = .false.
     logical :: as_code = .false., is_md = .false., repos_loaded = .false., missing = .false.
-    logical :: tree_ready = .false., log_ready = .false.
+    logical :: tree_ready = .false., log_ready = .false., copied = .false.
     integer :: kind = R_TREE, file_bytes = 0
 
 contains
@@ -143,6 +144,7 @@ contains
         kind = r%kind
         as_code = r%plain
         note = ''
+        copied = .false.
         missing = .false.
         if (refs_of /= repo) then
             refs_of = repo
@@ -390,6 +392,15 @@ contains
             call text(basename(file), size=HEADING, style=UI_HEADING)
         end if
         call row_end()
+        if (len(dir) == 0 .and. len(file) == 0 .and. len(upstream_of(repo)) > 0) then
+            call text("", width=UI_FILL)
+            if (copied) then
+                if (button("clone", "Copied", height=36.0, size=BODY)) continue
+            else if (button("clone", "Copy clone URL", height=36.0, size=BODY)) then
+                call nav_copy(upstream_of(repo))
+                copied = .true.
+            end if
+        end if
         call row_end()
 
         if (len(file) > 0) then

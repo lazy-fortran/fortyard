@@ -309,6 +309,8 @@ contains
             if (button("pin", "Keep sidebar open", width=UI_FILL, height=ROW_H, size=BODY)) &
                 call pin(.true.)
         end if
+        call text("Signed in as "//account, size=SMALL, tone=UI_TONE_MUTED, width=UI_FILL, &
+            id="who")
         if (button("signout", "Sign out", width=UI_FILL, height=ROW_H, size=BODY)) call sign_out()
         call column_end()
     end subroutine drawer
@@ -358,8 +360,8 @@ contains
                 action = 'signin'
             end if
         end if
-        call text("An administrator creates the first token with fy serve --init; "// &
-            "fy token create makes more.", size=SMALL, tone=UI_TONE_MUTED, width=UI_FILL)
+        call text("No token yet? An administrator can create one for you.", size=SMALL, &
+            tone=UI_TONE_MUTED, width=UI_FILL)
         call column_end()
     end subroutine sign_in_view
 
