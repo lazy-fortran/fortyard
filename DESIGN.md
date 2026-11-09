@@ -351,16 +351,19 @@ The browser application is Fortran compiled to WebAssembly with LFortran
 (target `wasm32-unknown-emscripten`; Flang cannot yet target WebAssembly),
 using
 [fortui](https://github.com/lazy-fortran/fortui) with its browser backend: DOM
-elements for ordinary controls, a canvas for diffs, graphs and plots. The
-emscripten loader is the only JavaScript. Data types, JSON handling and diff
+elements for ordinary controls, a canvas for diffs, graphs and plots. The only
+JavaScript is the emscripten loader and two small hosts, one in fortui for the
+DOM and events and one in fortyard for HTTP requests. Data types, JSON handling and diff
 logic are shared modules compiled with both gfortran (server) and LFortran
 (browser).
 
-fortui's browser backend does not exist yet and LFortran's WebAssembly output
-is still being validated on fortui, so fortyard drives that work. Until the
-application can show a page, the server renders plain HTML for read-only
-views (repositories, diffs, CI logs), which also gives every object a stable
-permalink.
+fortyard drives fortui's browser backend: ordinary controls are DOM elements
+placed by fortui's layout, and the application's frame loop yields to the
+browser between frames. The page signs in by exchanging a token for an HttpOnly,
+SameSite=Strict session cookie, so no script on the page holds a credential.
+The server also renders plain HTML for read-only views (repositories, diffs, CI
+logs), which gives every object a stable permalink and works without
+JavaScript.
 
 ### Identity and authorization
 

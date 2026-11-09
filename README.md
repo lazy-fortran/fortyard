@@ -11,7 +11,10 @@ Status: first milestone in progress; see [PLAN.md](PLAN.md).
 
 ## Build and test
 
-Needs gfortran, SQLite, [fo](https://github.com/lazy-fortran/fo) and git.
+Needs gfortran with OpenMP, SQLite, [fo](https://github.com/lazy-fortran/fo) and git.
+The web application also needs LFortran, an emscripten SDK in `EMSDK_PATH`
+and access to [fortui](https://github.com/lazy-fortran/fortui); its browser
+test needs Node and Chromium.
 
 ```sh
 fo build
@@ -20,6 +23,14 @@ scripts/dev-up.sh        # throwaway local instance; prints URL and token
 build/fo/bin/fy login --server http://127.0.0.1:8741 --token TOKEN
 build/fo/bin/fy whoami
 scripts/dev-down.sh
+```
+
+The web application is Fortran compiled to WebAssembly and drawn with fortui:
+
+```sh
+scripts/build-web.sh . build/web               # fortui at the commit in web/fortui.rev
+build/fo/bin/fy serve --data DIR --web build/web
+node test/web_app_test.mjs build/fo/bin/fy build/web
 ```
 
 See [DESIGN.md](DESIGN.md) for goals, decisions and architecture, and
