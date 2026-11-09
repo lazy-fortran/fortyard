@@ -13,9 +13,11 @@ while :; do
         "$FY_URL/api/v1/repos/$repo/releases?format=text" | awk '$3 == "ready" { print; exit }') &&
         [ -n "$line" ]; then
         set -- $line
-        version=$1 sha=$4
-        current=$(sed -n 's/^version=//p' "$FY_HOME/current/RELEASE" 2>/dev/null || true)
-        if [ "$version" != "$current" ] && [ ! -e "$FY_HOME/failed-$version" ]; then
+        version=$1 commit=$2 sha=$4
+        # A release is identified by its commit; version names may repeat
+        # between instances.
+        current=$(sed -n 's/^commit=//p' "$FY_HOME/current/RELEASE" 2>/dev/null || true)
+        if [ "$commit" != "$current" ] && [ ! -e "$FY_HOME/failed-$commit" ]; then
             stage=$FY_HOME/staging/$version
             rm -rf "$stage" "$stage.tar"
             mkdir -p "$stage"
@@ -29,7 +31,7 @@ while :; do
                     cp "$f" "$FY_HOME/bin/.new" && mv -f "$FY_HOME/bin/.new" "$FY_HOME/bin/$(basename "$f")"
                 done
             else
-                : > "$FY_HOME/failed-$version"
+                : > "$FY_HOME/failed-$commit"
             fi
             rm -rf "$stage" "$stage.tar"
         fi

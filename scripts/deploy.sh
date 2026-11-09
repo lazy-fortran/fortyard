@@ -11,7 +11,7 @@ unit=${FY_UNIT:-fortyard.service}
 restart=${FY_RESTART:-systemd}
 . "$src/RELEASE"
 (cd "$src" && sha256sum -c fy.sha256 >/dev/null)
-dest="$FY_HOME/releases/$version"
+dest="$FY_HOME/releases/$version-$(printf %.12s "$commit")"
 mkdir -p "$FY_HOME/releases"
 [ -e "$dest" ] || cp -r "$src" "$dest"
 previous=$(readlink "$FY_HOME/current" 2>/dev/null || true)
