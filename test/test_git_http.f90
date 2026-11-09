@@ -90,6 +90,7 @@ program test_git_http
     call store_open(data//'/fortyard.db', db, stat)
     call db_exec(db, "UPDATE landings SET state = 'queued' WHERE id = 1;", stat)
     call db_close(db)
+    call execute_command_line('echo jobs > '//data//'/events/jobs')
     do i = 1, 300
         reply = get('/api/v1/repos/demo/landings')
         if (index(reply, 'before a restart') > 0) exit

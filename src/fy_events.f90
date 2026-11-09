@@ -9,7 +9,8 @@ module fy_events
     implicit none
     private
 
-    public :: events_set_dir, events_notify, events_stream
+    public :: events_set_dir, events_notify, events_stream, events_watch_open, events_wait, &
+        events_watch_close
 
     integer(c_int), parameter :: IN_CLOSE_WRITE = 8, IN_MOVED_TO = 128, IN_CLOEXEC = 524288
     integer(c_short), parameter :: POLLIN = 1
@@ -128,6 +129,53 @@ contains
         end do
         rc = c_close(ino)
     end subroutine events_stream
+
+    integer function events_watch_open() result(fd)
+        !! A watch on the topics, opened before looking at the state, so that a
+        !! change between the look and the wait is not lost; -1 when unavailable.
+        integer(c_int) :: ino, wd, rc
+        fd = -1
+        if (.not. allocated(dir)) return
+        ino = c_inotify_init1(IN_CLOEXEC)
+        if (ino < 0) return
+        wd = c_inotify_add_watch(ino, dir//c_null_char, ior(IN_CLOSE_WRITE, IN_MOVED_TO))
+        if (wd < 0) then
+            rc = c_close(ino)
+            return
+        end if
+        fd = int(ino)
+    end function events_watch_open
+
+    logical function events_wait(fd, topic, timeout_ms) result(changed)
+        !! Sleeps until `topic` changes or `timeout_ms` passes (negative: no
+        !! limit); true on a change.
+        integer, intent(in) :: fd, timeout_ms
+        character(len=*), intent(in) :: topic
+        type(pollfd_t) :: fds(1)
+        character(kind=c_char) :: buf(4096)
+        integer(c_intptr_t) :: got
+        integer(c_int) :: rc
+
+        changed = .false.
+        if (fd < 0) return
+        do
+            fds(1) = pollfd_t(int(fd, c_int), POLLIN, 0_c_short)
+            rc = c_poll(fds, 1_c_long, int(timeout_ms, c_int))
+            if (rc <= 0) return
+            got = c_read(int(fd, c_int), buf, int(size(buf), c_size_t))
+            if (got <= 0) return
+            if (names(buf(1:got), topic)) then
+                changed = .true.
+                return
+            end if
+        end do
+    end function events_wait
+
+    subroutine events_watch_close(fd)
+        integer, intent(in) :: fd
+        integer(c_int) :: rc
+        if (fd >= 0) rc = c_close(int(fd, c_int))
+    end subroutine events_watch_close
 
     logical function names(bytes, topic)
         !! Whether the inotify records in `bytes` name the file `topic`.

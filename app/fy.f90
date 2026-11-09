@@ -4,10 +4,11 @@ program fy
     use fx_mcp, only: mcp_server_t, mcp_server_init, mcp_server_add_action, &
         mcp_server_run
     use fy_build_info, only: FY_VERSION, FY_COMMIT
+    use fy_runner, only: runner_main
     use fy_client, only: client_request, config_t, config_load, config_save
     use fy_posix, only: tcp_listen, activated_listen_fd, sock_bound_port
     use fy_server, only: server_supervise, server_set_web_dir, server_set_data_dir, &
-        server_set_base, server_set_follow, &
+        server_set_base, server_set_follow, server_set_checks, &
         server_set_mirror_interval
     use fy_sqlite, only: db_t, db_errmsg, db_close
     use fy_store, only: store_open, store_bootstrap
@@ -27,6 +28,8 @@ program fy
         call cmd_token()
     case ('repo')
         call cmd_repo()
+    case ('runner')
+        call cmd_runner()
     case ('land')
         call cmd_land()
     case ('landings')
@@ -66,6 +69,8 @@ contains
             '  repo mode NAME MODE primary: take pushes; mirror: follow upstream (admin)', &
             '  repo list           list repositories', &
             '                      clone and push: git clone http://x:TOKEN@HOST/NAME.git', &
+            '  runner --server URL --token-file F --data DIR [--follow LINK]', &
+            '                      perform landing checks for the server (scope runner)', &
             '  land REPO BRANCH    land a pushed branch on main as one squashed commit', &
             '                      after its check passed (admin)', &
             '  landings REPO       recent landings with their state and log', &
@@ -180,6 +185,11 @@ contains
         ! --follow LINK: re-execute the release LINK points to when it changes.
         text = option('--follow', '')
         if (len(text) > 0) call server_set_follow(text)
+        ! FY_CHECKS=runner: landings leave their checks to a runner (fy runner).
+        call get_environment_variable('FY_CHECKS', length=n, status=stat)
+        text = repeat(' ', max(n, 0))
+        if (stat == 0 .and. n > 0) call get_environment_variable('FY_CHECKS', text)
+        if (len(text) > 0) call server_set_checks(trim(text))
         call server_set_data_dir(data)
         call server_set_mirror_interval(interval)
         call server_supervise(lfd, data//'/fortyard.db', workers, threads)
@@ -250,6 +260,27 @@ contains
             '{"name":"'//json_escape_string(arg(3))//'"}', code, body, stat)
         call report(code, body, stat)
     end subroutine cmd_token
+
+    subroutine cmd_runner()
+        character(len=:), allocatable :: server, file, token
+        integer :: u, ios
+        character(len=256) :: line
+
+        server = option('--server', 'http://127.0.0.1:8740')
+        file = option('--token-file', '')
+        token = ''
+        if (len(file) > 0) then
+            open (newunit=u, file=file, action='read', iostat=ios)
+            if (ios == 0) then
+                read (u, '(a)', iostat=ios) line
+                close (u)
+                token = trim(line)
+            end if
+        end if
+        if (len(token) == 0) error stop 'fy runner: --token-file must hold a runner token'
+        call runner_main(server, token, option('--data', './fortyard-data'), &
+            option('--follow', ''))
+    end subroutine cmd_runner
 
     subroutine cmd_land()
         type(config_t) :: cfg

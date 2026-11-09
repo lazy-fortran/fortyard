@@ -6,7 +6,16 @@ module fy_land
     implicit none
     private
 
-    public :: land_branch, land_hook_install
+    public :: land_branch, land_hook_install, land_check, check_runner_i
+
+    abstract interface
+        subroutine check_runner_i(repo, ref, passed, log)
+            !! Has a runner check `ref` of repository `repo` and waits for it.
+            character(len=*), intent(in) :: repo, ref
+            logical, intent(out) :: passed
+            character(len=:), allocatable, intent(out) :: log
+        end subroutine check_runner_i
+    end interface
 
     integer, parameter :: LOG_BYTES = 65536
     !! git's empty tree, the base of a first landing.
@@ -52,7 +61,8 @@ contains
             out, stat, 1024)
     end subroutine land_hook_install
 
-    subroutine land_branch(repo, work, name, branch, ident, base_url, upstream, commit, log, ok)
+    subroutine land_branch(repo, work, name, branch, ident, base_url, upstream, commit, log, ok, &
+            runner)
         !! Lands `branch` of the bare repository `repo` (called `name` in URLs),
         !! using the scratch directory `work`. `ident` names this landing uniquely
         !! and goes into the commit as a `Landing:` trailer. The commit is numbered
@@ -61,6 +71,9 @@ contains
         character(len=*), intent(in) :: repo, work, name, branch, ident, base_url, upstream
         character(len=:), allocatable, intent(out) :: commit, log
         logical, intent(out) :: ok
+        procedure(check_runner_i), optional :: runner
+        logical :: passed
+        character(len=:), allocatable :: runner_log
         character(len=:), allocatable :: out, subjects, message, num
         ! Fixed length: gfortran overflows typed array constructors around
         ! deferred-length strings.
@@ -159,8 +172,21 @@ contains
             return
         end if
 
-        ! The check runs on exactly the commit that will become main.
-        call check(status)
+        ! The check runs on exactly the commit that will become main: by a runner
+        ! (its own container and limits) when there is one, else here.
+        if (present(runner)) then
+            call run([character(len=1024) :: 'env', 'FY_LANDING=1', 'git', 'push', '--quiet', &
+                'origin', 'HEAD:'//check_ref(ident)], work)
+            call runner(name, check_ref(ident), passed, runner_log)
+            call run([character(len=1024) :: 'env', 'FY_LANDING=1', 'git', 'push', '--quiet', &
+                'origin', ':'//check_ref(ident)], work)
+            ! Set after the cleanup above, which reuses status and out.
+            out = runner_log
+            if (passed) out = 'Checked by a runner.'//new_line('a')//runner_log
+            status = merge(0, 1, passed)
+        else
+            call land_check(work, out, status)
+        end if
         log = out
         if (status /= 0) then
             log = 'The check failed (exit status '//itoa(status)//').'//new_line('a')//out
@@ -233,38 +259,51 @@ contains
             end if
         end subroutine run
 
-        subroutine check(code)
-            !! fo build and fo test for an fpm project (applications built, so tests
-            !! may run them), else an executable .fortyard/check;
-            !! under a memory cap when systemd can give one.
-            integer, intent(out) :: code
-            character(len=1024), allocatable :: cmd(:)
-            character(len=256) :: runtime
-            integer :: rn, rs
-            logical :: exists
-
-            inquire (file=work//'/fpm.toml', exist=exists)
-            if (exists) then
-                cmd = [character(len=1024) :: 'sh', '-c', 'fo build && fo test']
-            else
-                inquire (file=work//'/.fortyard/check', exist=exists)
-                if (.not. exists) then
-                    out = 'No check is configured (fpm.toml or .fortyard/check).'
-                    code = 0
-                    return
-                end if
-                cmd = [character(len=1024) :: './.fortyard/check']
-            end if
-            cmd = [character(len=1024) :: 'timeout', '3600', cmd]
-            call get_environment_variable('XDG_RUNTIME_DIR', runtime, rn, rs)
-            if (rs == 0 .and. len(proc_find('systemd-run')) > 0) cmd = [character(len=1024) :: &
-                'systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', &
-                'MemorySwapMax=0', cmd]
-            call proc_run([character(len=1024) :: 'sh', '-c', 'exec "$@" 2>&1', 'check', &
-                cmd], out, code, LOG_BYTES, dir=work)
-        end subroutine check
-
     end subroutine land_branch
+
+    subroutine land_check(work, out, code)
+        !! The check of a landing commit checked out in `work`: fo build and fo
+        !! test for an fpm project (applications built, so tests may run them),
+        !! else an executable .fortyard/check; under a memory cap when systemd can
+        !! give one. `out` is its output, `code` its exit status.
+        character(len=*), intent(in) :: work
+        character(len=:), allocatable, intent(out) :: out
+        integer, intent(out) :: code
+        character(len=1024), allocatable :: cmd(:)
+        character(len=256) :: runtime
+        integer :: rn, rs
+        logical :: exists
+
+        inquire (file=work//'/fpm.toml', exist=exists)
+        if (exists) then
+            cmd = [character(len=1024) :: 'sh', '-c', 'fo build && fo test']
+        else
+            inquire (file=work//'/.fortyard/check', exist=exists)
+            if (.not. exists) then
+                out = 'No check is configured (fpm.toml or .fortyard/check).'
+                code = 0
+                return
+            end if
+            cmd = [character(len=1024) :: './.fortyard/check']
+        end if
+        cmd = [character(len=1024) :: 'timeout', '3600', cmd]
+        call get_environment_variable('XDG_RUNTIME_DIR', runtime, rn, rs)
+        if (rs == 0 .and. len(proc_find('systemd-run')) > 0) cmd = [character(len=1024) :: &
+            'systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', &
+            'MemorySwapMax=0', cmd]
+        call proc_run([character(len=1024) :: 'sh', '-c', 'exec "$@" 2>&1', 'check', cmd], out, &
+            code, LOG_BYTES, dir=work)
+    end subroutine land_check
+
+    function check_ref(ident) result(ref)
+        !! Where a landing commit waits for its runner: refs/fortyard/checks/N.
+        character(len=*), intent(in) :: ident
+        character(len=:), allocatable :: ref
+        integer :: at
+        at = index(ident, '@')
+        if (at == 0) at = len(ident) + 1
+        ref = 'refs/fortyard/checks/'//ident(1:at - 1)
+    end function check_ref
 
     subroutine write_file(path, text)
         character(len=*), intent(in) :: path, text

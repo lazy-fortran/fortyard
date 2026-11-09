@@ -18,8 +18,9 @@ module fy_store
     public :: store_landing_finish, store_landing_list
     public :: release_t, store_release_add, store_release_ready, store_release_list
     public :: store_jobs, store_job, store_job_counts, store_jobs_state
+    public :: store_check_add, store_check_claim, store_check_finish, store_check_get
 
-    integer, parameter, public :: SCHEMA_VERSION = 6
+    integer, parameter, public :: SCHEMA_VERSION = 7
 
     type :: token_identity_t
         logical :: found = .false.
@@ -173,6 +174,19 @@ contains
         if (store_schema_version(db) < 6) then
             call db_exec(db, 'BEGIN;ALTER TABLE landings ADD COLUMN started_at TEXT;'// &
                 'DELETE FROM schema_version; INSERT INTO schema_version VALUES (6);'// &
+                'COMMIT;', stat)
+            if (stat /= SQLITE_OK) then
+                call db_exec(db, 'ROLLBACK;', version)
+                return
+            end if
+        end if
+        if (store_schema_version(db) < 7) then
+            ! Checks a runner performs for a landing: queued, running, passed, failed.
+            call db_exec(db, 'BEGIN;'// &
+                'CREATE TABLE checks (id INTEGER PRIMARY KEY, repo TEXT NOT NULL,'// &
+                " ref TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', runner TEXT,"// &
+                ' log TEXT, created_at TEXT NOT NULL, claimed_at TEXT, finished_at TEXT);'// &
+                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (7);'// &
                 'COMMIT;', stat)
             if (stat /= SQLITE_OK) then
                 call db_exec(db, 'ROLLBACK;', version)
@@ -616,6 +630,101 @@ contains
         if (stmt_step(st) == SQLITE_ROW) s = stmt_text(st, 0)
         call stmt_finalize(st)
     end function store_jobs_state
+
+    subroutine store_check_add(db, repo, ref, id, stat)
+        !! Queues a check of `ref` in `repo` for a runner.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: repo, ref
+        integer(int64), intent(out) :: id
+        integer, intent(out) :: stat
+        type(stmt_t) :: st
+
+        id = 0
+        call db_prepare(db, 'INSERT INTO checks (repo, ref, created_at) VALUES (?1, ?2, '// &
+            NOW//') RETURNING id;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, repo, stat)
+        call stmt_bind_text(st, 2, ref, stat)
+        stat = 1
+        if (stmt_step(st) == SQLITE_ROW) then
+            id = stmt_int(st, 0)
+            stat = SQLITE_OK
+        end if
+        call stmt_finalize(st)
+    end subroutine store_check_add
+
+    subroutine store_check_claim(db, runner, id, repo, ref, found)
+        !! Gives the oldest queued check to `runner`.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: runner
+        integer(int64), intent(out) :: id
+        character(len=:), allocatable, intent(out) :: repo, ref
+        logical, intent(out) :: found
+        type(stmt_t) :: st
+        integer :: stat
+
+        found = .false.
+        id = 0
+        repo = ''
+        ref = ''
+        call db_prepare(db, "UPDATE checks SET state = 'running', runner = ?1, claimed_at = "// &
+            NOW//" WHERE id = (SELECT min(id) FROM checks WHERE state = 'queued')"// &
+            ' RETURNING id, repo, ref;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, runner, stat)
+        if (stmt_step(st) == SQLITE_ROW) then
+            id = stmt_int(st, 0)
+            repo = stmt_text(st, 1)
+            ref = stmt_text(st, 2)
+            found = .true.
+        end if
+        call stmt_finalize(st)
+    end subroutine store_check_claim
+
+    subroutine store_check_finish(db, id, state, log, found)
+        !! Records the result of a running check: "passed" or "failed".
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: id
+        character(len=*), intent(in) :: state, log
+        logical, intent(out) :: found
+        type(stmt_t) :: st
+        integer :: stat
+
+        found = .false.
+        call db_prepare(db, 'UPDATE checks SET state = ?2, log = ?3, finished_at = '//NOW// &
+            " WHERE id = ?1 AND state = 'running' RETURNING id;", st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, id, stat)
+        call stmt_bind_text(st, 2, state, stat)
+        call stmt_bind_text(st, 3, log, stat)
+        found = stmt_step(st) == SQLITE_ROW
+        call stmt_finalize(st)
+    end subroutine store_check_finish
+
+    subroutine store_check_get(db, id, state, log, age)
+        !! State and log of a check, and seconds since it was queued or claimed.
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: id
+        character(len=:), allocatable, intent(out) :: state, log
+        integer, intent(out) :: age
+        type(stmt_t) :: st
+        integer :: stat
+
+        state = ''
+        log = ''
+        age = 0
+        call db_prepare(db, "SELECT state, coalesce(log, ''), CAST(strftime('%s', 'now') -"// &
+            " strftime('%s', coalesce(claimed_at, created_at)) AS INTEGER) FROM checks"// &
+            ' WHERE id = ?1;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, id, stat)
+        if (stmt_step(st) == SQLITE_ROW) then
+            state = stmt_text(st, 0)
+            log = stmt_text(st, 1)
+            age = int(stmt_int(st, 2))
+        end if
+        call stmt_finalize(st)
+    end subroutine store_check_get
 
     subroutine store_release_add(db, repo, version, commit, notes, uploader, stat)
         !! Opens release `version` of `repo`; its file is uploaded next.

@@ -1,31 +1,51 @@
 # fortyard behind a reverse proxy at @BASE@. Releases are files under
 # ./releases; the server follows ./current and becomes each new release
-# itself, so the container is never rebuilt or restarted for an update.
+# itself, so no container is rebuilt or restarted for an update.
+x-fortyard: &fortyard
+  image: @IMAGE@
+  restart: unless-stopped
+  user: "@UID@"
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
 services:
   fortyard:
-    image: @IMAGE@
+    <<: *fortyard
     container_name: fortyard
-    restart: unless-stopped
-    user: "@UID@"
-    init: true
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    tmpfs: ["/tmp:size=2g,exec"]
+    tmpfs: ["/tmp:size=512m,exec"]
     environment:
       FY_HOME: /fy
       FY_URL: http://127.0.0.1:8740
       FY_BASE: "@BASE@"
       FY_RESTART: follow
+      FY_CHECKS: runner
       TMPDIR: /tmp
     volumes:
       - .:/fy
-      - cache:/cache
     entrypoint: ["/fy/bin/start.sh"]
+    mem_limit: 2g
+    cpus: 2
+    pids_limit: 512
+    networks: [proxy]
+  # Landing checks: its own limits, the project directory read-only, the
+  # server reached on its loopback (shared network namespace).
+  fortyard-runner:
+    <<: *fortyard
+    container_name: fortyard-runner
+    network_mode: "service:fortyard"
+    tmpfs: ["/tmp:size=2g,exec"]
+    environment:
+      FY_HOME: /fy
+      TMPDIR: /tmp
+    volumes:
+      - .:/fy:ro
+      - cache:/cache
+    entrypoint: ["/fy/bin/start.sh", "runner"]
     mem_limit: 6g
     cpus: 4
     pids_limit: 1024
-    networks: [proxy]
+    depends_on: [fortyard]
 volumes:
   cache:
 networks:

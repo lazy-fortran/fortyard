@@ -40,4 +40,12 @@ if [ ! -s "$home/update-token" ]; then
         http://127.0.0.1:8740/api/v1/tokens | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' > "$home/update-token"
     chmod 600 "$home/update-token"
 fi
+# The runner's token; the runner (re)starts once it exists.
+if [ ! -s "$home/runner-token" ]; then
+    docker exec fortyard curl -fsS -H "Authorization: Bearer $(cat "$home/bootstrap-token")" \
+        -H 'Content-Type: application/json' -d '{"name":"runner"}' \
+        http://127.0.0.1:8740/api/v1/tokens | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' > "$home/runner-token"
+    chmod 600 "$home/runner-token"
+    docker restart fortyard-runner >/dev/null
+fi
 echo "fortyard runs below $base; bootstrap token in $home/bootstrap-token"

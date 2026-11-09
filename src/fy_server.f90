@@ -8,8 +8,9 @@ module fy_server
         http_bearer_token, http_cookie, http_query_param, http_read_head, http_read_body, &
         http_basic_password
     use fy_git_http, only: git_http_route, git_http_serve
-    use fy_land, only: land_branch, land_hook_install
-    use fy_events, only: events_set_dir, events_notify, events_stream
+    use fy_land, only: land_branch, land_hook_install, land_check
+    use fy_events, only: events_set_dir, events_notify, events_stream, events_watch_open, &
+        events_wait, events_watch_close
     use fortui, only: ui_init, ui_frame_begin, ui_present, ui_shutdown
     use fortui_backend_headless, only: headless_backend_t
     use fortui_html, only: ui_frame_html
@@ -28,13 +29,15 @@ module fy_server
         store_repo_add, store_repo_list, store_repo_fetched, store_repo_set_mode, landing_t, &
         store_landing_add, store_landing_next, store_landing_requeue, store_landing_finish, &
         store_landing_list, release_t, store_release_add, store_release_ready, store_release_list, &
-        store_jobs, store_job, store_job_counts, store_jobs_state, store_snapshot
+        store_jobs, store_job, store_job_counts, store_jobs_state, store_snapshot, &
+        store_check_add, store_check_claim, store_check_finish, store_check_get
     use fy_sqlite, only: db_close
     implicit none
     private
 
     public :: server_loop, serve_connection, route, server_supervise, server_set_web_dir
-    public :: server_set_data_dir, server_set_mirror_interval, server_set_base, server_set_follow
+    public :: server_set_data_dir, server_set_mirror_interval, server_set_base, server_set_follow, &
+        server_set_checks
     public :: response_t
 
     character(len=*), parameter :: JSON = 'application/json'
@@ -62,6 +65,10 @@ module fy_server
     !! A symbolic link to the installed release (directory with `fy`); when it
     !! changes, the server re-executes the release it points to.
     character(len=:), allocatable :: follow_link
+    !! "local": landings run their checks in the server; "runner": a runner does.
+    character(len=:), allocatable :: checks_mode
+    !! The lander's database connection, for its runner checks.
+    type(db_t) :: lander_db
     !! Seconds between fetches of a mirror.
     integer :: mirror_interval = 60
     !! Database and cookie of the page being composed (in critical fortui_render).
@@ -248,21 +255,25 @@ contains
         character(len=:), allocatable :: commit, log, upstream, mode, base
         character(len=:), allocatable :: work
         character(len=1024) :: url
-        integer :: stat, i, n
-        logical :: found, ok
+        integer :: stat, i, n, watch
+        logical :: found, ok, changed
 
         call get_environment_variable('FY_URL', url, n, stat)
         base = ''
         if (stat == 0) base = trim(url)
         call store_open(db_path, db, stat)
         if (stat /= 0) call proc_exit(1)
+        ! Opened before the first look at the queue, so no landing is missed.
+        watch = events_watch_open()
         call store_landing_requeue(db)
         call events_notify('jobs')
         do
             call store_landing_next(db, l, found)
             if (found) call events_notify('jobs')
             if (.not. found) then
-                call proc_sleep_ms(2000)
+                ! Sleeps until a landing is queued (the API rewrites the jobs marker).
+                changed = events_wait(watch, 'jobs', -1)
+                if (watch < 0) call proc_sleep_ms(2000)
                 cycle
             end if
             call store_repo_list(db, repos, stat)
@@ -283,9 +294,15 @@ contains
             ! removed when the landing ends, whatever its outcome.
             work = tmp_dir()//'/fy-land-'//itoa(int(l%id))
             ! Unique across instances and restarts: number and time of queueing.
-            call land_branch(repo_path(l%repo), work, l%repo, l%branch, &
-                itoa(int(l%id))//'@'//l%created, base, &
-                upstream, commit, log, ok)
+            lander_db = db
+            if (checks_mode == 'runner') then
+                call land_branch(repo_path(l%repo), work, l%repo, l%branch, &
+                    itoa(int(l%id))//'@'//l%created, base, upstream, commit, log, ok, &
+                    runner=runner_check)
+            else
+                call land_branch(repo_path(l%repo), work, l%repo, l%branch, &
+                    itoa(int(l%id))//'@'//l%created, base, upstream, commit, log, ok)
+            end if
             call execute_command_line('rm -rf '''//work//'''')
             if (ok) then
                 call store_landing_finish(db, l%id, 'landed', commit, log)
@@ -973,6 +990,8 @@ contains
             if (index(req%path, '/app/') == 1) then
                 if (.not. method_is(req, 'GET', res)) return
                 call static_file(req, req%path(6:), res)
+            else if (index(req%path, '/api/v1/checks/') == 1) then
+                call checks_route(req, db, res)
             else if (req%path == '/api/v1/jobs' .or. index(req%path, '/api/v1/jobs/') == 1) then
                 call jobs_route(req, db, res)
             else if (req%path == '/api/v1/repos' .or. index(req%path, '/api/v1/repos/') == 1) then
@@ -998,6 +1017,108 @@ contains
             end if
         end select
     end subroutine route
+
+    subroutine runner_check(repo, ref, passed, log)
+        !! Queues a check of `ref` for a runner and sleeps until it reports. A
+        !! check no runner takes within an hour, or whose runner does not report
+        !! within two, fails.
+        character(len=*), intent(in) :: repo, ref
+        logical, intent(out) :: passed
+        character(len=:), allocatable, intent(out) :: log
+        character(len=:), allocatable :: state
+        integer(int64) :: id
+        integer :: stat, age, fd
+        logical :: changed
+
+        passed = .false.
+        if (.not. checks_mode_set()) then
+            log = 'No runner mode.'
+            return
+        end if
+        fd = events_watch_open()
+        call store_check_add(lander_db, repo, ref, id, stat)
+        if (stat /= 0) then
+            log = 'The check could not be queued.'
+            call events_watch_close(fd)
+            return
+        end if
+        call events_notify('checks')
+        do
+            call store_check_get(lander_db, id, state, log, age)
+            if (state == 'passed' .or. state == 'failed') exit
+            if (state == 'queued' .and. age > 3600) then
+                log = 'No runner took the check within an hour.'
+                exit
+            end if
+            if (state == 'running' .and. age > 7200) then
+                log = 'The runner did not report within two hours.'
+                exit
+            end if
+            ! Wakes on a runner's report; the timeout only enforces the limits above.
+            changed = events_wait(fd, 'checks', 60000)
+        end do
+        call events_watch_close(fd)
+        passed = state == 'passed'
+    end subroutine runner_check
+
+    logical function checks_mode_set()
+        checks_mode_set = allocated(checks_mode)
+    end function checks_mode_set
+
+    subroutine checks_route(req, db, res)
+        !! POST /api/v1/checks/claim: the oldest queued check for the calling
+        !! runner (200 with {"id","repo","ref"}, or 204 when there is none).
+        !! POST /api/v1/checks/N/result {"passed":true|false,"log":"..."}.
+        type(http_request_t), intent(in) :: req
+        type(db_t), intent(in) :: db
+        type(response_t), intent(inout) :: res
+        type(token_identity_t) :: who
+        character(len=:), allocatable :: repo, ref, log
+        character(len=24) :: num
+        integer(int64) :: id
+        integer :: ios, k
+        logical :: found, ok
+
+        if (.not. authenticated(req, db, who, res)) return
+        if (.not. method_is(req, 'POST', res)) return
+        if (index(' '//who%scopes//' ', ' admin ') == 0 .and. &
+            index(' '//who%scopes//' ', ' runner ') == 0) then
+            call fail(res, 403, 'checks need the runner or admin scope')
+            return
+        end if
+        if (req%path == '/api/v1/checks/claim') then
+            call store_check_claim(db, who%token_name, id, repo, ref, found)
+            if (.not. found) then
+                res%code = 204
+                res%body = ''
+                return
+            end if
+            call events_notify('checks')
+            write (num, '(i0)') id
+            res%body = '{"id":'//trim(num)//',"repo":"'//repo//'","ref":"'//ref//'"}'
+            return
+        end if
+        k = index(req%path, '/result')
+        if (index(req%path, '/api/v1/checks/') /= 1 .or. k == 0) then
+            call fail(res, 404, 'not found')
+            return
+        end if
+        read (req%path(16:k - 1), *, iostat=ios) id
+        if (ios /= 0 .or. verify(req%path(16:k - 1), '0123456789') /= 0) then
+            call fail(res, 404, 'not found')
+            return
+        end if
+        ok = index(req%body, '"passed":true') > 0
+        call json_extract_string(req%body, 'log', log, found)
+        if (.not. found) log = ''
+        call store_check_finish(db, id, merge('passed', 'failed', ok), log, found)
+        if (.not. found) then
+            call fail(res, 409, 'no running check with that number')
+            return
+        end if
+        call events_notify('checks')
+        res%body = '{"recorded":true}'
+    end subroutine checks_route
 
     subroutine jobs_route(req, db, res)
         !! GET /api/v1/jobs[?repo=NAME]: running and queued jobs, recent finished
@@ -1514,6 +1635,11 @@ contains
         ends_with = len(s) >= len(suffix)
         if (ends_with) ends_with = s(len(s) - len(suffix) + 1:) == suffix
     end function ends_with
+
+    subroutine server_set_checks(mode)
+        character(len=*), intent(in) :: mode
+        checks_mode = mode
+    end subroutine server_set_checks
 
     subroutine server_set_follow(link)
         character(len=*), intent(in) :: link
