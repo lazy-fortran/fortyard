@@ -1,0 +1,14 @@
+[Unit]
+Description=fortyard release builder: builds new commits of an instance and uploads them there
+
+[Service]
+EnvironmentFile=@HOME@/builder.env
+ExecStart=@HOME@/bin/release-builder.sh
+Restart=always
+RestartSec=10
+Nice=10
+MemoryMax=8G
+MemorySwapMax=0
+
+[Install]
+WantedBy=default.target

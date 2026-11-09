@@ -1,0 +1,11 @@
+[Unit]
+Description=fortyard installs the releases it stores for itself
+
+[Service]
+EnvironmentFile=@HOME@/instance.env
+ExecStart=@HOME@/bin/self-update.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

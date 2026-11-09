@@ -24,6 +24,8 @@ module fy_http
         character(len=:), allocatable :: body
         !! Git's protocol version request and the request body's encoding.
         character(len=:), allocatable :: git_protocol, content_encoding
+        !! SHA-256 the sender states for the body (uploads of release files).
+        character(len=:), allocatable :: content_sha256
         integer :: content_length = 0
         !! Content-Length was given; a chunked body has none.
         logical :: has_length = .false., chunked = .false.
@@ -55,6 +57,7 @@ contains
         req%body = ''
         req%git_protocol = ''
         req%content_encoding = ''
+        req%content_sha256 = ''
         status = 400
         eol = index(head, CRLF)
         if (eol < 1) return
@@ -110,6 +113,8 @@ contains
                 req%git_protocol = value
             case ('content-encoding')
                 req%content_encoding = lower(value)
+            case ('x-content-sha256')
+                req%content_sha256 = lower(value)
             end select
         end do
         status = 0

@@ -16,8 +16,9 @@ module fy_store
     public :: repo_info_t, store_repo_add, store_repo_list, store_repo_fetched, store_repo_set_mode
     public :: landing_t, store_landing_add, store_landing_next, store_landing_requeue
     public :: store_landing_finish, store_landing_list
+    public :: release_t, store_release_add, store_release_ready, store_release_list
 
-    integer, parameter, public :: SCHEMA_VERSION = 4
+    integer, parameter, public :: SCHEMA_VERSION = 5
 
     type :: token_identity_t
         logical :: found = .false.
@@ -41,6 +42,14 @@ module fy_store
         !! Exit status of the last clone or fetch; -1 before the first.
         integer :: fetch_status = -1
     end type repo_info_t
+
+    type :: release_t
+        !! A build of a commit, uploaded as one archive; "open" until its file
+        !! arrived and was verified, then "ready".
+        character(len=:), allocatable :: version, commit, notes, uploader, created, state
+        character(len=:), allocatable :: sha256
+        integer(int64) :: size = 0
+    end type release_t
 
     type :: landing_t
         !! A branch queued to land on main as one squashed commit.
@@ -122,6 +131,20 @@ contains
                 " state TEXT NOT NULL DEFAULT 'queued', created_at TEXT NOT NULL,"// &
                 ' finished_at TEXT, commit_id TEXT, log TEXT);'// &
                 'DELETE FROM schema_version; INSERT INTO schema_version VALUES (4);'// &
+                'COMMIT;', stat)
+            if (stat /= SQLITE_OK) then
+                call db_exec(db, 'ROLLBACK;', version)
+                return
+            end if
+        end if
+        if (store_schema_version(db) < 5) then
+            call db_exec(db, 'BEGIN;'// &
+                'CREATE TABLE releases (id INTEGER PRIMARY KEY, repo TEXT NOT NULL,'// &
+                ' version TEXT NOT NULL, commit_id TEXT NOT NULL, notes TEXT NOT NULL,'// &
+                ' uploader TEXT NOT NULL, created_at TEXT NOT NULL,'// &
+                " state TEXT NOT NULL DEFAULT 'open', sha256 TEXT, size INTEGER,"// &
+                ' UNIQUE (repo, version));'// &
+                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (5);'// &
                 'COMMIT;', stat)
             if (stat /= SQLITE_OK) then
                 call db_exec(db, 'ROLLBACK;', version)
@@ -448,6 +471,77 @@ contains
         call stmt_finalize(st)
         stat = SQLITE_OK
     end subroutine store_landing_list
+
+    subroutine store_release_add(db, repo, version, commit, notes, uploader, stat)
+        !! Opens release `version` of `repo`; its file is uploaded next.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: repo, version, commit, notes, uploader
+        integer, intent(out) :: stat
+        type(stmt_t) :: st
+
+        call db_prepare(db, 'INSERT INTO releases (repo, version, commit_id, notes, uploader,'// &
+            ' created_at) VALUES (?1, ?2, ?3, ?4, ?5, '//NOW//');', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, repo, stat)
+        call stmt_bind_text(st, 2, version, stat)
+        call stmt_bind_text(st, 3, commit, stat)
+        call stmt_bind_text(st, 4, notes, stat)
+        call stmt_bind_text(st, 5, uploader, stat)
+        stat = SQLITE_OK
+        if (stmt_step(st) /= SQLITE_DONE) stat = 1
+        call stmt_finalize(st)
+    end subroutine store_release_add
+
+    subroutine store_release_ready(db, repo, version, sha256, size, found)
+        !! Records the verified file of an open release and makes it available.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: repo, version, sha256
+        integer(int64), intent(in) :: size
+        logical, intent(out) :: found
+        type(stmt_t) :: st
+        integer :: stat
+
+        found = .false.
+        call db_prepare(db, "UPDATE releases SET state = 'ready', sha256 = ?3, size = ?4"// &
+            " WHERE repo = ?1 AND version = ?2 AND state = 'open' RETURNING id;", st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, repo, stat)
+        call stmt_bind_text(st, 2, version, stat)
+        call stmt_bind_text(st, 3, sha256, stat)
+        call stmt_bind_int(st, 4, size, stat)
+        found = stmt_step(st) == SQLITE_ROW
+        call stmt_finalize(st)
+    end subroutine store_release_ready
+
+    subroutine store_release_list(db, repo, rs, stat)
+        !! The newest 30 releases of `repo`, newest first.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: repo
+        type(release_t), allocatable, intent(out) :: rs(:)
+        integer, intent(out) :: stat
+        type(stmt_t) :: st
+        type(release_t) :: r
+
+        allocate (rs(0))
+        call db_prepare(db, "SELECT version, commit_id, notes, uploader, created_at, state,"// &
+            " coalesce(sha256, ''), coalesce(size, 0) FROM releases WHERE repo = ?1"// &
+            ' ORDER BY id DESC LIMIT 30;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, repo, stat)
+        do while (stmt_step(st) == SQLITE_ROW)
+            r%version = stmt_text(st, 0)
+            r%commit = stmt_text(st, 1)
+            r%notes = stmt_text(st, 2)
+            r%uploader = stmt_text(st, 3)
+            r%created = stmt_text(st, 4)
+            r%state = stmt_text(st, 5)
+            r%sha256 = stmt_text(st, 6)
+            r%size = stmt_int(st, 7)
+            rs = [rs, r]
+        end do
+        call stmt_finalize(st)
+        stat = SQLITE_OK
+    end subroutine store_release_list
 
     subroutine store_repo_fetched(db, name, status)
         type(db_t), intent(in) :: db

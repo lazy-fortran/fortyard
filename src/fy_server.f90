@@ -17,15 +17,16 @@ module fy_server
     use fy_route, only: route_is_page, route_set_base
     use fy_repo, only: repo_name_ok, repo_ref_ok, repo_path_ok, repo_log_json, repo_tree_json, &
         repo_blob, repo_commit_json, repo_refs_json, repo_clone, repo_fetch, repo_init
-    use fy_posix, only: tcp_accept, sock_close, sock_set_timeouts
+    use fy_posix, only: tcp_accept, sock_close, sock_set_timeouts, sock_recv
     use fy_sqlite, only: db_t
     use fy_proc, only: proc_fork, proc_wait_any, proc_exit, proc_pid, &
         proc_die_with_parent, proc_sleep_ms
+    use fx_hash, only: sha256_file
     use fy_store, only: token_identity_t, token_info_t, store_token_lookup, store_token_create, &
         store_open, store_token_list, store_token_revoke, store_token_revoke_hash, repo_info_t, &
         store_repo_add, store_repo_list, store_repo_fetched, store_repo_set_mode, landing_t, &
         store_landing_add, store_landing_next, store_landing_requeue, store_landing_finish, &
-        store_landing_list
+        store_landing_list, release_t, store_release_add, store_release_ready, store_release_list
     use fy_sqlite, only: db_close
     implicit none
     private
@@ -288,7 +289,7 @@ contains
         type(token_identity_t) :: who
         type(repo_info_t), allocatable :: repos(:)
         character(len=:), allocatable :: rest, name, sub, ref, path, upstream
-        integer :: slash, i, status, stat
+        integer :: slash, i, status, stat, k
         logical :: found, exists
 
         if (.not. authenticated(req, db, who, res)) return
@@ -331,6 +332,11 @@ contains
         end if
 
         rest = req%path(len('/api/v1/repos/') + 1:)
+        k = index(rest, '/releases')
+        if (k > 1) then
+            call releases_route(rest(1:k - 1), rest(k + 9:))
+            return
+        end if
         if (req%method == 'POST' .and. len(rest) > 5) then
             if (rest(len(rest) - 4:) == '/mode') then
                 call set_mode(rest(1:len(rest) - 5))
@@ -392,6 +398,94 @@ contains
         if (status /= 0) call fail(res, 404, 'no such ref, path or commit')
 
     contains
+
+        subroutine releases_route(target, tail)
+            !! GET  .../releases          the newest releases (JSON, or ?format=text
+            !!                            with one line "VERSION COMMIT STATE SHA256")
+            !! POST .../releases          {"version","commit","notes"}: opens a release
+            !! GET  .../releases/V/release.tar  the archive of a ready release
+            character(len=*), intent(in) :: target, tail
+            type(release_t), allocatable :: rs(:)
+            character(len=:), allocatable :: version, commit, notes, archive
+            character(len=24) :: num
+            integer :: j
+            logical :: ok
+
+            if (.not. repo_name_ok(target)) then
+                call fail(res, 404, 'not found')
+                return
+            end if
+            if (len(tail) == 0) then
+                if (req%method == 'POST') then
+                    if (index(' '//who%scopes//' ', ' admin ') == 0 .and. &
+                        index(' '//who%scopes//' ', ' release ') == 0) then
+                        call fail(res, 403, 'releases need the release or admin scope')
+                        return
+                    end if
+                    call json_extract_string(req%body, 'version', version, ok)
+                    if (.not. ok) version = ''
+                    call json_extract_string(req%body, 'commit', commit, ok)
+                    if (.not. ok) commit = ''
+                    call json_extract_string(req%body, 'notes', notes, ok)
+                    if (.not. ok) notes = ''
+                    if (.not. version_ok(version) .or. .not. repo_ref_ok(commit) .or. &
+                        len(commit) /= 40) then
+                        call fail(res, 400, 'body must be {"version":"...","commit":"<40 hex>",'// &
+                            '"notes":"..."}')
+                        return
+                    end if
+                    call store_release_add(db, target, version, commit, notes, who%account, stat)
+                    if (stat /= 0) then
+                        call fail(res, 409, 'release exists')
+                        return
+                    end if
+                    res%code = 201
+                    res%body = '{"version":"'//version//'","state":"open"}'
+                    return
+                end if
+                if (.not. method_is(req, 'GET', res)) return
+                call store_release_list(db, target, rs, stat)
+                if (http_query_param(req%query, 'format') == 'text') then
+                    res%ctype = 'text/plain; charset=utf-8'
+                    res%body = ''
+                    do j = 1, size(rs)
+                        res%body = res%body//rs(j)%version//' '//rs(j)%commit//' '// &
+                            rs(j)%state//' '//rs(j)%sha256//new_line('a')
+                    end do
+                    return
+                end if
+                res%body = '{"releases":['
+                do j = 1, size(rs)
+                    write (num, '(i0)') rs(j)%size
+                    if (j > 1) res%body = res%body//','
+                    res%body = res%body//'{"version":"'//rs(j)%version//'","commit":"'// &
+                        rs(j)%commit//'","state":"'//rs(j)%state//'","created":"'// &
+                        rs(j)%created//'","uploader":"'//json_escape_string(rs(j)%uploader)// &
+                        '","sha256":"'//rs(j)%sha256//'","size":'//trim(num)//',"notes":"'// &
+                        json_escape_string(rs(j)%notes)//'"}'
+                end do
+                res%body = res%body//']}'
+                return
+            end if
+            if (len(tail) > 13) then
+                if (tail(1:1) == '/' .and. tail(len(tail) - 11:) == '/release.tar') then
+                    version = tail(2:len(tail) - 12)
+                    if (version_ok(version)) then
+                        if (.not. method_is(req, 'GET', res)) return
+                        call read_file(releases_dir()//'/'//target//'/'//version// &
+                            '/release.tar', archive, ok)
+                        if (.not. ok) then
+                            call fail(res, 404, 'no such release archive')
+                            return
+                        end if
+                        res%ctype = 'application/x-tar'
+                        res%body = archive
+                        return
+                    end if
+                end if
+            end if
+            call fail(res, 404, 'not found')
+        end subroutine releases_route
 
         subroutine queue_landing(target)
             !! POST /api/v1/repos/NAME/land {"branch":"..."}: queues the branch to
@@ -518,7 +612,7 @@ contains
         type(db_t), intent(in) :: db
         type(http_request_t) :: req
         type(response_t) :: res
-        character(len=:), allocatable :: rest, repo
+        character(len=:), allocatable :: rest, repo, version
         integer :: status
         logical :: write
 
@@ -537,6 +631,10 @@ contains
                 call git_route(cfd, req, rest, db, repo, write)
                 return
             end if
+            if (release_upload_route(req, repo, version)) then
+                call release_upload(cfd, req, rest, db, repo, version)
+                return
+            end if
             call http_read_body(cfd, req, rest, status)
         end if
         if (status /= 0) then
@@ -548,6 +646,119 @@ contains
         write (error_unit, '(a,1x,a,1x,i0)') req%method, req%path, res%code
         flush (error_unit)
     end subroutine serve_connection
+
+    logical function release_upload_route(req, repo, version)
+        !! PUT /api/v1/repos/NAME/releases/VERSION/release.tar
+        type(http_request_t), intent(in) :: req
+        character(len=:), allocatable, intent(out) :: repo, version
+        character(len=*), parameter :: PREFIX = '/api/v1/repos/', SUFFIX = '/release.tar'
+        character(len=:), allocatable :: mid
+        integer :: k
+
+        release_upload_route = .false.
+        repo = ''
+        version = ''
+        if (req%method /= 'PUT' .or. index(req%path, PREFIX) /= 1) return
+        if (len(req%path) <= len(PREFIX) + len(SUFFIX)) return
+        if (req%path(len(req%path) - len(SUFFIX) + 1:) /= SUFFIX) return
+        mid = req%path(len(PREFIX) + 1:len(req%path) - len(SUFFIX))
+        k = index(mid, '/releases/')
+        if (k < 2) return
+        repo = mid(1:k - 1)
+        version = mid(k + 10:)
+        release_upload_route = repo_name_ok(repo) .and. version_ok(version)
+    end function release_upload_route
+
+    pure logical function version_ok(v)
+        character(len=*), intent(in) :: v
+        version_ok = len(v) > 0 .and. len(v) <= 40 .and. &
+            verify(v, '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-_') == 0
+        if (version_ok) version_ok = v(1:1) /= '.'
+    end function version_ok
+
+    subroutine release_upload(cfd, req, rest, db, repo, version)
+        !! Receives the archive of an open release, streamed to disk, and makes
+        !! the release available once its SHA-256 matches X-Content-SHA256.
+        integer, intent(in) :: cfd
+        type(http_request_t), intent(in) :: req
+        character(len=*), intent(in) :: rest, repo, version
+        type(db_t), intent(in) :: db
+        integer(int64), parameter :: MAX_ARCHIVE = 268435456_int64
+        type(token_identity_t) :: who
+        type(response_t) :: res
+        character(len=:), allocatable :: dir, part
+        character(len=65536) :: buf
+        character(len=64) :: hex
+        integer(int64) :: left
+        integer :: u, n, ierr, stat
+        logical :: found
+
+        res%code = 201
+        res%ctype = JSON
+        res%headers = ''
+        res%cache = 'no-store'
+        res%body = ''
+        call store_token_lookup(db, http_bearer_token(req), who)
+        if (.not. who%found) then
+            call fail(res, 401, 'missing or invalid token')
+        else if (index(' '//who%scopes//' ', ' admin ') == 0 .and. &
+                index(' '//who%scopes//' ', ' release ') == 0) then
+            call fail(res, 403, 'uploading releases needs the release or admin scope')
+        else if (req%chunked .or. .not. req%has_length) then
+            call fail(res, 411, 'send Content-Length')
+        else if (int(req%content_length, int64) > MAX_ARCHIVE) then
+            call fail(res, 413, 'release archives are limited to 256 MiB')
+        else if (len(req%content_sha256) /= 64) then
+            call fail(res, 400, 'send X-Content-SHA256')
+        else
+            dir = releases_dir()//'/'//repo//'/'//version
+            call execute_command_line('mkdir -p '''//dir//'''', exitstat=stat)
+            part = dir//'/release.tar.part'
+            open (newunit=u, file=part, status='replace', access='stream', form='unformatted', &
+                action='write', iostat=ierr)
+            if (ierr /= 0) then
+                call fail(res, 500, 'release not stored')
+            else
+                left = int(req%content_length, int64)
+                n = int(min(int(len(rest), int64), left))
+                if (n > 0) write (u) rest(1:n)
+                left = left - n
+                do while (left > 0)
+                    n = sock_recv(cfd, buf)
+                    if (n <= 0) exit
+                    n = int(min(int(n, int64), left))
+                    write (u) buf(1:n)
+                    left = left - n
+                end do
+                close (u)
+                call sha256_file(part, hex, ierr, max_bytes=int(MAX_ARCHIVE))
+                if (left /= 0 .or. ierr /= 0 .or. hex /= req%content_sha256) then
+                    call execute_command_line('rm -f '''//part//'''')
+                    call fail(res, 422, 'the archive is incomplete or its checksum differs')
+                else
+                    call store_release_ready(db, repo, version, hex, &
+                        int(req%content_length, int64), found)
+                    if (.not. found) then
+                        call execute_command_line('rm -f '''//part//'''')
+                        call fail(res, 409, 'no open release '//version//' of '//repo)
+                    else
+                        call execute_command_line('mv -f '''//part//''' '''//dir// &
+                            '/release.tar''')
+                        res%body = '{"version":"'//version//'","sha256":"'//hex// &
+                            '","state":"ready"}'
+                    end if
+                end if
+            end if
+        end if
+        call http_send_response(cfd, res%code, res%ctype, res%body, res%headers, res%cache)
+        write (error_unit, '(a,1x,a,1x,i0)') req%method, req%path, res%code
+        flush (error_unit)
+    end subroutine release_upload
+
+    function releases_dir() result(path)
+        character(len=:), allocatable :: path
+        path = repos_dir//'/../releases'
+    end function releases_dir
 
     subroutine git_route(cfd, req, rest, db, repo, write)
         !! Clone, fetch and push over HTTP. Git sends the access token as the
