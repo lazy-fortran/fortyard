@@ -1,0 +1,10 @@
+[Unit]
+Description=fortyard listening socket
+
+[Socket]
+ListenStream=@LISTEN@
+FreeBind=true
+Backlog=128
+
+[Install]
+WantedBy=sockets.target

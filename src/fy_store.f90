@@ -1,0 +1,178 @@
+module fy_store
+    !! Schema, accounts and API tokens. Tokens are stored only as SHA-256
+    !! hashes; the plaintext is shown once when created.
+    use, intrinsic :: iso_fortran_env, only: int8, int64
+    use fx_hash, only: sha256_string
+    use fy_sqlite, only: db_t, stmt_t, db_open, db_exec, db_errmsg, db_prepare, &
+        stmt_bind_text, stmt_bind_int, stmt_step, stmt_text, stmt_int, &
+        stmt_finalize, SQLITE_OK, SQLITE_ROW, SQLITE_DONE
+    implicit none
+    private
+
+    public :: store_open, store_migrate, store_schema_version
+    public :: store_bootstrap, store_token_lookup, store_token_create
+    public :: token_identity_t, random_token
+
+    integer, parameter, public :: SCHEMA_VERSION = 1
+
+    type :: token_identity_t
+        logical :: found = .false.
+        integer(int64) :: account_id = 0
+        character(len=:), allocatable :: account
+        character(len=:), allocatable :: token_name
+        character(len=:), allocatable :: scopes
+    end type token_identity_t
+
+    character(len=*), parameter :: NOW = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+
+contains
+
+    subroutine store_open(path, db, stat)
+        character(len=*), intent(in) :: path
+        type(db_t), intent(out) :: db
+        integer, intent(out) :: stat
+
+        call db_open(path, db, stat)
+        if (stat /= SQLITE_OK) return
+        call db_exec(db, 'PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;', stat)
+        if (stat /= SQLITE_OK) return
+        call store_migrate(db, stat)
+    end subroutine store_open
+
+    subroutine store_migrate(db, stat)
+        !! Forward-only, additive migrations, so the previous release still runs.
+        type(db_t), intent(in) :: db
+        integer, intent(out) :: stat
+        integer :: version
+
+        call db_exec(db, 'CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);', &
+            stat)
+        if (stat /= SQLITE_OK) return
+        version = store_schema_version(db)
+        if (version < 1) then
+            call db_exec(db, 'BEGIN;'// &
+                'CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL,'// &
+                ' kind TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,'// &
+                ' created_at TEXT NOT NULL);'// &
+                'CREATE TABLE tokens (id INTEGER PRIMARY KEY,'// &
+                ' account_id INTEGER NOT NULL REFERENCES accounts(id),'// &
+                ' name TEXT NOT NULL, hash TEXT UNIQUE NOT NULL, scopes TEXT NOT NULL,'// &
+                ' created_at TEXT NOT NULL, expires_at TEXT,'// &
+                ' revoked INTEGER NOT NULL DEFAULT 0);'// &
+                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (1);'// &
+                'COMMIT;', stat)
+            if (stat /= SQLITE_OK) then
+                call db_exec(db, 'ROLLBACK;', version)
+                return
+            end if
+        end if
+    end subroutine store_migrate
+
+    function store_schema_version(db) result(version)
+        type(db_t), intent(in) :: db
+        integer :: version
+        type(stmt_t) :: st
+        integer :: stat
+
+        version = 0
+        call db_prepare(db, 'SELECT max(version) FROM schema_version;', st, stat)
+        if (stat /= SQLITE_OK) return
+        if (stmt_step(st) == SQLITE_ROW) version = int(stmt_int(st, 0))
+        call stmt_finalize(st)
+    end function store_schema_version
+
+    subroutine store_bootstrap(db, token, stat)
+        !! Creates the administrator account and its first token. Fails if an
+        !! administrator already exists, so the bootstrap token is shown once.
+        type(db_t), intent(in) :: db
+        character(len=:), allocatable, intent(out) :: token
+        integer, intent(out) :: stat
+        type(stmt_t) :: st
+        integer(int64) :: account_id
+
+        token = ''
+        call db_prepare(db, "INSERT INTO accounts (name, kind, created_at) VALUES"// &
+            " ('admin', 'admin', "//NOW//") RETURNING id;", st, stat)
+        if (stat /= SQLITE_OK) return
+        if (stmt_step(st) /= SQLITE_ROW) then
+            stat = 1
+            call stmt_finalize(st)
+            return
+        end if
+        account_id = stmt_int(st, 0)
+        call stmt_finalize(st)
+        call store_token_create(db, account_id, 'bootstrap', 'admin', token, stat)
+    end subroutine store_bootstrap
+
+    subroutine store_token_create(db, account_id, name, scopes, token, stat)
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: account_id
+        character(len=*), intent(in) :: name, scopes
+        character(len=:), allocatable, intent(out) :: token
+        integer, intent(out) :: stat
+        type(stmt_t) :: st
+
+        token = random_token()
+        call db_prepare(db, 'INSERT INTO tokens (account_id, name, hash, scopes, created_at)'// &
+            ' VALUES (?1, ?2, ?3, ?4, '//NOW//');', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, account_id, stat)
+        call stmt_bind_text(st, 2, name, stat)
+        call stmt_bind_text(st, 3, sha256_string(token), stat)
+        call stmt_bind_text(st, 4, scopes, stat)
+        stat = SQLITE_OK
+        if (stmt_step(st) /= SQLITE_DONE) stat = 1
+        call stmt_finalize(st)
+        if (stat /= SQLITE_OK) token = ''
+    end subroutine store_token_create
+
+    subroutine store_token_lookup(db, token, who)
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: token
+        type(token_identity_t), intent(out) :: who
+        type(stmt_t) :: st
+        integer :: stat
+
+        who%account = ''
+        who%token_name = ''
+        who%scopes = ''
+        if (len(token) < 8 .or. len(token) > 128) return
+        call db_prepare(db, 'SELECT a.id, a.name, t.name, t.scopes FROM tokens t'// &
+            ' JOIN accounts a ON a.id = t.account_id'// &
+            ' WHERE t.hash = ?1 AND t.revoked = 0 AND a.active = 1'// &
+            ' AND (t.expires_at IS NULL OR t.expires_at > '//NOW//');', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, sha256_string(token), stat)
+        if (stmt_step(st) == SQLITE_ROW) then
+            who%found = .true.
+            who%account_id = stmt_int(st, 0)
+            who%account = stmt_text(st, 1)
+            who%token_name = stmt_text(st, 2)
+            who%scopes = stmt_text(st, 3)
+        end if
+        call stmt_finalize(st)
+    end subroutine store_token_lookup
+
+    function random_token() result(token)
+        !! 256 random bits from the kernel, hex-encoded with a recognizable prefix.
+        character(len=:), allocatable :: token
+        integer(int8) :: bytes(32)
+        integer :: u, ios, i, b
+        character(len=*), parameter :: hex = '0123456789abcdef'
+
+        open (newunit=u, file='/dev/urandom', access='stream', form='unformatted', &
+            action='read', status='old', iostat=ios)
+        if (ios /= 0) error stop 'fy: cannot read /dev/urandom'
+        read (u, iostat=ios) bytes
+        close (u)
+        if (ios /= 0) error stop 'fy: cannot read /dev/urandom'
+        allocate (character(len=3 + 64) :: token)
+        token(1:3) = 'fy_'
+        do i = 1, 32
+            b = iand(int(bytes(i)), 255)
+            token(2 + 2*i:2 + 2*i) = hex(b/16 + 1:b/16 + 1)
+            token(3 + 2*i:3 + 2*i) = hex(mod(b, 16) + 1:mod(b, 16) + 1)
+        end do
+    end function random_token
+
+end module fy_store

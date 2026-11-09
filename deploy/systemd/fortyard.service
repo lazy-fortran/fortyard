@@ -1,0 +1,13 @@
+[Unit]
+Description=fortyard server
+Requires=fortyard.socket
+After=fortyard.socket
+
+[Service]
+EnvironmentFile=@HOME@/instance.env
+ExecStart=@HOME@/current/fy serve --data @HOME@/data
+Restart=always
+RestartSec=1
+MemoryMax=2G
+MemorySwapMax=0
+NoNewPrivileges=true

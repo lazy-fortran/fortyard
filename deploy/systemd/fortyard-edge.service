@@ -1,0 +1,10 @@
+[Unit]
+Description=fortyard edge channel: build and deploy new commits on main
+
+[Service]
+Type=oneshot
+EnvironmentFile=@HOME@/instance.env
+ExecStart=@HOME@/bin/edge-update.sh
+Nice=10
+MemoryMax=8G
+MemorySwapMax=0
