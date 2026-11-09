@@ -6,7 +6,8 @@ module fy_http
 
     public :: http_request_t, http_parse_head, http_read_request
     public :: http_send_response, http_status_text, http_bearer_token, http_cookie
-    public :: http_query_param, http_percent_decode
+    public :: http_query_param, http_percent_decode, http_read_head, http_read_body
+    public :: http_basic_password
 
     integer, parameter, public :: HTTP_MAX_HEAD = 65536
     integer, parameter, public :: HTTP_MAX_BODY = 1048576
@@ -21,18 +22,25 @@ module fy_http
         character(len=:), allocatable :: accept_encoding
         character(len=:), allocatable :: if_none_match
         character(len=:), allocatable :: body
+        !! Git's protocol version request and the request body's encoding.
+        character(len=:), allocatable :: git_protocol, content_encoding
         integer :: content_length = 0
+        !! Content-Length was given; a chunked body has none.
+        logical :: has_length = .false., chunked = .false.
     end type http_request_t
 
     character(len=2), parameter :: CRLF = achar(13)//achar(10)
 
 contains
 
-    subroutine http_parse_head(head, req, status)
+    subroutine http_parse_head(head, req, status, streaming)
         !! Parses request line and headers; status is 0 or an HTTP error code.
+        !! With `streaming`, chunked and large bodies are accepted, for routes
+        !! that pass the body on as it arrives.
         character(len=*), intent(in) :: head
         type(http_request_t), intent(out) :: req
         integer, intent(out) :: status
+        logical, intent(in), optional :: streaming
         integer :: eol, pos, sp1, sp2, colon, ios
         character(len=:), allocatable :: line, target, name, value
 
@@ -45,6 +53,8 @@ contains
         req%accept_encoding = ''
         req%if_none_match = ''
         req%body = ''
+        req%git_protocol = ''
+        req%content_encoding = ''
         status = 400
         eol = index(head, CRLF)
         if (eol < 1) return
@@ -89,12 +99,24 @@ contains
             case ('content-length')
                 read (value, *, iostat=ios) req%content_length
                 if (ios /= 0 .or. req%content_length < 0) return
+                req%has_length = .true.
             case ('transfer-encoding')
-                status = 501
-                return
+                if (lower(value) /= 'chunked') then
+                    status = 501
+                    return
+                end if
+                req%chunked = .true.
+            case ('git-protocol')
+                req%git_protocol = value
+            case ('content-encoding')
+                req%content_encoding = lower(value)
             end select
         end do
         status = 0
+        if (present(streaming)) then
+            if (streaming) return
+        end if
+        if (req%chunked) status = 501
         if (req%content_length > HTTP_MAX_BODY) status = 413
     end subroutine http_parse_head
 
@@ -103,11 +125,27 @@ contains
         integer, intent(in) :: fd
         type(http_request_t), intent(out) :: req
         integer, intent(out) :: status
+        character(len=:), allocatable :: rest
+
+        call http_read_head(fd, req, rest, status)
+        if (status /= 0) return
+        call http_read_body(fd, req, rest, status)
+    end subroutine http_read_request
+
+    subroutine http_read_head(fd, req, rest, status)
+        !! Reads and parses the request head only, accepting chunked and large
+        !! bodies; `rest` holds the bytes read past the head. Status is 0, -1
+        !! when the peer sent nothing, or an HTTP error code.
+        integer, intent(in) :: fd
+        type(http_request_t), intent(out) :: req
+        character(len=:), allocatable, intent(out) :: rest
+        integer, intent(out) :: status
         character(len=8192) :: buf
         character(len=:), allocatable :: data
         integer :: n, head_end
 
         data = ''
+        rest = ''
         head_end = 0
         status = 400
         do
@@ -124,19 +162,75 @@ contains
                 return
             end if
         end do
-        call http_parse_head(data(1:head_end + 3), req, status)
-        if (status /= 0) return
-        req%body = data(head_end + 4:)
+        call http_parse_head(data(1:head_end + 3), req, status, streaming=.true.)
+        rest = data(head_end + 4:)
+    end subroutine http_read_head
+
+    subroutine http_read_body(fd, req, rest, status)
+        !! Reads a bounded, non-chunked body into req%body after http_read_head.
+        integer, intent(in) :: fd
+        type(http_request_t), intent(inout) :: req
+        character(len=*), intent(in) :: rest
+        integer, intent(out) :: status
+        character(len=8192) :: buf
+        integer :: n
+
+        status = 501
+        if (req%chunked) return
+        status = 413
+        if (req%content_length > HTTP_MAX_BODY) return
+        status = 400
+        req%body = rest
         do while (len(req%body) < req%content_length)
             n = sock_recv(fd, buf)
-            if (n <= 0) then
-                status = 400
-                return
-            end if
+            if (n <= 0) return
             req%body = req%body//buf(1:n)
         end do
         if (len(req%body) > req%content_length) req%body = req%body(1:req%content_length)
-    end subroutine http_read_request
+        status = 0
+    end subroutine http_read_body
+
+    function http_basic_password(req) result(password)
+        !! The password of HTTP Basic authorization, or empty; git sends an
+        !! access token this way.
+        type(http_request_t), intent(in) :: req
+        character(len=:), allocatable :: password
+        character(len=:), allocatable :: plain
+        integer :: colon
+
+        password = ''
+        if (len(req%authorization) <= 6) return
+        if (lower(req%authorization(1:6)) /= 'basic ') return
+        plain = base64_decode(trim(adjustl(req%authorization(7:))))
+        colon = index(plain, ':')
+        if (colon > 0) password = plain(colon + 1:)
+    end function http_basic_password
+
+    function base64_decode(s) result(d)
+        character(len=*), intent(in) :: s
+        character(len=:), allocatable :: d
+        character(len=*), parameter :: ALPHA = &
+            'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+        integer :: i, v, bits, acc
+
+        d = ''
+        acc = 0
+        bits = 0
+        do i = 1, len(s)
+            if (s(i:i) == '=') exit
+            v = index(ALPHA, s(i:i)) - 1
+            if (v < 0) then
+                d = ''
+                return
+            end if
+            acc = ior(ishft(iand(acc, 65535), 6), v)
+            bits = bits + 6
+            if (bits >= 8) then
+                bits = bits - 8
+                d = d//achar(iand(ishft(acc, -bits), 255))
+            end if
+        end do
+    end function base64_decode
 
     subroutine http_send_response(fd, code, content_type, body, headers, cache)
         !! `headers` are further header lines, each ending in CRLF; `cache` is the

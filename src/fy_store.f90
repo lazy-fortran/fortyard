@@ -13,9 +13,9 @@ module fy_store
     public :: store_bootstrap, store_token_lookup, store_token_create
     public :: store_token_list, store_token_revoke, store_token_revoke_hash
     public :: token_identity_t, token_info_t, random_token
-    public :: repo_info_t, store_repo_add, store_repo_list, store_repo_fetched
+    public :: repo_info_t, store_repo_add, store_repo_list, store_repo_fetched, store_repo_set_mode
 
-    integer, parameter, public :: SCHEMA_VERSION = 2
+    integer, parameter, public :: SCHEMA_VERSION = 3
 
     type :: token_identity_t
         logical :: found = .false.
@@ -34,6 +34,8 @@ module fy_store
 
     type :: repo_info_t
         character(len=:), allocatable :: name, upstream, fetched_at
+        !! "mirror" (fetched from upstream) or "primary" (pushed to fortyard).
+        character(len=:), allocatable :: mode
         !! Exit status of the last clone or fetch; -1 before the first.
         integer :: fetch_status = -1
     end type repo_info_t
@@ -87,6 +89,17 @@ contains
                 ' upstream TEXT NOT NULL, created_at TEXT NOT NULL, fetched_at TEXT,'// &
                 ' fetch_status INTEGER);'// &
                 'DELETE FROM schema_version; INSERT INTO schema_version VALUES (2);'// &
+                'COMMIT;', stat)
+            if (stat /= SQLITE_OK) then
+                call db_exec(db, 'ROLLBACK;', version)
+                return
+            end if
+        end if
+        if (store_schema_version(db) < 3) then
+            ! "mirror": fetched from upstream; "primary": pushed to fortyard.
+            call db_exec(db, 'BEGIN;'// &
+                "ALTER TABLE repos ADD COLUMN mode TEXT NOT NULL DEFAULT 'mirror';"// &
+                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (3);'// &
                 'COMMIT;', stat)
             if (stat /= SQLITE_OK) then
                 call db_exec(db, 'ROLLBACK;', version)
@@ -250,17 +263,23 @@ contains
     end subroutine store_token_revoke_hash
 
 
-    subroutine store_repo_add(db, name, upstream, stat)
+    subroutine store_repo_add(db, name, upstream, stat, mode)
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: name, upstream
         integer, intent(out) :: stat
+        character(len=*), intent(in), optional :: mode
         type(stmt_t) :: st
 
-        call db_prepare(db, 'INSERT INTO repos (name, upstream, created_at) VALUES (?1, ?2, '// &
-            NOW//');', st, stat)
+        call db_prepare(db, 'INSERT INTO repos (name, upstream, created_at, mode) VALUES (?1, ?2, '// &
+            NOW//', ?3);', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, name, stat)
         call stmt_bind_text(st, 2, upstream, stat)
+        if (present(mode)) then
+            call stmt_bind_text(st, 3, mode, stat)
+        else
+            call stmt_bind_text(st, 3, 'mirror', stat)
+        end if
         stat = SQLITE_OK
         if (stmt_step(st) /= SQLITE_DONE) stat = 1
         call stmt_finalize(st)
@@ -275,18 +294,35 @@ contains
 
         allocate (repos(0))
         call db_prepare(db, "SELECT name, upstream, coalesce(fetched_at, ''),"// &
-            ' coalesce(fetch_status, -1) FROM repos ORDER BY name;', st, stat)
+            ' coalesce(fetch_status, -1), mode FROM repos ORDER BY name;', st, stat)
         if (stat /= SQLITE_OK) return
         do while (stmt_step(st) == SQLITE_ROW)
             r%name = stmt_text(st, 0)
             r%upstream = stmt_text(st, 1)
             r%fetched_at = stmt_text(st, 2)
             r%fetch_status = int(stmt_int(st, 3))
+            r%mode = stmt_text(st, 4)
             repos = [repos, r]
         end do
         call stmt_finalize(st)
         stat = SQLITE_OK
     end subroutine store_repo_list
+
+    subroutine store_repo_set_mode(db, name, mode, found)
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: name, mode
+        logical, intent(out) :: found
+        type(stmt_t) :: st
+        integer :: stat
+
+        found = .false.
+        call db_prepare(db, 'UPDATE repos SET mode = ?2 WHERE name = ?1 RETURNING id;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, name, stat)
+        call stmt_bind_text(st, 2, mode, stat)
+        found = stmt_step(st) == SQLITE_ROW
+        call stmt_finalize(st)
+    end subroutine store_repo_set_mode
 
     subroutine store_repo_fetched(db, name, status)
         type(db_t), intent(in) :: db

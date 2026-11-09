@@ -92,8 +92,10 @@ The instance develops itself: pushes go to fortyard, changes land through its
 own queue, the edge timer deploys its own `main`, and GitHub becomes a mirror.
 In order:
 
-- [ ] Git smart HTTP through `git http-backend` (clone, fetch, push) with token
-      authentication; SSH later.
+- [x] Git smart HTTP through `git http-backend` (clone, fetch, push) with token
+      authentication, streamed in both directions; repositories are mirrors or
+      primary (`fy repo create`, `fy repo mode`); pushes need the admin scope
+      until roles exist. SSH later.
 - [ ] Size limit and repository checks on receive; same checks in `fy push`.
 - [ ] Changes, minimal: a push to a non-protected branch opens or updates a
       change (title, description, versions by change ID); `main` refuses

@@ -9,7 +9,7 @@ module fy_repo
 
     public :: repo_name_ok, repo_ref_ok, repo_path_ok
     public :: repo_log_json, repo_tree_json, repo_blob, repo_commit_json, repo_refs_json
-    public :: repo_fetch, repo_clone
+    public :: repo_fetch, repo_clone, repo_init
 
     integer, parameter, public :: BLOB_MAX = 1048576
     integer, parameter, public :: DIFF_MAX = 524288
@@ -259,6 +259,16 @@ contains
         call proc_run([character(len=1024) :: 'env', 'GIT_TERMINAL_PROMPT=0', 'timeout', &
             '600', 'git', 'clone', '--quiet', '--mirror', upstream, repo], out, status, 65536)
     end subroutine repo_clone
+
+    subroutine repo_init(repo, status)
+        !! An empty bare repository at `repo` that accepts pushes to its branches.
+        character(len=*), intent(in) :: repo
+        integer, intent(out) :: status
+        character(len=:), allocatable :: out
+
+        call proc_run([character(len=1024) :: 'git', 'init', '--quiet', '--bare', &
+            '--initial-branch=main', repo], out, status, 65536)
+    end subroutine repo_init
 
     subroutine repo_fetch(repo, status)
         character(len=*), intent(in) :: repo

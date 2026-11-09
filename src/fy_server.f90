@@ -5,7 +5,9 @@ module fy_server
     use fx_json_parse, only: json_extract_string
     use fy_build_info, only: FY_VERSION, FY_COMMIT, FY_BUILT
     use fy_http, only: http_request_t, http_read_request, http_send_response, &
-        http_bearer_token, http_cookie, http_query_param
+        http_bearer_token, http_cookie, http_query_param, http_read_head, http_read_body, &
+        http_basic_password
+    use fy_git_http, only: git_http_route, git_http_serve
     use fortui, only: ui_init, ui_frame_begin, ui_present, ui_shutdown
     use fortui_backend_headless, only: headless_backend_t
     use fortui_html, only: ui_frame_html
@@ -13,14 +15,14 @@ module fy_server
     use fy_fetch, only: fetch_serve, fetch_served_json
     use fy_route, only: route_is_page
     use fy_repo, only: repo_name_ok, repo_ref_ok, repo_path_ok, repo_log_json, repo_tree_json, &
-        repo_blob, repo_commit_json, repo_refs_json, repo_clone, repo_fetch
+        repo_blob, repo_commit_json, repo_refs_json, repo_clone, repo_fetch, repo_init
     use fy_posix, only: tcp_accept, sock_close, sock_set_timeouts
     use fy_sqlite, only: db_t
     use fy_proc, only: proc_fork, proc_wait_any, proc_exit, proc_pid, &
         proc_die_with_parent, proc_sleep_ms
     use fy_store, only: token_identity_t, token_info_t, store_token_lookup, store_token_create, &
         store_open, store_token_list, store_token_revoke, store_token_revoke_hash, repo_info_t, &
-        store_repo_add, store_repo_list, store_repo_fetched
+        store_repo_add, store_repo_list, store_repo_fetched, store_repo_set_mode
     use fy_sqlite, only: db_close
     implicit none
     private
@@ -152,7 +154,11 @@ contains
                     end if
                     call system_clock(now, rate)
                     inquire (file=repo_path(repos(i)%name)//'/HEAD', exist=exists)
-                    if (.not. exists) then
+                    if (repos(i)%mode == 'primary') then
+                        ! Pushed to fortyard, never fetched; created empty once.
+                        if (exists) cycle
+                        call repo_init(repo_path(repos(i)%name), status)
+                    else if (.not. exists) then
                         call repo_clone(repos(i)%upstream, repo_path(repos(i)%name), status)
                     else if (now - last(k) >= int(mirror_interval, int64) * rate) then
                         call repo_fetch(repo_path(repos(i)%name), status)
@@ -213,12 +219,20 @@ contains
                 if (.not. found) name = ''
                 call json_extract_string(req%body, 'upstream', upstream, found)
                 if (.not. found) upstream = ''
-                if (.not. repo_name_ok(name) .or. .not. upstream_ok(upstream)) then
+                if (.not. repo_name_ok(name) .or. (len(upstream) > 0 .and. &
+                    .not. upstream_ok(upstream))) then
                     call fail(res, 400, 'body must be {"name":"...","upstream":"..."} with a'// &
-                        ' lower-case name and an https or ssh URL')
+                        ' lower-case name and an https or ssh URL, or without upstream for a'// &
+                        ' repository pushed to fortyard')
                     return
                 end if
-                call store_repo_add(db, name, upstream, stat)
+                ! Without upstream the repository is primary: created empty here.
+                if (len(upstream) == 0) then
+                    call store_repo_add(db, name, '', stat, mode='primary')
+                    if (stat == 0) call repo_init(repo_path(name), status)
+                else
+                    call store_repo_add(db, name, upstream, stat)
+                end if
                 if (stat /= 0) then
                     call fail(res, 409, 'repository exists')
                     return
@@ -232,8 +246,14 @@ contains
             return
         end if
 
-        if (.not. method_is(req, 'GET', res)) return
         rest = req%path(len('/api/v1/repos/') + 1:)
+        if (req%method == 'POST' .and. len(rest) > 5) then
+            if (rest(len(rest) - 4:) == '/mode') then
+                call set_mode(rest(1:len(rest) - 5))
+                return
+            end if
+        end if
+        if (.not. method_is(req, 'GET', res)) return
         slash = index(rest, '/')
         if (slash < 2) then
             call fail(res, 404, 'not found')
@@ -275,6 +295,34 @@ contains
             call repo_commit_json(repo_path(name), sub(9:), res%body, status)
         end select
         if (status /= 0) call fail(res, 404, 'no such ref, path or commit')
+
+    contains
+
+        subroutine set_mode(target)
+            !! POST /api/v1/repos/NAME/mode {"mode":"primary"|"mirror"}: a primary
+            !! repository takes pushes and is no longer fetched from upstream.
+            character(len=*), intent(in) :: target
+            character(len=:), allocatable :: mode
+            logical :: ok
+
+            if (index(' '//who%scopes//' ', ' admin ') == 0) then
+                call fail(res, 403, 'changing a repository mode needs the admin scope')
+                return
+            end if
+            call json_extract_string(req%body, 'mode', mode, ok)
+            if (.not. ok) mode = ''
+            if (mode /= 'primary' .and. mode /= 'mirror') then
+                call fail(res, 400, 'body must be {"mode":"primary"} or {"mode":"mirror"}')
+                return
+            end if
+            call store_repo_set_mode(db, target, mode, ok)
+            if (.not. ok) then
+                call fail(res, 404, 'no such repository')
+                return
+            end if
+            res%body = '{"name":"'//json_escape_string(target)//'","mode":"'//mode//'"}'
+        end subroutine set_mode
+
     end subroutine repos_route
 
     pure logical function upstream_ok(url)
@@ -324,10 +372,19 @@ contains
         type(db_t), intent(in) :: db
         type(http_request_t) :: req
         type(response_t) :: res
+        character(len=:), allocatable :: rest, repo
         integer :: status
+        logical :: write
 
-        call http_read_request(cfd, req, status)
+        call http_read_head(cfd, req, rest, status)
         if (status < 0) return
+        if (status == 0) then
+            if (git_http_route(req%path, req%query, repo, write)) then
+                call git_route(cfd, req, rest, db, repo, write)
+                return
+            end if
+            call http_read_body(cfd, req, rest, status)
+        end if
         if (status /= 0) then
             call http_send_response(cfd, status, JSON, '{"error":"bad request"}')
             return
@@ -337,6 +394,69 @@ contains
         write (error_unit, '(a,1x,a,1x,i0)') req%method, req%path, res%code
         flush (error_unit)
     end subroutine serve_connection
+
+    subroutine git_route(cfd, req, rest, db, repo, write)
+        !! Clone, fetch and push over HTTP. Git sends the access token as the
+        !! Basic password (any user name) or as a bearer token. Reading needs a
+        !! valid token; pushing needs the admin scope and a primary repository.
+        integer, intent(in) :: cfd
+        type(http_request_t), intent(in) :: req
+        character(len=*), intent(in) :: rest, repo
+        type(db_t), intent(in) :: db
+        logical, intent(in) :: write
+        type(token_identity_t) :: who
+        type(repo_info_t), allocatable :: repos(:)
+        character(len=:), allocatable :: token, mode
+        integer :: status, i, stat
+        logical :: exists
+
+        token = http_basic_password(req)
+        if (len(token) == 0) token = http_bearer_token(req)
+        call store_token_lookup(db, token, who)
+        status = 0
+        if (.not. who%found) then
+            call http_send_response(cfd, 401, 'text/plain; charset=utf-8', &
+                'Use an access token as the password.'//new_line('a'), &
+                'WWW-Authenticate: Basic realm="fortyard"'//CRLF)
+            status = 401
+        else
+            inquire (file=repo_path(repo)//'/HEAD', exist=exists)
+            mode = ''
+            if (repo_name_ok(repo) .and. exists) then
+                call store_repo_list(db, repos, stat)
+                do i = 1, size(repos)
+                    if (repos(i)%name == repo) mode = repos(i)%mode
+                end do
+            end if
+            if (len(mode) == 0) then
+                status = 404
+            else if (write .and. index(' '//who%scopes//' ', ' admin ') == 0) then
+                status = 403
+            else if (write .and. mode /= 'primary') then
+                ! A mirror follows its upstream; pushes go there.
+                status = 409
+            else
+                call git_http_serve(cfd, req, rest, repos_dir, repo, who%account, status)
+            end if
+            if (status /= 0) call http_send_response(cfd, status, 'text/plain; charset=utf-8', &
+                git_error(status)//new_line('a'))
+        end if
+        if (status == 0) status = 200
+        write (error_unit, '(a,1x,a,1x,i0)') req%method, req%path, status
+        flush (error_unit)
+    end subroutine git_route
+
+    function git_error(status) result(s)
+        integer, intent(in) :: status
+        character(len=:), allocatable :: s
+        select case (status)
+        case (403); s = 'Pushing needs the admin scope.'
+        case (404); s = 'No such repository.'
+        case (409); s = 'This repository mirrors its upstream; push there.'
+        case (413); s = 'The push is too large.'
+        case default; s = 'The git request failed.'
+        end select
+    end function git_error
 
     recursive subroutine route(req, db, res)
         type(http_request_t), intent(in) :: req
@@ -597,7 +717,7 @@ contains
         do i = 1, size(repos)
             inquire (file=repo_path(repos(i)%name)//'/HEAD', exist=exists)
             if (i > 1) s = s//','
-            s = s//'{"name":"'//repos(i)%name//'","upstream":"'// &
+            s = s//'{"name":"'//repos(i)%name//'","mode":"'//repos(i)%mode//'","upstream":"'// &
                 json_escape_string(repos(i)%upstream)//'","fetched":"'// &
                 repos(i)%fetched_at//'","ready":'//json_bool(exists)//'}'
         end do
