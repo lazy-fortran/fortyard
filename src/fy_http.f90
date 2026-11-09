@@ -5,7 +5,7 @@ module fy_http
     private
 
     public :: http_request_t, http_parse_head, http_read_request
-    public :: http_send_response, http_status_text, http_bearer_token
+    public :: http_send_response, http_status_text, http_bearer_token, http_cookie
 
     integer, parameter, public :: HTTP_MAX_HEAD = 65536
     integer, parameter, public :: HTTP_MAX_BODY = 1048576
@@ -15,6 +15,8 @@ module fy_http
         character(len=:), allocatable :: path
         character(len=:), allocatable :: query
         character(len=:), allocatable :: authorization
+        character(len=:), allocatable :: cookie
+        character(len=:), allocatable :: content_type
         character(len=:), allocatable :: body
         integer :: content_length = 0
     end type http_request_t
@@ -35,6 +37,8 @@ contains
         req%path = ''
         req%query = ''
         req%authorization = ''
+        req%cookie = ''
+        req%content_type = ''
         req%body = ''
         status = 400
         eol = index(head, CRLF)
@@ -69,6 +73,10 @@ contains
             select case (name)
             case ('authorization')
                 req%authorization = value
+            case ('cookie')
+                req%cookie = value
+            case ('content-type')
+                req%content_type = lower(value)
             case ('content-length')
                 read (value, *, iostat=ios) req%content_length
                 if (ios /= 0 .or. req%content_length < 0) return
@@ -121,21 +129,57 @@ contains
         if (len(req%body) > req%content_length) req%body = req%body(1:req%content_length)
     end subroutine http_read_request
 
-    subroutine http_send_response(fd, code, content_type, body)
+    subroutine http_send_response(fd, code, content_type, body, headers, cache)
+        !! `headers` are further header lines, each ending in CRLF; `cache` is the
+        !! Cache-Control value, no-store unless given.
         integer, intent(in) :: fd, code
         character(len=*), intent(in) :: content_type, body
+        character(len=*), intent(in), optional :: headers, cache
         character(len=16) :: num, clen
+        character(len=:), allocatable :: extra, policy
         integer :: stat
 
+        extra = ''
+        if (present(headers)) extra = headers
+        policy = 'no-store'
+        if (present(cache)) policy = cache
         write (num, '(i0)') code
         write (clen, '(i0)') len(body)
         call sock_send_all(fd, 'HTTP/1.1 '//trim(num)//' '//http_status_text(code)//CRLF// &
             'Content-Type: '//content_type//CRLF// &
             'Content-Length: '//trim(clen)//CRLF// &
-            'Cache-Control: no-store'//CRLF// &
+            'Cache-Control: '//policy//CRLF//extra// &
             'X-Content-Type-Options: nosniff'//CRLF// &
             'Connection: close'//CRLF//CRLF//body, stat)
     end subroutine http_send_response
+
+    function http_cookie(req, name) result(value)
+        !! Value of cookie `name`, or empty.
+        type(http_request_t), intent(in) :: req
+        character(len=*), intent(in) :: name
+        character(len=:), allocatable :: value
+        character(len=:), allocatable :: rest, pair
+        integer :: semi, eq
+
+        value = ''
+        rest = req%cookie
+        do while (len(rest) > 0)
+            semi = index(rest, ';')
+            if (semi == 0) then
+                pair = trim(adjustl(rest))
+                rest = ''
+            else
+                pair = trim(adjustl(rest(1:semi - 1)))
+                rest = rest(semi + 1:)
+            end if
+            eq = index(pair, '=')
+            if (eq < 2) cycle
+            if (pair(1:eq - 1) == name) then
+                value = pair(eq + 1:)
+                return
+            end if
+        end do
+    end function http_cookie
 
     function http_bearer_token(req) result(token)
         type(http_request_t), intent(in) :: req

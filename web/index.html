@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>fortyard</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1d1f21; --bg: #fbfbf8; --mut: #6b6f76; --acc: #3b6e5a;
+    --line: #d9d6cc; --ctl: #ffffff; --hover: #f0efe9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #e6e4dc; --bg: #17191b; --mut: #9a9da3; --acc: #7fb69c;
+      --line: #3a3d42; --ctl: #212427; --hover: #2a2d31;
+    }
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); }
+  #app { position: fixed; inset: 24px 16px; margin: 0 auto; max-width: 1000px; }
+  .fui-k2, .fui-k5 {
+    border: 1px solid var(--line); border-radius: 6px; background: var(--ctl);
+    color: var(--fg); cursor: pointer;
+  }
+  .fui-k5[aria-selected="true"] { border-color: var(--acc); color: var(--acc); }
+  .fui-hover { background: var(--hover); }
+  .fui-focus { outline: 2px solid var(--acc); outline-offset: 1px; }
+  .fui-k8 {
+    border: 1px solid var(--line); border-radius: 4px; padding: 0 6px;
+    background: var(--ctl); color: var(--fg);
+  }
+  .fui-k1 { user-select: text; }
+  noscript { display: block; padding: 2rem; font-family: system-ui, sans-serif; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<noscript>fortyard needs JavaScript for its WebAssembly application; the server
+status is at <a href="/status">/status</a>.</noscript>
+<script>var Module = { locateFile: function (f) { return '/app/' + f; } };</script>
+<script src="/app/fy_app.js"></script>
+</body>
+</html>

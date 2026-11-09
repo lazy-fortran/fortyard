@@ -58,12 +58,17 @@ The browser application is Fortran compiled to WebAssembly with LFortran and
 drawn with [fortui](https://github.com/lazy-fortran/fortui). fortyard is the
 first consumer of fortui's browser backend, which is built in fortui itself.
 
-- [ ] fortui `web` backend: ordinary controls as DOM elements, a non-blocking
-      frame driver yielding to the browser, a small JavaScript host and the
-      emscripten loader as the only JavaScript.
-- [ ] Shared modules (JSON, API types) compiled with gfortran and LFortran.
-- [ ] `fy serve` serves the application and its WebAssembly module.
-- [ ] Screens: server status, account, tokens (list, create, revoke).
+- [x] fortui `web` backend: ordinary controls as DOM elements, a frame loop
+      that yields to the browser, a small JavaScript host and the emscripten
+      loader as the only JavaScript.
+- [x] fx JSON modules compiled with gfortran (server) and LFortran (browser).
+- [x] `fy serve` serves the application and its WebAssembly module at `/`;
+      the server page moves to `/status`.
+- [x] Browser sign-in: a token is exchanged for an HttpOnly, SameSite=Strict
+      session cookie; requests that change state with it must be JSON.
+- [x] Screens: server status, account, tokens (list, create, revoke), checked
+      end to end in headless Chromium (`test/web_app_test.mjs`).
+- [ ] Visual design of the application; layout beyond plain rows.
 - [ ] Canvas surface in fortui for diffs and plots (needed from M5 on).
 
 ### M3 CI overlay

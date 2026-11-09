@@ -13,6 +13,8 @@ FY_HOME=$home
 FY_URL=http://$listen
 FY_UPSTREAM=$upstream
 PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+EMSDK_PATH=${EMSDK_PATH:-}
+FY_CACHE=$home/cache
 ENV
 sed -e "s|@LISTEN@|$listen|g" "$root/deploy/systemd/fortyard.socket" > "$units/fortyard.socket"
 for u in fortyard.service fortyard-edge.service fortyard-edge.timer; do

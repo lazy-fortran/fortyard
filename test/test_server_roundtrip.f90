@@ -3,7 +3,7 @@ program test_server_roundtrip
     !! until the server accepts and answers it.
     use fy_posix, only: tcp_listen, tcp_accept, tcp_connect, sock_send_all, &
         sock_recv, sock_close, sock_bound_port
-    use fy_server, only: serve_connection
+    use fy_server, only: serve_connection, server_set_web_dir
     use fy_sqlite, only: db_t, db_close
     use fy_store, only: store_open, store_bootstrap
     implicit none
@@ -11,8 +11,8 @@ program test_server_roundtrip
     character(len=*), parameter :: path = 'build/test_server_roundtrip.db'
     character(len=2), parameter :: CRLF = achar(13)//achar(10)
     type(db_t) :: db
-    character(len=:), allocatable :: token, reply
-    integer :: lfd, port, stat
+    character(len=:), allocatable :: token, reply, cookie
+    integer :: lfd, port, stat, k
 
     call execute_command_line('rm -f '//path//' '//path//'-wal '//path//'-shm')
     call store_open(path, db, stat)
@@ -47,6 +47,59 @@ program test_server_roundtrip
 
     reply = exchange('garbage'//CRLF//CRLF)
     call check(index(reply, 'HTTP/1.1 400') == 1, 'malformed request is 400')
+
+    reply = exchange('POST /api/v1/session HTTP/1.1'//CRLF// &
+        'Content-Type: application/json'//CRLF//'Content-Length: 10'//CRLF//CRLF//'{"token":}')
+    call check(index(reply, 'HTTP/1.1 401') == 1, 'session needs a valid token')
+
+    reply = exchange('POST /api/v1/session HTTP/1.1'//CRLF// &
+        'Content-Type: application/json'//CRLF//'Content-Length: 79'//CRLF//CRLF// &
+        '{"token":"'//token//'"}')
+    k = index(reply, 'Set-Cookie: fy_session=')
+    call check(index(reply, 'HTTP/1.1 200') == 1 .and. k > 0 .and. &
+        index(reply, 'HttpOnly; SameSite=Strict') > 0, 'session opens with an HttpOnly cookie')
+    cookie = reply(k + 12:k + 12 + len('fy_session=') + 67 - 1)
+
+    reply = exchange('GET /api/v1/whoami HTTP/1.1'//CRLF//'Cookie: a=b; '//cookie//CRLF//CRLF)
+    call check(index(reply, '"token":"browser session"') > 0, 'the session cookie authenticates')
+
+    reply = exchange('POST /api/v1/tokens HTTP/1.1'//CRLF//'Cookie: '//cookie//CRLF// &
+        'Content-Type: application/x-www-form-urlencoded'//CRLF//'Content-Length: 15'//CRLF// &
+        CRLF//'{"name":"ci-2"}')
+    call check(index(reply, 'HTTP/1.1 415') == 1, 'a cookie request that changes state must be JSON')
+
+    reply = exchange('GET /api/v1/tokens HTTP/1.1'//CRLF//'Cookie: '//cookie//CRLF//CRLF)
+    call check(index(reply, '"name":"ci-1"') > 0 .and. index(reply, '"current":true') > 0 &
+        .and. index(reply, '"token":"fy_') == 0, 'tokens listed without secrets')
+
+    reply = exchange('POST /api/v1/tokens/2/revoke HTTP/1.1'//CRLF//'Cookie: '//cookie// &
+        CRLF//'Content-Type: application/json'//CRLF//CRLF)
+    call check(index(reply, 'HTTP/1.1 200') == 1, 'own token revoked')
+    reply = exchange('POST /api/v1/tokens/999/revoke HTTP/1.1'//CRLF//'Cookie: '//cookie// &
+        CRLF//'Content-Type: application/json'//CRLF//CRLF)
+    call check(index(reply, 'HTTP/1.1 404') == 1, 'unknown token not revoked')
+
+    reply = exchange('DELETE /api/v1/session HTTP/1.1'//CRLF//'Cookie: '//cookie//CRLF//CRLF)
+    call check(index(reply, 'Max-Age=0') > 0, 'session closes and clears the cookie')
+    reply = exchange('GET /api/v1/whoami HTTP/1.1'//CRLF//'Cookie: '//cookie//CRLF//CRLF)
+    call check(index(reply, 'HTTP/1.1 401') == 1, 'a closed session no longer authenticates')
+
+    reply = exchange('GET / HTTP/1.1'//CRLF//CRLF)
+    call check(index(reply, '<h1>fortyard</h1>') > 0, 'status page at / without a web application')
+    call execute_command_line('mkdir -p build/test_web && printf app > build/test_web/index.html' // &
+        ' && printf code > build/test_web/fy_app.wasm')
+    call server_set_web_dir('build/test_web')
+    reply = exchange('GET / HTTP/1.1'//CRLF//CRLF)
+    call check(index(reply, CRLF//CRLF//'app') > 0, 'web application at /')
+    reply = exchange('GET /app/fy_app.wasm HTTP/1.1'//CRLF//CRLF)
+    call check(index(reply, 'application/wasm') > 0 .and. index(reply, CRLF//CRLF//'code') > 0, &
+        'WebAssembly served with its type')
+    reply = exchange('GET /app/..%2ffortyard.db HTTP/1.1'//CRLF//CRLF)
+    call check(index(reply, 'HTTP/1.1 404') == 1, 'no path leaves the web directory')
+    reply = exchange('GET /app/../test_store.db HTTP/1.1'//CRLF//CRLF)
+    call check(index(reply, 'HTTP/1.1 404') == 1, 'no parent directory')
+    reply = exchange('GET /status HTTP/1.1'//CRLF//CRLF)
+    call check(index(reply, '<h1>fortyard</h1>') > 0, 'status page at /status')
 
     call sock_close(lfd)
     call db_close(db)

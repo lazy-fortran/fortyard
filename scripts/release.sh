@@ -28,5 +28,15 @@ INFO
 mkdir -p "$out"
 cp "$work/prefix/bin/fy" "$out/fy"
 (cd "$out" && sha256sum fy > fy.sha256)
+if [ -x "$work/src/scripts/build-web.sh" ]; then
+    "$work/src/scripts/build-web.sh" "$work/src" "$out/web" >"$work/web.log" 2>&1 || {
+        tail -40 "$work/web.log" >&2
+        exit 1
+    }
+    (cd "$out" && sha256sum web/* > web.sha256)
+fi
+mkdir -p "$out/scripts"
+cp "$work/src/scripts/release.sh" "$work/src/scripts/deploy.sh" \
+    "$work/src/scripts/edge-update.sh" "$out/scripts/"
 printf 'version=%s\ncommit=%s\nbuilt=%s\n' "$version" "$full" "$built" > "$out/RELEASE"
 echo "$version"

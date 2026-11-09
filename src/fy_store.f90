@@ -11,17 +11,25 @@ module fy_store
 
     public :: store_open, store_migrate, store_schema_version
     public :: store_bootstrap, store_token_lookup, store_token_create
-    public :: token_identity_t, random_token
+    public :: store_token_list, store_token_revoke, store_token_revoke_hash
+    public :: token_identity_t, token_info_t, random_token
 
     integer, parameter, public :: SCHEMA_VERSION = 1
 
     type :: token_identity_t
         logical :: found = .false.
         integer(int64) :: account_id = 0
+        integer(int64) :: token_id = 0
         character(len=:), allocatable :: account
         character(len=:), allocatable :: token_name
         character(len=:), allocatable :: scopes
     end type token_identity_t
+
+    type :: token_info_t
+        integer(int64) :: id = 0
+        character(len=:), allocatable :: name, scopes, created_at, expires_at
+        logical :: revoked = .false.
+    end type token_info_t
 
     character(len=*), parameter :: NOW = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
 
@@ -104,22 +112,29 @@ contains
         call store_token_create(db, account_id, 'bootstrap', 'admin', token, stat)
     end subroutine store_bootstrap
 
-    subroutine store_token_create(db, account_id, name, scopes, token, stat)
+    subroutine store_token_create(db, account_id, name, scopes, token, stat, days)
+        !! A token that expires after `days`, or never when absent.
         type(db_t), intent(in) :: db
         integer(int64), intent(in) :: account_id
         character(len=*), intent(in) :: name, scopes
         character(len=:), allocatable, intent(out) :: token
         integer, intent(out) :: stat
+        integer, intent(in), optional :: days
         type(stmt_t) :: st
+        integer(int64) :: lifetime
 
+        lifetime = -1
+        if (present(days)) lifetime = days
         token = random_token()
-        call db_prepare(db, 'INSERT INTO tokens (account_id, name, hash, scopes, created_at)'// &
-            ' VALUES (?1, ?2, ?3, ?4, '//NOW//');', st, stat)
+        call db_prepare(db, 'INSERT INTO tokens (account_id, name, hash, scopes, created_at,'// &
+            ' expires_at) VALUES (?1, ?2, ?3, ?4, '//NOW//', CASE WHEN ?5 < 0 THEN NULL'// &
+            " ELSE strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '+' || ?5 || ' days') END);", st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, account_id, stat)
         call stmt_bind_text(st, 2, name, stat)
         call stmt_bind_text(st, 3, sha256_string(token), stat)
         call stmt_bind_text(st, 4, scopes, stat)
+        call stmt_bind_int(st, 5, lifetime, stat)
         stat = SQLITE_OK
         if (stmt_step(st) /= SQLITE_DONE) stat = 1
         call stmt_finalize(st)
@@ -137,7 +152,7 @@ contains
         who%token_name = ''
         who%scopes = ''
         if (len(token) < 8 .or. len(token) > 128) return
-        call db_prepare(db, 'SELECT a.id, a.name, t.name, t.scopes FROM tokens t'// &
+        call db_prepare(db, 'SELECT a.id, a.name, t.name, t.scopes, t.id FROM tokens t'// &
             ' JOIN accounts a ON a.id = t.account_id'// &
             ' WHERE t.hash = ?1 AND t.revoked = 0 AND a.active = 1'// &
             ' AND (t.expires_at IS NULL OR t.expires_at > '//NOW//');', st, stat)
@@ -149,9 +164,69 @@ contains
             who%account = stmt_text(st, 1)
             who%token_name = stmt_text(st, 2)
             who%scopes = stmt_text(st, 3)
+            who%token_id = stmt_int(st, 4)
         end if
         call stmt_finalize(st)
     end subroutine store_token_lookup
+
+    subroutine store_token_list(db, account_id, tokens, stat)
+        !! Tokens of one account, newest first; never their secrets.
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: account_id
+        type(token_info_t), allocatable, intent(out) :: tokens(:)
+        integer, intent(out) :: stat
+        type(stmt_t) :: st
+        type(token_info_t) :: t
+
+        allocate (tokens(0))
+        call db_prepare(db, 'SELECT id, name, scopes, created_at, coalesce(expires_at, ''''),'// &
+            ' revoked FROM tokens WHERE account_id = ?1 ORDER BY id DESC;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, account_id, stat)
+        do while (stmt_step(st) == SQLITE_ROW)
+            t%id = stmt_int(st, 0)
+            t%name = stmt_text(st, 1)
+            t%scopes = stmt_text(st, 2)
+            t%created_at = stmt_text(st, 3)
+            t%expires_at = stmt_text(st, 4)
+            t%revoked = stmt_int(st, 5) /= 0
+            tokens = [tokens, t]
+        end do
+        call stmt_finalize(st)
+        stat = SQLITE_OK
+    end subroutine store_token_list
+
+    subroutine store_token_revoke(db, account_id, token_id, found)
+        !! Revokes a token of this account; found is false for any other token.
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: account_id, token_id
+        logical, intent(out) :: found
+        type(stmt_t) :: st
+        integer :: stat
+
+        found = .false.
+        call db_prepare(db, 'UPDATE tokens SET revoked = 1 WHERE id = ?1 AND account_id = ?2'// &
+            ' RETURNING id;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, token_id, stat)
+        call stmt_bind_int(st, 2, account_id, stat)
+        found = stmt_step(st) == SQLITE_ROW
+        call stmt_finalize(st)
+    end subroutine store_token_revoke
+
+    subroutine store_token_revoke_hash(db, token)
+        !! Revokes the token with this plaintext, if any.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: token
+        type(stmt_t) :: st
+        integer :: stat
+
+        call db_prepare(db, 'UPDATE tokens SET revoked = 1 WHERE hash = ?1;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, sha256_string(token), stat)
+        stat = stmt_step(st)
+        call stmt_finalize(st)
+    end subroutine store_token_revoke_hash
 
     function random_token() result(token)
         !! 256 random bits from the kernel, hex-encoded with a recognizable prefix.

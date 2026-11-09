@@ -5,18 +5,32 @@ module fy_server
     use fx_json_parse, only: json_extract_string
     use fy_build_info, only: FY_VERSION, FY_COMMIT, FY_BUILT
     use fy_http, only: http_request_t, http_read_request, http_send_response, &
-        http_bearer_token
+        http_bearer_token, http_cookie
     use fy_posix, only: tcp_accept, sock_close, sock_set_timeouts
     use fy_sqlite, only: db_t
     use fy_proc, only: proc_fork, proc_wait_any, proc_exit, proc_pid, &
         proc_die_with_parent, proc_sleep_ms
-    use fy_store, only: token_identity_t, store_token_lookup, store_token_create, store_open
+    use fy_store, only: token_identity_t, token_info_t, store_token_lookup, store_token_create, &
+        store_open, store_token_list, store_token_revoke, store_token_revoke_hash
     implicit none
     private
 
-    public :: server_loop, serve_connection, route, server_supervise
+    public :: server_loop, serve_connection, route, server_supervise, server_set_web_dir
+    public :: response_t
 
     character(len=*), parameter :: JSON = 'application/json'
+    character(len=*), parameter :: SESSION_COOKIE = 'fy_session'
+    integer, parameter :: SESSION_DAYS = 14
+    character(len=*), parameter :: SESSION_MAX_AGE = '1209600'
+    character(len=2), parameter :: CRLF = achar(13)//achar(10)
+
+    type :: response_t
+        integer :: code = 200
+        character(len=:), allocatable :: ctype, body, headers, cache
+    end type response_t
+
+    !! Directory of the web application; empty serves the status page at /.
+    character(len=:), allocatable :: web_dir
 
 contains
 
@@ -115,8 +129,8 @@ contains
         integer, intent(in) :: cfd
         type(db_t), intent(in) :: db
         type(http_request_t) :: req
-        integer :: status, code
-        character(len=:), allocatable :: ctype, body
+        type(response_t) :: res
+        integer :: status
 
         call http_read_request(cfd, req, status)
         if (status < 0) return
@@ -124,98 +138,306 @@ contains
             call http_send_response(cfd, status, JSON, '{"error":"bad request"}')
             return
         end if
-        call route(req, db, code, ctype, body)
-        call http_send_response(cfd, code, ctype, body)
-        write (error_unit, '(a,1x,a,1x,i0)') req%method, req%path, code
+        call route(req, db, res)
+        call http_send_response(cfd, res%code, res%ctype, res%body, res%headers, res%cache)
+        write (error_unit, '(a,1x,a,1x,i0)') req%method, req%path, res%code
         flush (error_unit)
     end subroutine serve_connection
 
-    subroutine route(req, db, code, ctype, body)
+    subroutine route(req, db, res)
         type(http_request_t), intent(in) :: req
         type(db_t), intent(in) :: db
-        integer, intent(out) :: code
-        character(len=:), allocatable, intent(out) :: ctype, body
+        type(response_t), intent(out) :: res
         type(token_identity_t) :: who
+        character(len=:), allocatable :: rest
+        integer(int64) :: id
+        integer :: ios
 
-        code = 200
-        ctype = JSON
+        res%code = 200
+        res%ctype = JSON
+        res%body = ''
+        res%headers = ''
+        res%cache = 'no-store'
         select case (req%path)
         case ('/healthz')
-            ctype = 'text/plain; charset=utf-8'
-            body = 'ok '//FY_VERSION//' '//FY_COMMIT//new_line('a')
+            if (.not. method_is(req, 'GET', res)) return
+            res%ctype = 'text/plain; charset=utf-8'
+            res%body = 'ok '//FY_VERSION//' '//FY_COMMIT//new_line('a')
         case ('/', '/index.html')
-            ctype = 'text/html; charset=utf-8'
-            body = status_page()
+            if (.not. method_is(req, 'GET', res)) return
+            call static_file('index.html', res)
+            if (res%code == 404) then
+                res%code = 200
+                res%ctype = 'text/html; charset=utf-8'
+                res%body = status_page()
+            end if
+        case ('/status')
+            if (.not. method_is(req, 'GET', res)) return
+            res%ctype = 'text/html; charset=utf-8'
+            res%body = status_page()
         case ('/api/v1/version')
-            body = version_json()
+            if (.not. method_is(req, 'GET', res)) return
+            res%body = version_json()
         case ('/api/v1/whoami')
-            call authenticate(req, db, who, code, body)
-            if (code /= 200) return
-            body = '{"account":"'//json_escape_string(who%account)// &
+            if (.not. method_is(req, 'GET', res)) return
+            if (.not. authenticated(req, db, who, res)) return
+            res%body = '{"account":"'//json_escape_string(who%account)// &
                 '","token":"'//json_escape_string(who%token_name)// &
                 '","scopes":"'//json_escape_string(who%scopes)//'"}'
         case ('/api/v1/tokens')
-            if (req%method /= 'POST') then
-                code = 405
-                body = '{"error":"use POST"}'
-                return
+            if (req%method == 'GET') then
+                if (.not. authenticated(req, db, who, res)) return
+                call list_tokens(db, who, res)
+            else if (req%method == 'POST') then
+                if (.not. authenticated(req, db, who, res)) return
+                call create_token(req, db, who, res)
+            else
+                call fail(res, 405, 'use GET or POST')
             end if
-            call authenticate(req, db, who, code, body)
-            if (code /= 200) return
-            call create_token(req, db, who, code, body)
+        case ('/api/v1/session')
+            if (req%method == 'POST') then
+                call open_session(req, db, res)
+            else if (req%method == 'DELETE') then
+                call close_session(req, db, res)
+            else
+                call fail(res, 405, 'use POST or DELETE')
+            end if
         case default
-            code = 404
-            body = '{"error":"not found"}'
+            if (index(req%path, '/app/') == 1) then
+                if (.not. method_is(req, 'GET', res)) return
+                call static_file(req%path(6:), res)
+            else if (index(req%path, '/api/v1/tokens/') == 1) then
+                rest = req%path(16:)
+                if (index(rest, '/revoke') /= len(rest) - 6 .or. len(rest) < 8) then
+                    call fail(res, 404, 'not found')
+                    return
+                end if
+                read (rest(1:len(rest) - 7), *, iostat=ios) id
+                if (ios /= 0 .or. verify(rest(1:len(rest) - 7), '0123456789') /= 0) then
+                    call fail(res, 404, 'not found')
+                    return
+                end if
+                if (.not. method_is(req, 'POST', res)) return
+                if (.not. authenticated(req, db, who, res)) return
+                call revoke_token(db, who, id, res)
+            else
+                call fail(res, 404, 'not found')
+            end if
         end select
-        if (req%method /= 'GET' .and. req%path /= '/api/v1/tokens') then
-            code = 405
-            body = '{"error":"method not allowed"}'
-        end if
     end subroutine route
 
-    subroutine authenticate(req, db, who, code, body)
+    logical function method_is(req, method, res)
+        type(http_request_t), intent(in) :: req
+        character(len=*), intent(in) :: method
+        type(response_t), intent(inout) :: res
+
+        method_is = req%method == method
+        if (.not. method_is) call fail(res, 405, 'use '//method)
+    end function method_is
+
+    subroutine fail(res, code, message)
+        type(response_t), intent(inout) :: res
+        integer, intent(in) :: code
+        character(len=*), intent(in) :: message
+
+        res%code = code
+        res%ctype = JSON
+        res%body = '{"error":"'//json_escape_string(message)//'"}'
+    end subroutine fail
+
+    logical function authenticated(req, db, who, res)
+        !! A bearer token, or the browser session cookie. A request that changes
+        !! state with the cookie must be JSON, which a cross-site form cannot send.
         type(http_request_t), intent(in) :: req
         type(db_t), intent(in) :: db
         type(token_identity_t), intent(out) :: who
-        integer, intent(out) :: code
-        character(len=:), allocatable, intent(out) :: body
+        type(response_t), intent(inout) :: res
+        character(len=:), allocatable :: token
 
-        code = 200
-        body = ''
-        call store_token_lookup(db, http_bearer_token(req), who)
-        if (.not. who%found) then
-            code = 401
-            body = '{"error":"missing or invalid token"}'
+        token = http_bearer_token(req)
+        if (len(token) == 0) then
+            token = http_cookie(req, SESSION_COOKIE)
+            if (len(token) > 0 .and. req%method /= 'GET' .and. &
+                index(req%content_type, 'application/json') /= 1) then
+                call fail(res, 415, 'send JSON')
+                authenticated = .false.
+                return
+            end if
         end if
-    end subroutine authenticate
+        call store_token_lookup(db, token, who)
+        authenticated = who%found
+        if (.not. authenticated) call fail(res, 401, 'missing or invalid token')
+    end function authenticated
 
-    subroutine create_token(req, db, who, code, body)
+    subroutine create_token(req, db, who, res)
         !! A token can mint tokens for its own account with at most its scopes.
         type(http_request_t), intent(in) :: req
         type(db_t), intent(in) :: db
         type(token_identity_t), intent(in) :: who
-        integer, intent(out) :: code
-        character(len=:), allocatable, intent(out) :: body
+        type(response_t), intent(inout) :: res
         character(len=:), allocatable :: name, token
         logical :: found
         integer :: stat
 
         call json_extract_string(req%body, 'name', name, found)
         if (.not. found .or. len(name) == 0 .or. len(name) > 100) then
-            code = 400
-            body = '{"error":"body must be {\"name\":\"...\"}"}'
+            call fail(res, 400, 'body must be {"name":"..."}')
             return
         end if
         call store_token_create(db, who%account_id, name, who%scopes, token, stat)
         if (stat /= 0) then
-            code = 500
-            body = '{"error":"token not created"}'
+            call fail(res, 500, 'token not created')
             return
         end if
-        code = 201
-        body = '{"token":"'//token//'","name":"'//json_escape_string(name)// &
+        res%code = 201
+        res%body = '{"token":"'//token//'","name":"'//json_escape_string(name)// &
             '","scopes":"'//json_escape_string(who%scopes)//'"}'
     end subroutine create_token
+
+    subroutine list_tokens(db, who, res)
+        type(db_t), intent(in) :: db
+        type(token_identity_t), intent(in) :: who
+        type(response_t), intent(inout) :: res
+        type(token_info_t), allocatable :: tokens(:)
+        character(len=24) :: num
+        integer :: i, stat
+
+        call store_token_list(db, who%account_id, tokens, stat)
+        if (stat /= 0) then
+            call fail(res, 500, 'tokens not listed')
+            return
+        end if
+        res%body = '{"tokens":['
+        do i = 1, size(tokens)
+            write (num, '(i0)') tokens(i)%id
+            if (i > 1) res%body = res%body//','
+            res%body = res%body//'{"id":'//trim(num)// &
+                ',"name":"'//json_escape_string(tokens(i)%name)// &
+                '","scopes":"'//json_escape_string(tokens(i)%scopes)// &
+                '","created":"'//tokens(i)%created_at// &
+                '","expires":"'//tokens(i)%expires_at// &
+                '","revoked":'//json_bool(tokens(i)%revoked)// &
+                ',"current":'//json_bool(tokens(i)%id == who%token_id)//'}'
+        end do
+        res%body = res%body//']}'
+    end subroutine list_tokens
+
+    subroutine revoke_token(db, who, id, res)
+        type(db_t), intent(in) :: db
+        type(token_identity_t), intent(in) :: who
+        integer(int64), intent(in) :: id
+        type(response_t), intent(inout) :: res
+        logical :: found
+
+        call store_token_revoke(db, who%account_id, id, found)
+        if (.not. found) then
+            call fail(res, 404, 'no such token')
+            return
+        end if
+        res%body = '{"revoked":true}'
+    end subroutine revoke_token
+
+    subroutine open_session(req, db, res)
+        !! Exchanges a token for a browser session in an HttpOnly cookie, so
+        !! scripts on the page never hold a credential.
+        type(http_request_t), intent(in) :: req
+        type(db_t), intent(in) :: db
+        type(response_t), intent(inout) :: res
+        type(token_identity_t) :: who
+        character(len=:), allocatable :: token, session
+        logical :: found
+        integer :: stat
+
+        if (index(req%content_type, 'application/json') /= 1) then
+            call fail(res, 415, 'send JSON')
+            return
+        end if
+        call json_extract_string(req%body, 'token', token, found)
+        if (.not. found) token = ''
+        call store_token_lookup(db, token, who)
+        if (.not. who%found) then
+            call fail(res, 401, 'missing or invalid token')
+            return
+        end if
+        call store_token_create(db, who%account_id, 'browser session', who%scopes, session, &
+            stat, days=SESSION_DAYS)
+        if (stat /= 0) then
+            call fail(res, 500, 'session not created')
+            return
+        end if
+        res%headers = 'Set-Cookie: '//SESSION_COOKIE//'='//session// &
+            '; Path=/; HttpOnly; SameSite=Strict; Max-Age='//SESSION_MAX_AGE//CRLF
+        res%body = '{"account":"'//json_escape_string(who%account)//'"}'
+    end subroutine open_session
+
+    subroutine close_session(req, db, res)
+        type(http_request_t), intent(in) :: req
+        type(db_t), intent(in) :: db
+        type(response_t), intent(inout) :: res
+        character(len=:), allocatable :: token
+
+        token = http_cookie(req, SESSION_COOKIE)
+        if (len(token) > 0) call store_token_revoke_hash(db, token)
+        res%headers = 'Set-Cookie: '//SESSION_COOKIE// &
+            '=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0'//CRLF
+        res%body = '{"closed":true}'
+    end subroutine close_session
+
+    subroutine static_file(name, res)
+        !! A file of the web application from the release's web directory. Names
+        !! are plain file names, so no path leaves that directory.
+        character(len=*), intent(in) :: name
+        type(response_t), intent(inout) :: res
+        character(len=:), allocatable :: path
+        integer :: u, ios, size_
+        logical :: exists
+
+        call fail(res, 404, 'not found')
+        if (.not. allocated(web_dir)) return
+        if (len(web_dir) == 0 .or. len(name) == 0 .or. len(name) > 64) return
+        if (name(1:1) == '.' .or. verify(name, &
+            'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-') /= 0) return
+        path = web_dir//'/'//name
+        inquire (file=path, exist=exists, size=size_)
+        if (.not. exists .or. size_ < 0) return
+        res%body = repeat(' ', size_)
+        open (newunit=u, file=path, access='stream', form='unformatted', action='read', &
+            iostat=ios)
+        if (ios /= 0) return
+        if (size_ > 0) read (u, iostat=ios) res%body
+        close (u)
+        if (ios /= 0) return
+        res%code = 200
+        res%cache = 'no-cache'
+        res%ctype = 'application/octet-stream'
+        if (ends_with(name, '.html')) res%ctype = 'text/html; charset=utf-8'
+        if (ends_with(name, '.js')) res%ctype = 'text/javascript; charset=utf-8'
+        if (ends_with(name, '.wasm')) res%ctype = 'application/wasm'
+        if (ends_with(name, '.css')) res%ctype = 'text/css; charset=utf-8'
+        if (ends_with(name, '.svg')) res%ctype = 'image/svg+xml'
+    end subroutine static_file
+
+    pure function json_bool(b) result(s)
+        logical, intent(in) :: b
+        character(len=:), allocatable :: s
+        if (b) then
+            s = 'true'
+        else
+            s = 'false'
+        end if
+    end function json_bool
+
+    pure logical function ends_with(s, suffix)
+        character(len=*), intent(in) :: s, suffix
+        ends_with = len(s) >= len(suffix)
+        if (ends_with) ends_with = s(len(s) - len(suffix) + 1:) == suffix
+    end function ends_with
+
+    subroutine server_set_web_dir(dir)
+        !! Set once before workers start; read-only afterwards.
+        character(len=*), intent(in) :: dir
+        web_dir = dir
+    end subroutine server_set_web_dir
 
     function version_json() result(s)
         character(len=:), allocatable :: s
@@ -252,7 +474,10 @@ contains
             '<li><a href="/healthz"><code>/healthz</code></a></li>'// &
             '<li><a href="/api/v1/version"><code>/api/v1/version</code></a></li>'// &
             '<li><code>/api/v1/whoami</code> (token)</li>'// &
-            '<li><code>POST /api/v1/tokens</code> (token)</li></ul>'// &
+            '<li><code>GET, POST /api/v1/tokens</code>, '// &
+            '<code>POST /api/v1/tokens/ID/revoke</code> (token)</li>'// &
+            '<li><code>POST, DELETE /api/v1/session</code> (browser session)</li></ul>'// &
+            '<p>The web application is at <a href="/">/</a>.</p>'// &
             '<h2>Command line</h2><p><code>fy login --server URL --token TOKEN</code>, '// &
             'then <code>fy whoami</code>.</p>'// &
             '</main></body></html>'

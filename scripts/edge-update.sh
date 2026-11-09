@@ -25,4 +25,11 @@ if ! "$(dirname "$0")/deploy.sh" "$out"; then
     : > "$failed"
     exit 1
 fi
+# The pipeline updates itself only from a release that deployed healthy. A
+# rename, not an overwrite: this shell is still reading its own script.
+if [ -d "$FY_HOME/current/scripts" ]; then
+    for f in "$FY_HOME/current/scripts/"*.sh; do
+        cp "$f" "$FY_HOME/bin/.new" && mv -f "$FY_HOME/bin/.new" "$FY_HOME/bin/$(basename "$f")"
+    done
+fi
 rm -rf "$out"

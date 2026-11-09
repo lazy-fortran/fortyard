@@ -6,7 +6,7 @@ program fy
     use fy_build_info, only: FY_VERSION, FY_COMMIT
     use fy_client, only: client_request, config_t, config_load, config_save
     use fy_posix, only: tcp_listen, activated_listen_fd, sock_bound_port
-    use fy_server, only: server_supervise
+    use fy_server, only: server_supervise, server_set_web_dir
     use fy_sqlite, only: db_t, db_errmsg, db_close
     use fy_store, only: store_open, store_bootstrap
     implicit none
@@ -41,7 +41,8 @@ contains
         write (output_unit, '(a)') &
             'usage: fy <command> [options]', &
             '', &
-            '  serve [--data DIR] [--listen HOST:PORT] [--workers P] [--threads T] [--init]', &
+            '  serve [--data DIR] [--listen HOST:PORT] [--workers P] [--threads T]', &
+            '        [--web DIR] [--init]', &
             '                      run the server; --init creates the data directory', &
             '                      and prints the administrator token once', &
             '  login --server URL --token TOKEN', &
@@ -91,7 +92,7 @@ contains
     end function flag
 
     subroutine cmd_serve()
-        character(len=:), allocatable :: data, listen, host, token, text
+        character(len=:), allocatable :: data, listen, host, token, text, web
         type(db_t) :: db
         integer :: lfd, port, stat, colon, workers, threads
         logical :: exists
@@ -101,6 +102,7 @@ contains
         text = option('--workers', '2')
         read (text, *, iostat=stat) workers
         if (stat /= 0 .or. workers < 1 .or. workers > 64) error stop 'fy: --workers needs 1 to 64'
+        web = option('--web', beside_program('web'))
         text = option('--threads', '8')
         read (text, *, iostat=stat) threads
         if (stat /= 0 .or. threads < 1 .or. threads > 256) error stop 'fy: --threads needs 1 to 256'
@@ -146,8 +148,25 @@ contains
             ') listening on port ', sock_bound_port(lfd)
         flush (error_unit)
         call db_close(db)
+        call server_set_web_dir(web)
         call server_supervise(lfd, data//'/fortyard.db', workers, threads)
     end subroutine cmd_serve
+
+    function beside_program(name) result(path)
+        !! `name` in the directory of this executable, as it was started.
+        character(len=*), intent(in) :: name
+        character(len=:), allocatable :: path
+        character(len=4096) :: exe
+        integer :: slash
+
+        call get_command_argument(0, exe)
+        slash = index(exe, '/', back=.true.)
+        if (slash == 0) then
+            path = name
+        else
+            path = exe(1:slash)//name
+        end if
+    end function beside_program
 
     subroutine cmd_login()
         type(config_t) :: cfg
