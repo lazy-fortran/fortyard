@@ -37,7 +37,8 @@ working tree on the loopback address and `scripts/dev-down.sh` stops it.
 - [x] `fy mcp` with `whoami` and `version`.
 - [x] Release pipeline: one build per commit with version `YYYY.MM.DD.N` and
       checksum, atomic switch, health check, automatic rollback, last ten
-      releases kept, edge timer following `main`.
+      releases kept, edge timer following `main`. Rollback verified with a
+      release whose server exits at once.
 - [x] Tests: request parsing, token store, socket round trip through the server.
 - [ ] Concurrency: the accept loop serves one connection at a time; long
       requests need a worker pool before CI log streaming (M2).
