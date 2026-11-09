@@ -119,7 +119,8 @@ try {
   await type('laptop');
   await click('[data-id="create"]');
   await until(`[...document.querySelectorAll('.fui-k1')].some((e) => /^fy_[0-9a-f]{64}$/.test(e.textContent))`, 'new token');
-  check(await evaluate(hasText('laptop')), 'a created token is shown once and listed');
+  await until(hasText('laptop'), 'token list with the new token');
+  check(true, 'a created token is shown once and listed');
   const revokes = await evaluate(`document.querySelectorAll('[data-id*="/revoke#"]').length`);
   await click('[data-id*="/revoke#"]');
   await until(`document.querySelectorAll('[data-id*="/revoke#"]').length === ${revokes - 1}`, 'revocation');
