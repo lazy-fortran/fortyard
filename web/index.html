@@ -51,18 +51,18 @@
   .fui-keyboard .fui-focus, .fui-k8:focus { outline: 2px solid var(--acc); outline-offset: -1px; }
 
   /* Buttons that are links: names of repositories, files, path parts, commits */
-  .fui-k2[data-id$="/open"], .fui-k2[data-id="root"], .fui-k2[data-id^="seg"],
-  .fui-k2[data-id="back"], .fui-k2[data-id$="/subject"], .fui-k2[data-id="lastsubject"],
+  .fui-k2[data-id$="/open"], .fui-k2[data-id$="/root"], .fui-k2[data-id*="/seg#"],
+  .fui-k2[data-id$="/back"], .fui-k2[data-id$="/subject"], .fui-k2[data-id$="/lastsubject"],
   .fui-k2[data-id$="/id"], .fui-k2[data-id*="/id#"] {
     border: 0; background: transparent; padding: 0 2px; height: auto !important;
     color: var(--fg); text-align: left; font-weight: 400; }
-  .fui-k2[data-id$="/open"]:hover, .fui-k2[data-id="root"]:hover, .fui-k2[data-id^="seg"]:hover,
-  .fui-k2[data-id="back"]:hover, .fui-k2[data-id$="/subject"]:hover,
-  .fui-k2[data-id="lastsubject"]:hover, .fui-k2[data-id*="/id#"]:hover {
+  .fui-k2[data-id$="/open"]:hover, .fui-k2[data-id$="/root"]:hover, .fui-k2[data-id*="/seg#"]:hover,
+  .fui-k2[data-id$="/back"]:hover, .fui-k2[data-id$="/subject"]:hover,
+  .fui-k2[data-id$="/lastsubject"]:hover, .fui-k2[data-id*="/id#"]:hover {
     color: var(--acc); text-decoration: underline; background: transparent; }
-  .fui-k2[data-id="root"], .fui-k2[data-id^="seg"], .fui-k2[data-id="back"] { color: var(--acc); }
+  .fui-k2[data-id$="/root"], .fui-k2[data-id*="/seg#"], .fui-k2[data-id$="/back"] { color: var(--acc); }
   .fui-k2[data-id$="/subject"] { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
-  .fui-k2[data-id="lastsubject"] { color: var(--mut); overflow: hidden; text-overflow: ellipsis; }
+  .fui-k2[data-id$="/lastsubject"] { color: var(--mut); overflow: hidden; text-overflow: ellipsis; }
   .fui-k2[data-id*="/id#"] { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     color: var(--mut); border: 1px solid var(--line) !important; border-radius: 6px;
     padding: 2px 8px !important; }
@@ -92,7 +92,7 @@
   .fui[data-id$="icon-repo"], .fui[data-id$="icon-book"] { --icon: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M2 2.5A2.5 2.5 0 0 1 4.5 0h8.75a.75.75 0 0 1 .75.75v12.5a.75.75 0 0 1-.75.75h-2.5a.75.75 0 0 1 0-1.5h1.75v-2h-8a1 1 0 0 0-.714 1.7.75.75 0 1 1-1.072 1.05A2.495 2.495 0 0 1 2 11.5Zm10.5-1h-8a1 1 0 0 0-1 1v6.708A2.486 2.486 0 0 1 4.5 9h8ZM5 12.25a.25.25 0 0 1 .25-.25h3.5a.25.25 0 0 1 .25.25v3.25a.25.25 0 0 1-.4.2l-1.45-1.087a.249.249 0 0 0-.3 0L5.4 15.7a.25.25 0 0 1-.4-.2Z"/></svg>'); }
 
   /* Branch label and status badges */
-  .fui[data-id="branch"] { border: 1px solid var(--line); border-radius: 6px; padding: 3px 10px;
+  .fui[data-id$="/branch"] { border: 1px solid var(--line); border-radius: 6px; padding: 3px 10px;
     background: var(--ctl); font-weight: 600; }
   .fui[data-id$="badge"] { border: 1px solid currentColor; border-radius: 2em; padding: 0 7px;
     font-size: 12px; }
@@ -129,7 +129,7 @@
     border-radius: 6px; }
   .fui-box[data-box^="mdcode"] { background: var(--sub); border-radius: 6px; padding: 16px; }
   .fui-box[data-box="readme"] .fui[data-tone="3"] { border-left: 4px solid var(--line); padding-left: 16px; }
-  .fui[data-id="commitbody"] { white-space: pre-wrap; }
+  .fui[data-id$="commitbody"] { white-space: pre-wrap; }
   noscript { display: block; padding: 2rem; }
 </style>
 </head>

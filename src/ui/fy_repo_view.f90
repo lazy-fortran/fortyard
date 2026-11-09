@@ -11,6 +11,7 @@ module fy_repo_view
     use fy_highlight, only: highlight, lang_of
     use fy_diff, only: diff_file_t, parse_patch, DL_ADDED, DL_REMOVED, DL_HUNK, DL_NOTE
     use fy_markdown, only: md_doc_t, md_parse, md_compose
+    use fy_time, only: ago
     implicit none
     private
 
@@ -182,7 +183,7 @@ contains
         type(repo_t), intent(in) :: r
         character(len=:), allocatable :: s
         if (r%ready) then
-            s = "updated "//when(r%fetched)
+            s = "updated "//ago(r%fetched)
         else
             s = "cloning..."
         end if
@@ -264,7 +265,7 @@ contains
                 ellipsis=.true.)) call open_commit(commits(1)%id)
             if (.not. narrow) call text(commits(1)%id(1:min(7, len(commits(1)%id))), &
                 style=UI_CODE, size=12.0, tone=UI_TONE_MUTED)
-            call text(when(commits(1)%date), size=SMALL, tone=UI_TONE_MUTED)
+            call text(ago(commits(1)%date), size=SMALL, tone=UI_TONE_MUTED)
             call row_end()
         end if
 
@@ -335,7 +336,7 @@ contains
             if (button("subject", commits(k)%subject, size=BODY, width=UI_FILL, &
                 ellipsis=.true.)) call open_commit(commits(k)%id)
             if (.not. narrow) call text(commits(k)%author, size=SMALL, tone=UI_TONE_MUTED)
-            call text(when(commits(k)%date), size=SMALL, tone=UI_TONE_MUTED)
+            call text(ago(commits(k)%date), size=SMALL, tone=UI_TONE_MUTED)
             if (button("id", commits(k)%id(1:min(7, len(commits(k)%id))), key=k, size=12.0)) &
                 call open_commit(commits(k)%id)
             call row_end()
@@ -365,7 +366,7 @@ contains
             id="commitbody")
         call row_begin(8.0, id="commitmeta")
         call text(c_author, size=SMALL, style=UI_HEADING)
-        call text("committed "//when(c_date), size=SMALL, tone=UI_TONE_MUTED)
+        call text("committed "//ago(c_date), size=SMALL, tone=UI_TONE_MUTED)
         call text("", width=UI_FILL)
         if (.not. narrow) call text(commit_id, style=UI_CODE, size=12.0, tone=UI_TONE_MUTED)
         call row_end()
@@ -799,13 +800,6 @@ contains
 
     ! ---- small helpers ----------------------------------------------------------------
 
-    function when(stamp) result(s)
-        !! "2026-11-09 14:34" from an ISO 8601 time.
-        character(len=*), intent(in) :: stamp
-        character(len=:), allocatable :: s
-        s = stamp(1:min(16, len(stamp)))
-        if (len(s) >= 11) s(11:11) = ' '
-    end function when
 
     function encode(s) result(e)
         !! Percent-encoding for a query value; '/' stays readable.

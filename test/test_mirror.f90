@@ -4,7 +4,7 @@ program test_mirror
     use fy_posix, only: tcp_listen, tcp_connect, sock_send_all, sock_recv, sock_close, &
         sock_bound_port, sock_set_timeouts
     use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, SIGTERM
-    use fy_server, only: server_supervise, server_set_data_dir
+    use fy_server, only: server_supervise, server_set_data_dir, server_set_mirror_interval
     use fy_sqlite, only: db_t, db_close
     use fy_store, only: store_open, store_bootstrap, store_repo_add
     implicit none
@@ -30,6 +30,7 @@ program test_mirror
     call check(stat == 0, 'repository registered')
     call db_close(db)
     call server_set_data_dir(data)
+    call server_set_mirror_interval(1)
     call tcp_listen('127.0.0.1', 0, lfd, stat)
     port = sock_bound_port(lfd)
     sup = proc_fork()
@@ -58,6 +59,15 @@ program test_mirror
     call check(index(reply, 'HTTP/1.1 400') == 1, 'paths cannot leave the tree')
     reply = get('/api/v1/repos/demo/log?ref=--output%3D%2Ftmp%2Fx')
     call check(index(reply, 'HTTP/1.1 400') == 1, 'refs cannot be git options')
+    ! A new upstream commit arrives with the next fetch.
+    call execute_command_line('printf "more\n" > '//up//'/MORE && '//g//'add MORE && '//g// &
+        'commit -q -m "Second commit"', exitstat=stat)
+    do i = 1, 100
+        reply = get('/api/v1/repos/demo/log?ref=main')
+        if (index(reply, '"subject":"Second commit"') > 0) exit
+        call proc_sleep_ms(100)
+    end do
+    call check(index(reply, '"subject":"Second commit"') > 0, 'fetched again after the interval')
     reply = get('/api/v1/repos/nothere/log')
     call check(index(reply, 'HTTP/1.1 404') == 1, 'unknown repository')
     reply = post('/api/v1/repos', '{"name":"evil","upstream":"--upload-pack=x"}')

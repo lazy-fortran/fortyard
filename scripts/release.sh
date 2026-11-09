@@ -9,8 +9,15 @@ git -C "$repo" worktree add --detach "$work/src" "$commit" >/dev/null
 full=$(git -C "$work/src" rev-parse HEAD)
 short=$(printf %.12s "$full")
 day=$(date -u +%Y.%m.%d)
+# A counter per day: old releases are deleted, their numbers must not return.
 n=0
-while [ -e "${FY_RELEASES:-/nonexistent}/$day.$n" ]; do n=$((n + 1)); done
+if [ -n "${FY_RELEASES:-}" ]; then
+    mkdir -p "$FY_RELEASES"
+    counter="$FY_RELEASES/.count-$day"
+    [ -f "$counter" ] && n=$(cat "$counter")
+    while [ -e "$FY_RELEASES/$day.$n" ]; do n=$((n + 1)); done
+    echo $((n + 1)) > "$counter"
+fi
 version="$day.$n"
 built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 cat > "$work/src/src/fy_build_info.f90" <<INFO

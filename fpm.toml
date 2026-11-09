@@ -18,7 +18,7 @@ source-form = "free"
 [dependencies]
 openmp = "*"
 fx = { git = "https://github.com/lazy-fortran/fx.git" }
-fortui = { git = "git@github.com:lazy-fortran/fortui.git", rev = "c6a5b7f149557c08c502d5a196ed7ec7f9b3d18b" }
+fortui = { git = "git@github.com:lazy-fortran/fortui.git", rev = "9ad65a1f6e6fe447748326a184c404c51d6fa137" }
 
 [[executable]]
 name = "fy"

@@ -6,7 +6,8 @@ program fy
     use fy_build_info, only: FY_VERSION, FY_COMMIT
     use fy_client, only: client_request, config_t, config_load, config_save
     use fy_posix, only: tcp_listen, activated_listen_fd, sock_bound_port
-    use fy_server, only: server_supervise, server_set_web_dir, server_set_data_dir
+    use fy_server, only: server_supervise, server_set_web_dir, server_set_data_dir, &
+        server_set_mirror_interval
     use fy_sqlite, only: db_t, db_errmsg, db_close
     use fy_store, only: store_open, store_bootstrap
     implicit none
@@ -44,7 +45,7 @@ contains
             'usage: fy <command> [options]', &
             '', &
             '  serve [--data DIR] [--listen HOST:PORT] [--workers P] [--threads T]', &
-            '        [--web DIR] [--init]', &
+            '        [--web DIR] [--mirror-interval SECONDS] [--init]', &
             '                      run the server; --init creates the data directory', &
             '                      and prints the administrator token once', &
             '  login --server URL --token TOKEN', &
@@ -98,7 +99,7 @@ contains
     subroutine cmd_serve()
         character(len=:), allocatable :: data, listen, host, token, text, web
         type(db_t) :: db
-        integer :: lfd, port, stat, colon, workers, threads
+        integer :: lfd, port, stat, colon, workers, threads, interval
         logical :: exists
 
         data = option('--data', './fortyard-data')
@@ -107,6 +108,9 @@ contains
         read (text, *, iostat=stat) workers
         if (stat /= 0 .or. workers < 1 .or. workers > 64) error stop 'fy: --workers needs 1 to 64'
         web = option('--web', beside_program('web'))
+        text = option('--mirror-interval', '60')
+        read (text, *, iostat=stat) interval
+        if (stat /= 0 .or. interval < 1) error stop 'fy: --mirror-interval needs seconds, at least 1'
         text = option('--threads', '8')
         read (text, *, iostat=stat) threads
         if (stat /= 0 .or. threads < 1 .or. threads > 256) error stop 'fy: --threads needs 1 to 256'
@@ -154,6 +158,7 @@ contains
         call db_close(db)
         call server_set_web_dir(web)
         call server_set_data_dir(data)
+        call server_set_mirror_interval(interval)
         call server_supervise(lfd, data//'/fortyard.db', workers, threads)
     end subroutine cmd_serve
 

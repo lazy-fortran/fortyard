@@ -24,7 +24,7 @@ module fy_server
     private
 
     public :: server_loop, serve_connection, route, server_supervise, server_set_web_dir
-    public :: server_set_data_dir
+    public :: server_set_data_dir, server_set_mirror_interval
     public :: response_t
 
     character(len=*), parameter :: JSON = 'application/json'
@@ -42,6 +42,8 @@ module fy_server
     character(len=:), allocatable :: web_dir
     !! Directory of the repository mirrors.
     character(len=:), allocatable :: repos_dir
+    !! Seconds between fetches of a mirror.
+    integer :: mirror_interval = 60
 
 contains
 
@@ -114,7 +116,7 @@ contains
 
     subroutine mirror_main(db_path)
         !! Clones repositories that have no mirror yet and fetches the others
-        !! once a minute; a failed fetch is recorded and retried a minute later.
+        !! every mirror interval; a failed fetch is recorded and retried then.
         character(len=*), intent(in) :: db_path
         type(db_t) :: db
         type(repo_info_t), allocatable :: repos(:)
@@ -134,14 +136,16 @@ contains
                     k = findloc(names, repos(i)%name, 1)
                     if (k == 0) then
                         names = [names, [character(len=64) :: repos(i)%name]]
-                        last = [last, -huge(1_int64)]
+                        call system_clock(now, rate)
+                        ! Due at once: fetch in the first round after a start.
+                        last = [last, now - int(mirror_interval, int64) * rate]
                         k = size(names)
                     end if
                     call system_clock(now, rate)
                     inquire (file=repo_path(repos(i)%name)//'/HEAD', exist=exists)
                     if (.not. exists) then
                         call repo_clone(repos(i)%upstream, repo_path(repos(i)%name), status)
-                    else if (now - last(k) >= 60 * rate) then
+                    else if (now - last(k) >= int(mirror_interval, int64) * rate) then
                         call repo_fetch(repo_path(repos(i)%name), status)
                     else
                         cycle
@@ -156,7 +160,7 @@ contains
                 end do
                 call db_close(db)
             end if
-            call proc_sleep_ms(10000)
+            call proc_sleep_ms(min(10000, 1000 * mirror_interval))
         end do
     end subroutine mirror_main
 
@@ -165,6 +169,12 @@ contains
         character(len=:), allocatable :: path
         path = repos_dir//'/'//trim(name)//'.git'
     end function repo_path
+
+    subroutine server_set_mirror_interval(seconds)
+        !! Set once before the mirror process starts.
+        integer, intent(in) :: seconds
+        mirror_interval = max(1, seconds)
+    end subroutine server_set_mirror_interval
 
     subroutine server_set_data_dir(dir)
         !! Set once before workers start; read-only afterwards.
