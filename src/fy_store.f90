@@ -61,6 +61,8 @@ module fy_store
     end type landing_t
 
     character(len=*), parameter :: NOW = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+    !! How long a check waits for the runner that checked its repository last.
+    character(len=*), parameter :: AFFINITY_SECONDS = '20'
 
 contains
 
@@ -701,7 +703,10 @@ contains
     end subroutine store_check_add
 
     subroutine store_check_claim(db, runner, id, repo, ref, found)
-        !! Gives the oldest queued check to `runner`.
+        !! Gives `runner` the oldest queued check it may take: one of a
+        !! repository it checked last, or that no runner checked yet, or one
+        !! that has waited AFFINITY_SECONDS. A repository so stays on the
+        !! runner whose build tree and caches are warm for it.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: runner
         integer(int64), intent(out) :: id
@@ -715,7 +720,10 @@ contains
         repo = ''
         ref = ''
         call db_prepare(db, "UPDATE checks SET state = 'running', runner = ?1, claimed_at = "// &
-            NOW//" WHERE id = (SELECT min(id) FROM checks WHERE state = 'queued')"// &
+            NOW//" WHERE id = (SELECT min(c.id) FROM checks c WHERE c.state = 'queued' AND"// &
+            ' (coalesce((SELECT p.runner FROM checks p WHERE p.repo = c.repo AND p.runner'// &
+            ' IS NOT NULL ORDER BY p.id DESC LIMIT 1), ?1) = ?1 OR c.created_at <='// &
+            " strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-"//AFFINITY_SECONDS//" seconds')))"// &
             ' RETURNING id, repo, ref;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, runner, stat)

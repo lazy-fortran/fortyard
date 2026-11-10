@@ -2,7 +2,8 @@ program test_store
     use fy_sqlite, only: db_t, db_close, db_exec
     use fy_store, only: store_open, store_bootstrap, store_token_lookup, &
         store_token_create, store_schema_version, token_identity_t, SCHEMA_VERSION, &
-        store_snapshot
+        store_snapshot, store_check_add, store_check_claim, store_check_finish
+    use, intrinsic :: iso_fortran_env, only: int64
     implicit none
 
     character(len=*), parameter :: path = 'build/test_store.db'
@@ -10,6 +11,9 @@ program test_store
     type(token_identity_t) :: who
     character(len=:), allocatable :: admin, second, again
     integer :: stat
+    integer(int64) :: id
+    character(len=:), allocatable :: repo, ref
+    logical :: found
 
     call execute_command_line('rm -f '//path//' '//path//'-wal '//path//'-shm'//' '//path//'.snap')
     call store_open(path, db, stat)
@@ -56,6 +60,26 @@ program test_store
     call store_token_lookup(db, second, who)
     call check(stat == 0 .and. store_schema_version(db) == SCHEMA_VERSION .and. &
         .not. who%found, 'the snapshot holds the database as it was')
+    call db_close(db)
+
+    ! A check goes to the runner that checked its repository last; another
+    ! runner takes it only after it has waited.
+    call store_open(path, db, stat)
+    call store_check_add(db, 'demo', 'refs/a', id, stat)
+    call store_check_claim(db, 'r1', id, repo, ref, found)
+    call check(found .and. repo == 'demo', 'the first check of a repository goes to any runner')
+    call store_check_finish(db, id, 'passed', '', found)
+    call store_check_add(db, 'demo', 'refs/b', id, stat)
+    call store_check_claim(db, 'r2', id, repo, ref, found)
+    call check(.not. found, 'another runner leaves a fresh check to the warm one')
+    call store_check_claim(db, 'r1', id, repo, ref, found)
+    call check(found .and. ref == 'refs/b', 'the warm runner takes it')
+    call store_check_finish(db, id, 'passed', '', found)
+    call store_check_add(db, 'demo', 'refs/c', id, stat)
+    call db_exec(db, "UPDATE checks SET created_at = '2000-01-01T00:00:00Z' WHERE ref = 'refs/c';", &
+        stat)
+    call store_check_claim(db, 'r2', id, repo, ref, found)
+    call check(found .and. ref == 'refs/c', 'another runner takes a check that has waited')
     call db_close(db)
 
 contains
