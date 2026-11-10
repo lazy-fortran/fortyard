@@ -20,7 +20,7 @@ module fy_store
     public :: store_jobs, store_job, store_job_counts, store_jobs_state
     public :: store_check_add, store_check_claim, store_check_finish, store_check_get
 
-    integer, parameter, public :: SCHEMA_VERSION = 7
+    integer, parameter, public :: SCHEMA_VERSION = 8
 
     type :: token_identity_t
         logical :: found = .false.
@@ -187,6 +187,16 @@ contains
                 " ref TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', runner TEXT,"// &
                 ' log TEXT, created_at TEXT NOT NULL, claimed_at TEXT, finished_at TEXT);'// &
                 'DELETE FROM schema_version; INSERT INTO schema_version VALUES (7);'// &
+                'COMMIT;', stat)
+            if (stat /= SQLITE_OK) then
+                call db_exec(db, 'ROLLBACK;', version)
+                return
+            end if
+        end if
+        if (store_schema_version(db) < 8) then
+            ! The lander process (1, 2, ...) that runs a landing.
+            call db_exec(db, 'BEGIN;ALTER TABLE landings ADD COLUMN lander INTEGER;'// &
+                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (8);'// &
                 'COMMIT;', stat)
             if (stat /= SQLITE_OK) then
                 call db_exec(db, 'ROLLBACK;', version)
@@ -459,19 +469,23 @@ contains
         call stmt_finalize(st)
     end subroutine store_landing_add
 
-    subroutine store_landing_next(db, l, found)
-        !! Takes the oldest queued landing and marks it running.
+    subroutine store_landing_next(db, lander, l, found)
+        !! Takes the oldest queued landing of a repository with no running one
+        !! (main moves one landing at a time) and marks it running by `lander`.
         type(db_t), intent(in) :: db
+        integer, intent(in) :: lander
         type(landing_t), intent(out) :: l
         logical, intent(out) :: found
         type(stmt_t) :: st
         integer :: stat
 
         found = .false.
-        call db_prepare(db, "UPDATE landings SET state = 'running', started_at = "//NOW//" WHERE id = (SELECT min(id)"// &
-            " FROM landings WHERE state = 'queued') RETURNING id, repo, branch, account, created_at;", &
-            st, stat)
+        call db_prepare(db, "UPDATE landings SET state = 'running', lander = ?1, started_at = "// &
+            NOW//" WHERE id = (SELECT min(id) FROM landings WHERE state = 'queued' AND repo NOT IN"// &
+            " (SELECT repo FROM landings WHERE state = 'running'))"// &
+            ' RETURNING id, repo, branch, account, created_at;', st, stat)
         if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, int(lander, int64), stat)
         if (stmt_step(st) == SQLITE_ROW) then
             l%id = stmt_int(st, 0)
             l%repo = stmt_text(st, 1)
@@ -484,11 +498,19 @@ contains
         call stmt_finalize(st)
     end subroutine store_landing_next
 
-    subroutine store_landing_requeue(db)
-        !! Landings that were running when the lander stopped run again.
+    subroutine store_landing_requeue(db, lander)
+        !! Landings that were running when `lander` stopped run again; lander 1
+        !! also takes those of a release before there were several landers.
         type(db_t), intent(in) :: db
+        integer, intent(in) :: lander
+        type(stmt_t) :: st
         integer :: stat
-        call db_exec(db, "UPDATE landings SET state = 'queued' WHERE state = 'running';", stat)
+        call db_prepare(db, "UPDATE landings SET state = 'queued' WHERE state = 'running'"// &
+            ' AND (lander = ?1 OR (lander IS NULL AND ?1 = 1));', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, int(lander, int64), stat)
+        stat = stmt_step(st)
+        call stmt_finalize(st)
     end subroutine store_landing_requeue
 
     subroutine store_landing_finish(db, id, state, commit, log)

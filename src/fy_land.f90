@@ -127,7 +127,9 @@ contains
             call git([character(len=1024) :: 'checkout', '--quiet', '-B', 'landing', &
                 'origin/main'])
             if (len(merged) == 0) then
-                call git([character(len=1024) :: 'merge', '--squash', '--quiet', &
+                ! A three-way merge needs an identity, though it commits nothing.
+                call git([character(len=1024) :: '-c', 'user.name=fortyard', '-c', &
+                    'user.email=fortyard@localhost', 'merge', '--squash', '--quiet', &
                     'origin/'//branch])
                 if (status /= 0) then
                     log = 'The branch does not merge cleanly with main; rebase it onto main.'// &

@@ -5,7 +5,7 @@
 services:
   fortyard-runner:
     image: "@IMAGE@"
-    container_name: fortyard-runner
+    container_name: "@NAME@"
     restart: unless-stopped
     init: true
     user: "@UID@:@GID@"

@@ -7,7 +7,7 @@ module fy_proc
     public :: proc_fork, proc_wait_any, proc_wait, proc_kill, proc_exit, proc_pid
     public :: proc_die_with_parent, proc_sleep_ms, proc_run, proc_spawn, proc_find
     public :: fd_read, fd_write_all, fd_close, proc_exit_status
-    public :: proc_poll_child, proc_readlink, proc_reexec
+    public :: proc_poll_child, proc_readlink, proc_reexec, proc_setenv
     public :: SIGTERM, SIGKILL
 
     integer, parameter :: SIGKILL = 9, SIGTERM = 15
@@ -524,6 +524,12 @@ contains
         call c_strings(value, cv)
         rc = c_setenv(c_loc(cn), c_loc(cv), 1_c_int)
     end subroutine set_env
+
+    subroutine proc_setenv(name, value)
+        !! Sets an environment variable of this process and its children.
+        character(len=*), intent(in) :: name, value
+        call set_env(name, value)
+    end subroutine proc_setenv
 
     subroutine ignore_sigpipe()
         type(c_funptr) :: old

@@ -154,7 +154,8 @@ contains
                 ! work tree borrows its objects.
                 src = data_dir//'/mirrors/'//repo//'.git'
                 call proc_run([character(len=1024) :: 'sh', '-c', &
-                    'h="credential.helper=store --file=$1/credentials"; '// &
+                ! Absolute, since git -C resolves it from the mirror.
+                    'h="credential.helper=store --file=$(cd "$1" && pwd)/credentials"; '// &
                     'if [ -d "$2" ]; then git -c "$h" -C "$2" fetch --quiet --prune origin; '// &
                     'else git -c "$h" clone --quiet --mirror "$3/$4.git" "$2"; fi 2>&1', &
                     'mirror', data_dir, src, server, repo], out, stat, 65536)

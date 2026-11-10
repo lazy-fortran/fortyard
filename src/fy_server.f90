@@ -77,6 +77,8 @@ module fy_server
     character(len=:), allocatable :: checks_mode
     !! The lander's database connection, for its runner checks.
     type(db_t) :: lander_db
+    !! Lander processes when runners check the landings.
+    integer, parameter :: MAX_LANDERS = 4
     !! Seconds between fetches of a mirror.
     integer :: mirror_interval = 60
     !! Database and cookie of the page being composed (in critical fortui_render).
@@ -93,17 +95,24 @@ contains
         !! connection holds one thread rather than one process.
         integer, intent(in) :: lfd, nworkers, nthreads
         character(len=*), intent(in) :: db_path
-        ! Slots nworkers + 1 and + 2, when there is a data directory, are the
-        ! processes that mirror repositories and land branches.
-        integer :: pids(nworkers + 2)
-        integer(int64) :: started(nworkers + 2), now, rate
+        ! Slot nworkers + 1, when there is a data directory, is the process that
+        ! mirrors repositories, and the slots after it land branches: several
+        ! when runners check them, so one repository's long check does not hold
+        ! up the others, else one.
+        integer :: pids(nworkers + 1 + MAX_LANDERS)
+        integer(int64) :: started(nworkers + 1 + MAX_LANDERS), now, rate
         integer :: i, pid, status, slots
         character(len=:), allocatable :: followed
         integer :: me
 
         me = proc_pid()
         slots = nworkers
-        if (allocated(repos_dir)) slots = nworkers + 2
+        if (allocated(repos_dir)) then
+            slots = nworkers + 2
+            if (checks_mode_set()) then
+                if (checks_mode == 'runner') slots = nworkers + 1 + MAX_LANDERS
+            end if
+        end if
         do i = 1, slots
             call spawn(i)
         end do
@@ -177,8 +186,8 @@ contains
             end do
             if (pids(slot) /= 0) return
             if (.not. proc_die_with_parent(me)) call proc_exit(0)
-            if (slot == nworkers + 2) then
-                call lander_main(db_path)
+            if (slot > nworkers + 1) then
+                call lander_main(db_path, slot - nworkers - 1)
             else if (slot > nworkers) then
                 call mirror_main(db_path)
             else
@@ -254,9 +263,11 @@ contains
         end do
     end subroutine mirror_main
 
-    subroutine lander_main(db_path)
-        !! Lands queued branches one at a time, oldest first.
+    subroutine lander_main(db_path, lander)
+        !! Lander number `lander`: lands queued branches one at a time, oldest
+        !! first.
         character(len=*), intent(in) :: db_path
+        integer, intent(in) :: lander
         type(db_t) :: db
         type(landing_t) :: l
         type(repo_info_t), allocatable :: repos(:)
@@ -273,10 +284,10 @@ contains
         if (stat /= 0) call proc_exit(1)
         ! Opened before the first look at the queue, so no landing is missed.
         watch = events_watch_open()
-        call store_landing_requeue(db)
+        call store_landing_requeue(db, lander)
         call events_notify('jobs')
         do
-            call store_landing_next(db, l, found)
+            call store_landing_next(db, lander, l, found)
             if (found) call events_notify('jobs')
             if (.not. found) then
                 ! Sleeps until a landing is queued (the API rewrites the jobs marker).
