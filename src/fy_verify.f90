@@ -48,9 +48,7 @@ contains
         call store_open(db_path, db, stat)
         if (stat /= 0) call proc_exit(1)
         watch = events_watch_open()
-        ! A verification interrupted by a restart neither passed nor failed.
-        call db_exec(db, "UPDATE landings SET state = 'cancelled', finished_at = "//NOW// &
-            " WHERE kind = 'verify' AND state = 'running';", stat)
+        call resume(db, repos_dir)
         do
             busy = .false.
             call store_repo_list(db, repos, stat)
@@ -62,6 +60,40 @@ contains
             if (.not. busy) changed = events_wait(watch, 'jobs', 600000)
         end do
     end subroutine verifier_main
+
+    subroutine resume(db, repos_dir)
+        !! After a restart (a new release), verifications whose runner check
+        !! still exists are followed to their end; the others are cancelled,
+        !! as they neither passed nor failed.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: repos_dir
+        type(stmt_t) :: st
+        integer(int64), allocatable :: jobs(:), checks(:)
+        character(len=64), allocatable :: repos(:), commits(:)
+        integer :: stat, k
+
+        allocate (jobs(0), checks(0), repos(0), commits(0))
+        call db_prepare(db, "SELECT l.id, coalesce((SELECT max(c.id) FROM checks c WHERE c.ref ="// &
+            " 'refs/fortyard/verify/' || l.id), 0), l.repo, l.commit_id FROM landings l"// &
+            " WHERE l.kind = 'verify' AND l.state = 'running';", st, stat)
+        if (stat /= SQLITE_OK) return
+        do while (stmt_step(st) == SQLITE_ROW)
+            jobs = [jobs, stmt_int(st, 0)]
+            checks = [checks, stmt_int(st, 1)]
+            repos = [repos, [character(len=64) :: stmt_text(st, 2)]]
+            commits = [commits, [character(len=64) :: stmt_text(st, 3)]]
+        end do
+        call stmt_finalize(st)
+        do k = 1, size(jobs)
+            if (checks(k) > 0) then
+                call finish(db, trim(repos(k)), repos_dir//'/'//trim(repos(k))//'.git', &
+                    trim(commits(k)), jobs(k), checks(k))
+            else
+                call exec(db, "UPDATE landings SET state = 'cancelled', finished_at = "//NOW// &
+                    ' WHERE id = ?1 AND ?2 = ?2;', jobs(k), '')
+            end if
+        end do
+    end subroutine resume
 
     integer(int64) function verify_request(db, repo, git_dir) result(id)
         !! Asks for a verification of main's newest commit even when it was
@@ -179,10 +211,9 @@ contains
         integer(int64), intent(in) :: request
         type(stmt_t) :: st
         integer(int64) :: id, check
-        character(len=:), allocatable :: ref, state, log, out
+        character(len=:), allocatable :: ref, out
         character(len=24) :: num
-        integer :: stat, age, fd, status
-        logical :: changed
+        integer :: stat, status
 
         id = request
         if (id > 0) then
@@ -204,9 +235,24 @@ contains
         write (num, '(i0)') id
         ref = 'refs/fortyard/verify/'//trim(num)
         call git(git_dir, [character(len=256) :: 'update-ref', ref, commit], out, status)
-        fd = events_watch_open()
         call store_check_add(db, repo, ref, check, stat, kind='verify')
         call events_notify('checks')
+        call finish(db, repo, git_dir, commit, id, check)
+    end subroutine run
+
+    subroutine finish(db, repo, git_dir, commit, id, check)
+        !! Waits for runner check `check` of verification job `id` and records
+        !! its outcome.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: repo, git_dir, commit
+        integer(int64), intent(in) :: id, check
+        character(len=:), allocatable :: state, log, out
+        character(len=24) :: num
+        integer :: age, fd, status
+        logical :: changed
+
+        write (num, '(i0)') id
+        fd = events_watch_open()
         state = ''
         log = ''
         do
@@ -220,14 +266,15 @@ contains
             end if
             changed = events_wait(fd, 'checks', 60000)
         end do
-        call git(git_dir, [character(len=256) :: 'update-ref', '-d', ref], out, status)
+        call git(git_dir, [character(len=256) :: 'update-ref', '-d', &
+            'refs/fortyard/verify/'//trim(num)], out, status)
         call exec(db, 'UPDATE landings SET state = ?2, log = ?3, finished_at = '//NOW// &
             ' WHERE id = ?1;', id, state, log)
         call events_notify('jobs')
         write (error_unit, '(a)') 'fy: verification '//trim(num)//' of '//repo//' at '// &
             commit(1:min(12, len(commit)))//' '//state
         flush (error_unit)
-    end subroutine run
+    end subroutine finish
 
     subroutine report(db, repo, git_dir, culprit, good, base)
         !! Reports the first failing commit once: an issue, and a comment on
