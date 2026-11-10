@@ -104,7 +104,9 @@ In order:
       `fy push`, `fy change list|view|diff|comment|edit|land|close|reopen`.
 - [x] Issues, numbered with the changes: `fy issue list|view|new|comment|edit|
       close|reopen` and the API.
-- [ ] Change and issue pages in the web application.
+- [x] Change and issue pages in the web application: lists, a change with its
+      conversation, landings, versions and diff or interdiff, comments, land
+      and close; an issue with comments; a new issue.
 - [x] Landing, minimal: `main` takes no pushes; `fy land REPO BRANCH` queues a
       pushed branch, which lands one at a time as one squashed commit with
       `(#N)` and a `Change:` trailer after the repository's check (`fo test`, or

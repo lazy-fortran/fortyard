@@ -279,6 +279,39 @@ try {
   await until(hasText('failed'), 'the landing ends');
   check(true, 'its end appears too');
 
+  // Changes and issues: a pushed branch is a change with its own pages.
+  await fetch(url + 'api/v1/repos', { method: 'POST', headers: auth, body: JSON.stringify({ name: 'work' }) });
+  const wt = join(data, 'work');
+  const wg = (...args) => execFileSync('git', ['-C', wt, '-c', 'user.name=T', '-c', 'user.email=t@example.org', ...args],
+    { env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+  execFileSync('git', ['init', '-q', '-b', 'feature', wt]);
+  writeFileSync(join(wt, 'notes.txt'), 'first line\nsecond line\n');
+  wg('add', '-A');
+  wg('commit', '-q', '-m', 'Explain the feature', '-m', 'Why it matters for the study.');
+  for (let i = 0; i < 100 && !(await fetch(url + 'api/v1/repos/work/changes', { headers: auth })).ok; i++) await sleep(100);
+  wg('push', '-q', `http://x:${admin}@127.0.0.1:${port}${base}/work.git`, 'HEAD:feature');
+  await load('/work/-/changes');
+  await until(hasText('Explain the feature'), 'the change listed');
+  check(await evaluate('document.title') === 'Changes · work · fortyard', 'a pushed branch is listed as a change');
+  await click(linkTo('/work/-/changes/1'));
+  await until(hasText('Why it matters for the study.'), 'the change page');
+  check(await path() === '/work/-/changes/1', 'a change has its own page with its description');
+  await click('[data-id$="/comment"]');
+  await type('Looks right.');
+  await click('[data-id$="/send"]');
+  await until(hasText('Looks right.'), 'the comment shown');
+  check(true, 'a comment is added from the page');
+  await click(linkTo('/work/-/changes/1/files'));
+  await until(`[...document.querySelectorAll('.fui')].some((e) => e.textContent.endsWith('+ second line'))`, 'the diff');
+  check(await path() === '/work/-/changes/1/files', 'the files of a change show its diff');
+  await load('/work/-/issues/new');
+  await until(`!!document.querySelector('[data-id$="/newtitle"]')`, 'the new issue form');
+  await click('[data-id$="/newtitle"]');
+  await type('Plots are blank');
+  await click('[data-id$="/create"]');
+  await until(hasText('Plots are blank'), 'the new issue page');
+  check(await path() === '/work/-/issues/2', 'a new issue gets the next number and its own page');
+
   if (shot) {
     const png = await send('Page.captureScreenshot', { format: 'png' });
     writeFileSync(shot, Buffer.from(png.result.data, 'base64'));

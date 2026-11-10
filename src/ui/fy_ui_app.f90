@@ -12,9 +12,12 @@ module fy_ui_app
     use fy_fetch, only: request_t, fetch_start, fetch_ready
     use fy_nav, only: nav_push, nav_popped, nav_title, nav_assign, nav_set_pref, nav_copy
     use fy_route, only: route_t, route_parse, route_href, go, go_take, at, R_REPOS, R_TOKENS, &
-        R_SERVER, R_TREE, R_BLOB, R_COMMITS, R_COMMIT, R_MISSING, R_JOBS
+        R_SERVER, R_TREE, R_BLOB, R_COMMITS, R_COMMIT, R_MISSING, R_JOBS, R_CHANGES, R_CHANGE, &
+        R_ISSUES, R_ISSUE
     use fy_jobs_view, only: jobs_view_show, jobs_view_hide, jobs_view_receive, &
         jobs_view_compose, jobs_view_title
+    use fy_change_view, only: change_view_show, change_view_receive, change_view_compose, &
+        change_view_title, change_view_repo, change_view_missing
     use fy_repo_view, only: repo_view_reset, repo_view_show, repo_view_list, &
         repo_view_compose, repo_view_list_compose, repo_view_receive, repo_view_title, &
         repo_view_repo, repo_view_missing
@@ -126,6 +129,8 @@ contains
             call fetch_start(tokens_req, 'GET', '/api/v1/tokens')
         case (R_TREE, R_BLOB, R_COMMITS, R_COMMIT)
             call repo_view_show(r)
+        case (R_CHANGES, R_CHANGE, R_ISSUES, R_ISSUE)
+            call change_view_show(r)
         end select
     end subroutine show
 
@@ -163,6 +168,8 @@ contains
             s = jobs_view_title()//' · fortyard'
         case (R_MISSING)
             s = 'Page not found · fortyard'
+        case (R_CHANGES, R_CHANGE, R_ISSUES, R_ISSUE)
+            s = change_view_title()//' · fortyard'
         case default
             s = repo_view_title()//' · fortyard'
         end select
@@ -170,8 +177,9 @@ contains
 
     logical function app_missing()
         !! Whether the page shown does not exist (the server answers 404).
-        app_missing = signed_in .and. (page == R_MISSING .or. (page >= R_TREE .and. &
-            repo_view_missing()))
+        app_missing = signed_in .and. (page == R_MISSING .or. (in_repo(page) .and. &
+            page <= R_COMMIT .and. repo_view_missing()) .or. (page >= R_CHANGES .and. &
+            change_view_missing()))
     end function app_missing
 
     subroutine app_compose()
@@ -212,6 +220,8 @@ contains
                 call jobs_view_compose(page_w < 600.0)
             case (R_MISSING)
                 call missing_view()
+            case (R_CHANGES, R_CHANGE, R_ISSUES, R_ISSUE)
+                call change_view_compose(index(scopes, 'admin') > 0, page_w < 600.0)
             case default
                 call repo_view_compose()
             end select
@@ -244,8 +254,8 @@ contains
         if (signed_in .and. checked) then
             ! Where the page is: the repository's groups and name, or the page.
             call row_begin(4.0, id="context")
-            if (page >= R_TREE .and. page <= R_COMMIT) then
-                repo = repo_view_repo()
+            if (in_repo(page)) then
+                repo = page_repo()
                 rest = repo
                 call text("/", size=HEADING, tone=UI_TONE_MUTED)
                 do
@@ -270,6 +280,23 @@ contains
         call row_end()
     end subroutine topbar
 
+    logical function in_repo(kind)
+        !! Whether a page of this kind belongs to a repository.
+        integer, intent(in) :: kind
+        in_repo = (kind >= R_TREE .and. kind <= R_COMMIT) .or. &
+            (kind >= R_CHANGES .and. kind <= R_ISSUE)
+    end function in_repo
+
+    function page_repo() result(s)
+        !! The repository of the page shown.
+        character(len=:), allocatable :: s
+        if (page >= R_CHANGES) then
+            s = change_view_repo()
+        else
+            s = repo_view_repo()
+        end if
+    end function page_repo
+
     function page_name(kind) result(s)
         integer, intent(in) :: kind
         character(len=:), allocatable :: s
@@ -293,14 +320,18 @@ contains
             if (button("close", "Close menu", width=40.0, height=40.0)) drawer_open = .false.
             call row_end()
         end if
-        if (page >= R_TREE .and. page <= R_COMMIT) then
-            repo = repo_view_repo()
+        if (in_repo(page)) then
+            repo = page_repo()
             call text(repo, size=SMALL, style=UI_HEADING, tone=UI_TONE_MUTED, id="section", &
                 width=UI_FILL)
             call side_link("code", "Code", route_href(R_TREE, repo), &
                 page == R_TREE .or. page == R_BLOB)
             call side_link("history", "History", route_href(R_COMMITS, repo), &
                 page == R_COMMITS .or. page == R_COMMIT)
+            call side_link("changes", "Changes", route_href(R_CHANGES, repo), &
+                page == R_CHANGES .or. page == R_CHANGE)
+            call side_link("issues", "Issues", route_href(R_ISSUES, repo), &
+                page == R_ISSUES .or. page == R_ISSUE)
             call text("", width=UI_FILL, id="hr1")
         end if
         call side_link("repos", "Repositories", at("/"), page == R_REPOS)
@@ -565,6 +596,7 @@ contains
             if (signed_in) call show(here)
         end if
         call repo_view_receive()
+        call change_view_receive()
         call jobs_view_receive()
         if (fetch_ready(tokens_req)) then
             if (tokens_req%status == 200) call parse_tokens(tokens_req%body)

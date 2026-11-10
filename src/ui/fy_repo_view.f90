@@ -11,7 +11,8 @@ module fy_repo_view
         JSON_OBJECT_END, JSON_END_OF_INPUT, JSON_ERROR
     use fy_fetch, only: request_t, fetch_start, fetch_ready
     use fy_highlight, only: highlight, lang_of
-    use fy_diff, only: diff_file_t, parse_patch, DL_ADDED, DL_REMOVED, DL_HUNK, DL_NOTE
+    use fy_code_lines, only: line_t, shown_file_t, diff_load, diff_compose, numbered, plain_lines, &
+        right, untab
     use fy_markdown, only: md_doc_t, md_parse, md_compose
     use fy_route, only: route_t, route_href, url_encode, go, at, R_TREE, R_BLOB, R_COMMITS, &
         R_COMMIT
@@ -23,12 +24,6 @@ module fy_repo_view
     public :: repo_view_reset, repo_view_show, repo_view_list, repo_view_compose, &
         repo_view_list_compose, repo_view_receive, repo_view_title, repo_view_repo, &
         repo_view_kind, repo_view_missing
-
-    type :: line_t
-        character(len=:), allocatable :: s
-        integer, allocatable :: ends(:), tones(:)
-        integer :: tone = 0
-    end type line_t
 
     type :: repo_t
         character(len=:), allocatable :: name, upstream, fetched
@@ -46,14 +41,7 @@ module fy_repo_view
         character(len=:), allocatable :: id, author, date, subject
     end type commit_t
 
-    type :: shown_file_t
-        !! A file of a commit's diff, ready to compose.
-        character(len=:), allocatable :: path, status
-        integer :: additions = 0, deletions = 0
-        type(line_t), allocatable :: lines(:)
-    end type shown_file_t
-
-    integer, parameter :: MAX_FILE_LINES = 5000, MAX_DIFF_LINES = 6000
+    integer, parameter :: MAX_FILE_LINES = 5000
     real, parameter :: BODY = 14.0, SMALL = 12.0, HEADING = 16.0, CODE = 12.0
     real, parameter :: GAP = 8.0, ROW_H = 40.0
 
@@ -581,15 +569,6 @@ contains
     end subroutine history_view
 
     subroutine commit_view()
-        integer :: f, k, adds, dels
-
-        adds = 0
-        dels = 0
-        do f = 1, size(diff_files)
-            adds = adds + diff_files(f)%additions
-            dels = dels + diff_files(f)%deletions
-        end do
-
         call column_begin(8.0, id="card-commithead")
         call text(c_subject, size=20.0, style=UI_HEADING, width=UI_FILL, id="subject")
         if (len(c_body) > 0) call text(c_body, size=BODY, width=UI_FILL, tone=UI_TONE_MUTED, &
@@ -603,49 +582,8 @@ contains
         call row_end()
         call column_end()
 
-        if (len(c_author) > 0) then
-            call row_begin(GAP, id="diffstat", height=ROW_H)
-            if (size(diff_files) == 1) then
-                call text("1 file changed", size=BODY)
-            else
-                call text(ui_str(size(diff_files))//" files changed", size=BODY)
-            end if
-            call text("+"//ui_str(adds), size=BODY, tone=UI_TONE_POSITIVE)
-            call text("−"//ui_str(dels), size=BODY, tone=UI_TONE_NEGATIVE)
-            call row_end()
-        end if
-
-        do f = 1, size(diff_files)
-            call column_begin(0.0, id="card-diff"//ui_str(f))
-            call row_begin(GAP, id="dhead", height=ROW_H)
-            if (diff_files(f)%status /= 'modified') call text(diff_files(f)%status, size=SMALL, &
-                id="badge", tone=badge_tone(diff_files(f)%status))
-            call text(diff_files(f)%path, style=UI_CODE, size=SMALL, width=UI_FILL, id="path")
-            call text("+"//ui_str(diff_files(f)%additions), size=SMALL, tone=UI_TONE_POSITIVE)
-            call text("−"//ui_str(diff_files(f)%deletions), size=SMALL, tone=UI_TONE_NEGATIVE)
-            call row_end()
-            call column_begin(0.0, id="dcode")
-            do k = 1, size(diff_files(f)%lines)
-                associate (l => diff_files(f)%lines(k))
-                    call text(l%s, style=UI_CODE, size=CODE, width=UI_FILL, tone=l%tone, &
-                        ends=l%ends, tones=l%tones)
-                end associate
-            end do
-            call column_end()
-            call column_end()
-        end do
-        if (diff_cut) call text("The diff is longer; only its first "//ui_str(MAX_DIFF_LINES)// &
-            " lines are shown.", size=SMALL, tone=UI_TONE_MUTED)
+        if (len(c_author) > 0) call diff_compose(diff_files, diff_cut)
     end subroutine commit_view
-
-    integer function badge_tone(status)
-        character(len=*), intent(in) :: status
-        select case (status)
-        case ('added'); badge_tone = UI_TONE_POSITIVE
-        case ('deleted'); badge_tone = UI_TONE_NEGATIVE
-        case default; badge_tone = UI_TONE_MUTED
-        end select
-    end function badge_tone
 
     ! ---- responses ----------------------------------------------------------------------
 
@@ -747,7 +685,7 @@ contains
                 call json_extract_string(commit_req%body, 'author', c_author, found)
                 call json_extract_string(commit_req%body, 'date', c_date, found)
                 call json_extract_string(commit_req%body, 'patch', s, found)
-                call diff_lines(s)
+                call diff_load(s, diff_files, diff_cut)
             else
                 commit_of = ''
                 c_subject = 'This commit does not exist.'
@@ -797,118 +735,6 @@ contains
             call numbered(file_lines(k), right(ui_str(k), width)//'  ', line, lang, state, 0)
         end do
     end subroutine code_lines
-
-    subroutine diff_lines(patch)
-        !! Each file of a commit's patch with its lines: both line numbers as a
-        !! muted run, the sign and the highlighted code.
-        character(len=*), intent(in) :: patch
-        type(diff_file_t), allocatable :: files(:)
-        integer :: f, k, state, lang, kept
-
-        call parse_patch(patch, files, MAX_DIFF_LINES)
-        deallocate (diff_files)
-        allocate (diff_files(size(files)))
-        kept = 0
-        do f = 1, size(files)
-            diff_files(f)%path = files(f)%path
-            if (files(f)%status == 'renamed') diff_files(f)%path = files(f)%old_path// &
-                ' → '//files(f)%path
-            diff_files(f)%status = files(f)%status
-            diff_files(f)%additions = files(f)%additions
-            diff_files(f)%deletions = files(f)%deletions
-            allocate (diff_files(f)%lines(files(f)%count))
-            lang = lang_of(files(f)%path)
-            state = 0
-            do k = 1, files(f)%count
-                associate (l => files(f)%lines(k), d => diff_files(f)%lines(k))
-                    select case (l%kind)
-                    case (DL_HUNK)
-                        call plain(d, l%text, UI_TONE_HUNK)
-                        d%tone = UI_TONE_HUNK
-                    case (DL_NOTE)
-                        call plain(d, l%text, UI_TONE_MUTED)
-                    case (DL_ADDED)
-                        call numbered(d, gutter(0, l%new_no)//'+ ', untab(l%text), lang, state, &
-                            UI_TONE_ADDED)
-                    case (DL_REMOVED)
-                        call numbered(d, gutter(l%old_no, 0)//'- ', untab(l%text), lang, state, &
-                            UI_TONE_REMOVED)
-                    case default
-                        call numbered(d, gutter(l%old_no, l%new_no)//'  ', untab(l%text), lang, &
-                            state, 0)
-                    end select
-                end associate
-            end do
-            kept = kept + files(f)%count
-        end do
-        diff_cut = kept >= MAX_DIFF_LINES
-    end subroutine diff_lines
-
-    subroutine numbered(l, prefix, code, lang, state, tone)
-        !! A line whose prefix (line numbers) is a muted run, then highlighted code.
-        type(line_t), intent(inout) :: l
-        character(len=*), intent(in) :: prefix, code
-        integer, intent(in) :: lang, tone
-        integer, intent(inout) :: state
-        integer, allocatable :: ends(:), tones(:)
-
-        call highlight(code, lang, state, ends, tones)
-        l%s = prefix//code
-        l%ends = [len(prefix), ends + len(prefix)]
-        l%tones = [UI_TONE_MUTED, tones]
-        l%tone = tone
-    end subroutine numbered
-
-    subroutine plain(l, s, tone)
-        type(line_t), intent(inout) :: l
-        character(len=*), intent(in) :: s
-        integer, intent(in) :: tone
-        l%s = s
-        l%ends = [len(s)]
-        l%tones = [tone]
-    end subroutine plain
-
-    subroutine plain_lines(lines, s)
-        type(line_t), allocatable, intent(inout) :: lines(:)
-        character(len=*), intent(in) :: s
-        if (allocated(lines)) deallocate (lines)
-        allocate (lines(1))
-        call plain(lines(1), s, UI_TONE_MUTED)
-    end subroutine plain_lines
-
-    function gutter(old_no, new_no) result(s)
-        integer, intent(in) :: old_no, new_no
-        character(len=:), allocatable :: s
-        s = right(number(old_no), 5)//' '//right(number(new_no), 5)//'  '
-    contains
-        function number(k) result(t)
-            integer, intent(in) :: k
-            character(len=:), allocatable :: t
-            t = ''
-            if (k > 0) t = ui_str(k)
-        end function number
-    end function gutter
-
-    function right(s, width) result(r)
-        character(len=*), intent(in) :: s
-        integer, intent(in) :: width
-        character(len=:), allocatable :: r
-        r = repeat(' ', max(0, width - len_trim(s)))//trim(s)
-    end function right
-
-    function untab(s) result(t)
-        character(len=*), intent(in) :: s
-        character(len=:), allocatable :: t
-        integer :: k
-        t = ''
-        do k = 1, len(s)
-            if (s(k:k) == achar(9)) then
-                t = t//repeat(' ', 4 - mod(len(t), 4))
-            else if (s(k:k) /= achar(13)) then
-                t = t//s(k:k)
-            end if
-        end do
-    end function untab
 
     ! ---- parsing responses --------------------------------------------------------------
 

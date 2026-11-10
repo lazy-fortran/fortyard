@@ -11,7 +11,8 @@ module fy_route
     public :: go, go_take, route_set_base, at
 
     integer, parameter, public :: R_REPOS = 1, R_TOKENS = 2, R_SERVER = 3, R_TREE = 4, &
-        R_BLOB = 5, R_COMMITS = 6, R_COMMIT = 7, R_MISSING = 8, R_JOBS = 9
+        R_BLOB = 5, R_COMMITS = 6, R_COMMIT = 7, R_MISSING = 8, R_JOBS = 9, R_CHANGES = 10, &
+        R_CHANGE = 11, R_ISSUES = 12, R_ISSUE = 13
 
     character(len=7), parameter :: RESERVED(*) = [character(len=7) :: 'tokens', 'server', 'jobs', &
         'status', 'healthz', 'api', 'app', '-']
@@ -22,6 +23,8 @@ module fy_route
         character(len=:), allocatable :: repo, path
         !! ?plain=1: a Markdown file as code instead of rendered.
         logical :: plain = .false.
+        !! ?all: a list of changes or issues with the closed and landed ones.
+        logical :: all = .false.
     end type route_t
 
     character(len=:), allocatable :: pending
@@ -49,6 +52,7 @@ contains
             q = ''
         end if
         r%plain = index('&'//q//'&', '&plain=1&') > 0
+        r%all = index('&'//q//'&', '&all&') > 0
         do while (len(p) > 1)
             if (p(len(p):) /= '/') exit
             p = p(1:len(p) - 1)
@@ -94,6 +98,16 @@ contains
         else if (index(rest, 'commit/') == 1 .and. len(rest) > 7) then
             r%kind = R_COMMIT
             r%path = url_decode(rest(8:))
+        else if (rest == 'changes') then
+            r%kind = R_CHANGES
+        else if (index(rest, 'changes/') == 1 .and. len(rest) > 8) then
+            r%kind = R_CHANGE
+            r%path = rest(9:)
+        else if (rest == 'issues') then
+            r%kind = R_ISSUES
+        else if (index(rest, 'issues/') == 1 .and. len(rest) > 7) then
+            r%kind = R_ISSUE
+            r%path = rest(8:)
         end if
     end subroutine route_parse
 
@@ -163,6 +177,14 @@ contains
             href = href//'/-/commits'
         case (R_COMMIT)
             href = href//'/-/commit/'//sub
+        case (R_CHANGES)
+            href = href//'/-/changes'
+        case (R_CHANGE)
+            href = href//'/-/changes/'//sub
+        case (R_ISSUES)
+            href = href//'/-/issues'
+        case (R_ISSUE)
+            href = href//'/-/issues/'//sub
         end select
         href = at(href)
     end function route_href
