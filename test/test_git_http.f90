@@ -152,6 +152,51 @@ program test_git_http
     call check(index(reply, 'Files over 1 MiB') > 0 .and. index(reply, 'big (3000000 bytes)') > 0, &
         'a landing refuses a file over 1 MiB')
 
+    ! A branch that is main plus one merge commit lands as that merge: the
+    ! merged history stays an ancestor of main.
+    call execute_command_line(git//'-C '//work//'-clone fetch -q origin main && '//git//'-C '// &
+        work//'-clone checkout -q -B side origin/main && printf "u\n" > '//work//'-clone/up && '// &
+        git//'-C '//work//'-clone add up && '//git//'-C '//work//'-clone commit -q -m '// &
+        '"Upstream change" && '//git//'-C '//work//'-clone checkout -q -B sync origin/main && '// &
+        git//'-C '//work//'-clone merge -q --no-ff -m "Merge upstream" side && '//git//'-C '// &
+        work//'-clone push -q '//url//' HEAD:sync', exitstat=stat)
+    call check(stat == 0, 'a merge onto main is pushed')
+    reply = post('/api/v1/repos/demo/land', '{"branch":"sync"}')
+    call wait_landing(4, 'landed')
+    call execute_command_line('test "$(git --git-dir='//data//'/repos/demo.git rev-parse main^2)" = '// &
+        '"$('//git//'-C '//work//'-clone rev-parse side)" && test "$(git --git-dir='//data// &
+        '/repos/demo.git log -1 --format=%s main)" = "Merge upstream (#2)"', exitstat=stat)
+    call check(stat == 0, 'the merge landed as a merge commit with the merged history')
+    ! A merge onto an older main would lose that history when squashed.
+    call execute_command_line(git//'-C '//work//'-clone checkout -q -B side2 origin/main && '// &
+        'printf "v\n" > '//work//'-clone/up2 && '//git//'-C '//work//'-clone add up2 && '//git// &
+        '-C '//work//'-clone commit -q -m "Second upstream change" && '//git//'-C '//work// &
+        '-clone checkout -q -B stale origin/main && '//git//'-C '//work//'-clone merge -q '// &
+        '--no-ff -m "Merge onto old main" side2 && '//git//'-C '//work//'-clone push -q '//url// &
+        ' HEAD:stale', exitstat=stat)
+    reply = post('/api/v1/repos/demo/land', '{"branch":"stale"}')
+    call wait_landing(5, 'failed')
+    reply = get('/api/v1/jobs/5')
+    call check(index(reply, 'merge onto an older main') > 0, 'a merge onto an older main is refused')
+
+    ! Changed Fortran files need formatting, except those .fortyard/format-exclude
+    ! matches.
+    call execute_command_line(git//'-C '//work//'-clone fetch -q origin main && '//git//'-C '// &
+        work//'-clone checkout -q -B style origin/main && touch '//work//'-clone/CMakeLists.txt'// &
+        ' && mkdir -p '//work//'-clone/ext && printf "program p\nx=1\nend program\n" > '//work// &
+        '-clone/ext/p.f90 && '//git//'-C '//work//'-clone add -A && '//git//'-C '//work// &
+        '-clone commit -q -m "Foreign style" && '//git//'-C '//work//'-clone push -q '//url// &
+        ' HEAD:style', exitstat=stat)
+    reply = post('/api/v1/repos/demo/land', '{"branch":"style"}')
+    call wait_landing(6, 'failed')
+    reply = get('/api/v1/jobs/6')
+    call check(index(reply, 'need formatting') > 0, 'an unformatted Fortran file is refused')
+    call execute_command_line('printf "ext/*\n" > '//work//'-clone/.fortyard/format-exclude && '// &
+        git//'-C '//work//'-clone add -A && '//git//'-C '//work//'-clone commit -q -m '// &
+        '"Exclude ext" && '//git//'-C '//work//'-clone push -q '//url//' HEAD:style', exitstat=stat)
+    reply = post('/api/v1/repos/demo/land', '{"branch":"style"}')
+    call wait_landing(7, 'landed')
+
     call proc_kill(sup, SIGTERM)
     call proc_wait(sup, stat)
     print '(a)', 'git over HTTP: all checks passed'

@@ -62,7 +62,13 @@ and review. Every push of a change creates a new **version** of it.
 - **Landing.** A change lands as one squashed commit; a stack lands as one
   commit per change. Each commit's subject ends in its own `(#123)`; the message
   carries its description and the trailers `Change: <URL>` and
-  `Change-Id: <ID>` of that change.
+  `Change-Id: <ID>` of that change. A branch that is `main` plus one merge
+  commit lands as that merge, so a merged history such as an upstream's stays
+  an ancestor of `main`; a merge onto an older `main` is refused and is redone
+  on the current one.
+- **Style.** Changed Fortran files must pass `fo fmt --check`, except those
+  matched by a shell pattern in `.fortyard/format-exclude` (one a line), for
+  code kept in another project's style.
 - **After landing.** The change page stays live. Its review state is also
   written to a git note (`refs/notes/review`), so `git log --notes=review`
   shows it without the browser.

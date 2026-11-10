@@ -1,7 +1,9 @@
 module fy_land
     !! Landing: a branch of a primary repository becomes one squashed commit on
     !! `main`, after the repository's check passed on exactly that commit; `main`
-    !! then moves forward to it and is pushed to the repository's mirror.
+    !! then moves forward to it and is pushed to the repository's mirror. A
+    !! branch that is `main` plus one merge commit lands as that merge, so the
+    !! merged history (such as an upstream's) stays an ancestor of `main`.
     use fy_proc, only: proc_run, proc_find
     implicit none
     private
@@ -27,9 +29,14 @@ module fy_land
         '[ "$s" -gt 1048576 ] || continue; ok=; if [ -f .fortyard/allow-large ]; then '// &
         'while IFS= read -r p; do case "$f" in $p) ok=1;; esac; done < .fortyard/allow-large; '// &
         'fi; [ -n "$ok" ] || echo "$f ($s bytes)"; done'
-    !! fo fmt --check on the Fortran files the landing adds or changes.
+    !! fo fmt --check on the Fortran files the landing adds or changes, except
+    !! those matched by a pattern in .fortyard/format-exclude (one shell pattern
+    !! a line), for code that follows another project's style.
     character(len=*), parameter :: FORMAT_CHECK = 'files=$(git diff --name-only '// &
-        '--diff-filter=AMR "$1" HEAD -- "*.f90" "*.F90" "*.f" "*.F"); [ -n "$files" ] || exit 0; '// &
+        '--diff-filter=AMR "$1" HEAD -- "*.f90" "*.F90" "*.f" "*.F" | while IFS= read -r f; do '// &
+        'if [ -f .fortyard/format-exclude ]; then while IFS= read -r p; do '// &
+        'case "$f" in $p) continue 2;; esac; done < .fortyard/format-exclude; fi; echo "$f"; '// &
+        'done); [ -n "$files" ] || exit 0; '// &
         '{ [ -f fpm.toml ] || [ -f CMakeLists.txt ]; } || exit 0; fo fmt --check $files 2>&1'
 
 contains
@@ -79,6 +86,7 @@ contains
         ! deferred-length strings.
         character(len=1024) :: range, author
         character(len=40) :: base
+        character(len=:), allocatable :: merged
         integer :: status, k, n
         logical :: has_main
 
@@ -107,16 +115,25 @@ contains
         has_main = status == 0
         num = itoa(next_number())
 
-        ! One squashed commit on top of main (or the first commit of main).
+        ! A branch that is main plus one merge commit lands as that merge.
+        merged = ''
+        if (has_main) then
+            call merge_parent(merged)
+            if (status /= 0) return
+        end if
+        ! Else one squashed commit on top of main (or the first commit of main).
         if (has_main) then
             range = 'origin/main..origin/'//branch
             call git([character(len=1024) :: 'checkout', '--quiet', '-B', 'landing', &
                 'origin/main'])
-            call git([character(len=1024) :: 'merge', '--squash', '--quiet', 'origin/'//branch])
-            if (status /= 0) then
-                log = 'The branch does not merge cleanly with main; rebase it onto main.'// &
-                    new_line('a')//out
-                return
+            if (len(merged) == 0) then
+                call git([character(len=1024) :: 'merge', '--squash', '--quiet', &
+                    'origin/'//branch])
+                if (status /= 0) then
+                    log = 'The branch does not merge cleanly with main; rebase it onto main.'// &
+                        new_line('a')//out
+                    return
+                end if
             end if
         else
             range = 'origin/'//branch
@@ -130,7 +147,7 @@ contains
             log = 'The branch has nothing that main does not have.'
             return
         end if
-        if (n == 1) then
+        if (n == 1 .or. len(merged) > 0) then
             call git([character(len=1024) :: 'log', '-1', '--format=%B', 'origin/'//branch])
             message = trim_trailing(out)
         else
@@ -147,16 +164,31 @@ contains
         call git([character(len=1024) :: 'log', '--reverse', '--format=%an <%ae>', trim(range)])
         author = first_line(out)
         call write_file(work//'/.git/LANDING_MSG', message//new_line('a'))
-        call git([character(len=1024) :: '-c', 'user.name=fortyard', '-c', &
-            'user.email=fortyard@localhost', 'commit', '--quiet', '--no-verify', &
-            '--author='//trim(author), '-F', '.git/LANDING_MSG'])
+        if (len(merged) > 0) then
+            ! The merge as it was resolved, on main and the merged commit, by the
+            ! merge's author.
+            call git([character(len=1024) :: 'log', '-1', '--format=%an%n%ae', 'origin/'//branch])
+            k = index(out, new_line('a'))
+            call run([character(len=1024) :: 'env', 'GIT_AUTHOR_NAME='//out(1:k - 1), &
+                'GIT_AUTHOR_EMAIL='//first_line(out(k + 1:)), 'git', '-c', 'user.name=fortyard', &
+                '-c', 'user.email=fortyard@localhost', 'commit-tree', 'origin/'//branch//'^{tree}', &
+                '-p', 'origin/main', '-p', merged, '-F', '.git/LANDING_MSG'], work)
+            if (status == 0) call git([character(len=1024) :: 'checkout', '--quiet', '-B', &
+                'landing', first_line(out)])
+        else
+            call git([character(len=1024) :: '-c', 'user.name=fortyard', '-c', &
+                'user.email=fortyard@localhost', 'commit', '--quiet', '--no-verify', &
+                '--author='//trim(author), '-F', '.git/LANDING_MSG'])
+        end if
         if (status /= 0) then
-            log = 'The squashed commit could not be made.'//new_line('a')//out
+            log = 'The landing commit could not be made.'//new_line('a')//out
             return
         end if
 
+        ! A merge is checked for what differs from the merged history only.
         base = EMPTY_TREE
         if (has_main) base = 'HEAD~1'
+        if (len(merged) > 0) base = merged
         ! What local pre-commit hooks check, checked again on the landing commit,
         ! so nothing that skipped them reaches main.
         call run([character(len=1024) :: 'sh', '-c', SIZE_CHECK, 'size-check', &
@@ -216,6 +248,38 @@ contains
         call run([character(len=1024) :: 'rm', '-rf', work], '')
 
     contains
+
+        subroutine merge_parent(parent)
+            !! The second parent of the branch's tip when the tip is a merge whose
+            !! first parent is main, else ''. A merge onto an older main fails
+            !! (status 1): squashing it would drop the merged history.
+            character(len=:), allocatable, intent(out) :: parent
+            character(len=:), allocatable :: second, first, main
+
+            parent = ''
+            call git([character(len=1024) :: 'rev-parse', '--verify', '--quiet', &
+                'origin/'//branch//'^2'])
+            if (status /= 0) then
+                status = 0
+                return
+            end if
+            second = first_line(out)
+            call git([character(len=1024) :: 'rev-parse', 'origin/'//branch//'^1', 'origin/main'])
+            first = first_line(out)
+            main = out(len(first) + 2:)
+            main = first_line(main)
+            if (first == main) then
+                parent = second
+                return
+            end if
+            call git([character(len=1024) :: 'merge-base', '--is-ancestor', first, 'origin/main'])
+            if (status == 0) then
+                log = 'The branch is a merge onto an older main; merge again on the current main.'
+                status = 1
+                return
+            end if
+            status = 0
+        end subroutine merge_parent
 
         integer function next_number() result(m)
             !! One more than the highest "(#N)" ending a subject on main, so numbers
