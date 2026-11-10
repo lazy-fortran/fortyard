@@ -1264,28 +1264,58 @@ contains
     end function authenticated
 
     subroutine create_token(req, db, who, res)
-        !! A token can mint tokens for its own account with at most its scopes.
+        !! A token can mint tokens for its own account with at most its scopes:
+        !! all of them, or the space-separated subset named in "scopes", so a
+        !! runner on another host carries only the runner scope.
         type(http_request_t), intent(in) :: req
         type(db_t), intent(in) :: db
         type(token_identity_t), intent(in) :: who
         type(response_t), intent(inout) :: res
-        character(len=:), allocatable :: name, token
+        character(len=:), allocatable :: name, token, scopes, word
         logical :: found
-        integer :: stat
+        integer :: stat, at, space
 
         call json_extract_string(req%body, 'name', name, found)
         if (.not. found .or. len(name) == 0 .or. len(name) > 100) then
             call fail(res, 400, 'body must be {"name":"..."}')
             return
         end if
-        call store_token_create(db, who%account_id, name, who%scopes, token, stat)
+        call json_extract_string(req%body, 'scopes', scopes, found)
+        if (.not. found) then
+            scopes = who%scopes
+        else
+            scopes = trim(adjustl(scopes))
+            if (len(scopes) == 0 .or. len(scopes) > 200) then
+                call fail(res, 400, '"scopes" must name at least one scope')
+                return
+            end if
+            at = 1
+            do while (at <= len(scopes))
+                space = index(scopes(at:), ' ')
+                if (space == 0) then
+                    word = scopes(at:)
+                    at = len(scopes) + 1
+                else
+                    word = scopes(at:at + space - 2)
+                    at = at + space
+                end if
+                if (len(word) == 0) cycle
+                ! admin permits everything, so it may grant any narrower scope.
+                if (index(' '//who%scopes//' ', ' '//word//' ') == 0 .and. &
+                    index(' '//who%scopes//' ', ' admin ') == 0) then
+                    call fail(res, 403, 'a token cannot grant the scope '//word//' it lacks')
+                    return
+                end if
+            end do
+        end if
+        call store_token_create(db, who%account_id, name, scopes, token, stat)
         if (stat /= 0) then
             call fail(res, 500, 'token not created')
             return
         end if
         res%code = 201
         res%body = '{"token":"'//token//'","name":"'//json_escape_string(name)// &
-            '","scopes":"'//json_escape_string(who%scopes)//'"}'
+            '","scopes":"'//json_escape_string(scopes)//'"}'
     end subroutine create_token
 
     subroutine list_tokens(db, who, res)

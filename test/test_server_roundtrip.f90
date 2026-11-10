@@ -11,7 +11,7 @@ program test_server_roundtrip
     character(len=*), parameter :: path = 'build/test_server_roundtrip.db'
     character(len=2), parameter :: CRLF = achar(13)//achar(10)
     type(db_t) :: db
-    character(len=:), allocatable :: token, reply, cookie
+    character(len=:), allocatable :: token, reply, cookie, narrow
     integer :: lfd, port, stat, k, u
 
     call execute_command_line('rm -f '//path//' '//path//'-wal '//path//'-shm')
@@ -38,6 +38,16 @@ program test_server_roundtrip
         token//CRLF//'Content-Length: 15'//CRLF//CRLF//'{"name":"ci-1"}')
     call check(index(reply, 'HTTP/1.1 201') == 1 .and. index(reply, '"token":"fy_') > 0, &
         'token creation')
+
+    reply = exchange('POST /api/v1/tokens HTTP/1.1'//CRLF//'Authorization: Bearer '// &
+        token//CRLF//'Content-Length: 37'//CRLF//CRLF//'{"name":"runner-1","scopes":"runner"}')
+    call check(index(reply, 'HTTP/1.1 201') == 1 .and. index(reply, '"scopes":"runner"') > 0, &
+        'a token with a subset of the scopes')
+    narrow = reply(index(reply, '"token":"') + 9:)
+    narrow = narrow(1:index(narrow, '"') - 1)
+    reply = exchange('POST /api/v1/tokens HTTP/1.1'//CRLF//'Authorization: Bearer '// &
+        narrow//CRLF//'Content-Length: 35'//CRLF//CRLF//'{"name":"other-1","scopes":"admin"}')
+    call check(index(reply, 'HTTP/1.1 403') == 1, 'a scope the creator lacks is refused')
 
     reply = exchange('DELETE /healthz HTTP/1.1'//CRLF//CRLF)
     call check(index(reply, 'HTTP/1.1 405') == 1, 'other methods rejected')
