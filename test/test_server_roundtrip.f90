@@ -3,18 +3,22 @@ program test_server_roundtrip
     !! until the server accepts and answers it.
     use fy_posix, only: tcp_listen, tcp_accept, tcp_connect, sock_send_all, &
         sock_recv, sock_close, sock_bound_port
-    use fy_server, only: serve_connection, server_set_web_dir
+    use fy_server, only: serve_connection, server_set_web_dir, server_set_data_dir
+    use fx_hash, only: sha256_string
     use fy_sqlite, only: db_t, db_close
     use fy_store, only: store_open, store_bootstrap
     implicit none
 
     character(len=*), parameter :: path = 'build/test_server_roundtrip.db'
+    character(len=*), parameter :: data_dir = 'build/test_server_roundtrip_data'
     character(len=2), parameter :: CRLF = achar(13)//achar(10)
     type(db_t) :: db
     character(len=:), allocatable :: token, reply, cookie, narrow
     integer :: lfd, port, stat, k, u
 
     call execute_command_line('rm -f '//path//' '//path//'-wal '//path//'-shm')
+    call execute_command_line('rm -rf '//data_dir//' && mkdir -p '//data_dir//'/repos')
+    call server_set_data_dir(data_dir)
     call store_open(path, db, stat)
     call check(stat == 0, 'store opens')
     call store_bootstrap(db, token, stat)
@@ -48,6 +52,8 @@ program test_server_roundtrip
     reply = exchange('POST /api/v1/tokens HTTP/1.1'//CRLF//'Authorization: Bearer '// &
         narrow//CRLF//'Content-Length: 35'//CRLF//CRLF//'{"name":"other-1","scopes":"admin"}')
     call check(index(reply, 'HTTP/1.1 403') == 1, 'a scope the creator lacks is refused')
+
+    call check_cache()
 
     reply = exchange('DELETE /healthz HTTP/1.1'//CRLF//CRLF)
     call check(index(reply, 'HTTP/1.1 405') == 1, 'other methods rejected')
@@ -155,6 +161,40 @@ program test_server_roundtrip
     call db_close(db)
 
 contains
+
+    subroutine check_cache()
+        !! The shared build cache: upload with checksum, download with it,
+        !! refused checksums, other namespaces and unknown keys.
+        character(len=*), parameter :: key = &
+            '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+        character(len=*), parameter :: object = 'compiled object bytes'
+        character(len=64) :: sha
+        character(len=16) :: n
+
+        sha = sha256_string(object)
+        write (n, '(i0)') len(object)
+        reply = exchange('PUT /cache/v1/shared/'//key//' HTTP/1.1'//CRLF//'Authorization: Bearer '// &
+            token//CRLF//'X-Content-SHA256: '//sha//CRLF//'Content-Length: '//trim(n)//CRLF// &
+            CRLF//object)
+        call check(index(reply, 'HTTP/1.1 201') == 1, 'an object is uploaded to the shared cache')
+        reply = exchange('GET /cache/v1/shared/'//key//' HTTP/1.1'//CRLF//'Authorization: Bearer '// &
+            token//CRLF//CRLF)
+        call check(index(reply, 'HTTP/1.1 200') == 1 .and. index(reply, object) > 0 .and. &
+            index(reply, 'X-Content-SHA256: '//sha) > 0, 'it is downloaded with its checksum')
+        reply = exchange('PUT /cache/v1/shared/'//key//' HTTP/1.1'//CRLF//'Authorization: Bearer '// &
+            token//CRLF//'X-Content-SHA256: '//repeat('0', 64)//CRLF//'Content-Length: '// &
+            trim(n)//CRLF//CRLF//object)
+        call check(index(reply, 'HTTP/1.1 422') == 1, 'a wrong checksum is refused')
+        reply = exchange('PUT /cache/v1/u999/'//key//' HTTP/1.1'//CRLF//'Authorization: Bearer '// &
+            token//CRLF//'X-Content-SHA256: '//sha//CRLF//'Content-Length: '//trim(n)//CRLF// &
+            CRLF//object)
+        call check(index(reply, 'HTTP/1.1 403') == 1, 'another account''s namespace is refused')
+        reply = exchange('GET /cache/v1/shared/'//repeat('f', 64)//' HTTP/1.1'//CRLF// &
+            'Authorization: Bearer '//token//CRLF//CRLF)
+        call check(index(reply, 'HTTP/1.1 404') == 1, 'an unknown key is not cached')
+        reply = exchange('GET /cache/v1/shared/'//key//' HTTP/1.1'//CRLF//CRLF)
+        call check(index(reply, 'HTTP/1.1 401') == 1, 'the cache needs a token')
+    end subroutine check_cache
 
     function exchange(request) result(response)
         character(len=*), intent(in) :: request

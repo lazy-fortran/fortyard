@@ -26,6 +26,7 @@ module fy_server
     use fy_proc, only: proc_fork, proc_wait_any, proc_exit, proc_pid, &
         proc_die_with_parent, proc_sleep_ms, proc_poll_child, proc_readlink, proc_reexec, proc_kill, proc_wait, SIGTERM
     use fx_hash, only: sha256_file
+    use fy_cache, only: cache_route, cache_serve
     use fy_store, only: store_account_find, random_token
     use fy_store, only: token_identity_t, token_info_t, store_token_lookup, store_token_create, &
         store_open, store_token_list, store_token_revoke, store_token_revoke_hash, repo_info_t, &
@@ -695,7 +696,7 @@ contains
         type(db_t), intent(in) :: db
         type(http_request_t) :: req
         type(response_t) :: res
-        character(len=:), allocatable :: rest, repo, version
+        character(len=:), allocatable :: rest, repo, version, namespace, key
         integer :: status
         logical :: write
 
@@ -720,6 +721,10 @@ contains
             end if
             if (release_upload_route(req, repo, version)) then
                 call release_upload(cfd, req, rest, db, repo, version)
+                return
+            end if
+            if (allocated(repos_dir) .and. cache_route(req, namespace, key)) then
+                call cache_serve(cfd, req, rest, db, repos_dir//'/..', namespace, key)
                 return
             end if
             call http_read_body(cfd, req, rest, status)
