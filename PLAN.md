@@ -186,6 +186,53 @@ elsewhere.
   pull requests; staging and promotion for live services.
 - M11 MILCA and further code repositories move to fortyard.
 
+## Study readiness
+
+A controlled study of integration policies with many agents
+(`plasma/proj/agent-productivity` on the TU Graz GitLab) runs on fortyard.
+Every feature it needs is finished before its first run. The study counts
+steps, tool calls, tokens and metered compute and never relies on measured
+model speed. Items that also appear in milestones above are pulled forward;
+the others are new.
+
+- [ ] S1 Policy settings per repository: tests before landing (full suite,
+      affected cases within a budget, none), review before or after landing,
+      bisection and repair on or off, batch size, limit on unreviewed
+      changes. Defaults keep today's behaviour.
+- [ ] S2 `fy runner` with leases, heartbeats and per-case limits (M3).
+- [ ] S3 Batched merge queue that blames a change only when the failure
+      reproduces with that change alone (M8).
+- [ ] S4 Continuous pool: candidates by key change, staleness and audit
+      draw, ordered by staleness, failure likelihood and cost
+      ([Testing at scale](doc/testing-at-scale.md#the-pool-and-its-scheduler)).
+- [ ] S5 Bisection of changed outcomes and a repair task for the author of
+      the culprit commit.
+- [ ] S6 Review and triage agent (M4b) with flags for a person and random
+      spot checks of unflagged changes; budgets in tokens and steps, never in
+      seconds, and no durations in anything the model sees; transcripts
+      linked to outcomes.
+- [ ] S7 Outside implementers: the API leases implement and repair tasks to a
+      client that runs its own harness and submits the result as a change,
+      with model identity, steps and tokens recorded.
+- [ ] S8 Campaign mode: an instance started from a campaign file runs on a
+      virtual clock (nominal durations from token counts and metered CPU
+      time), runs at most one agent session at a time, draws all random
+      choices from a seed and writes a complete campaign record.
+
+**Done when** a dress rehearsal passes on a local instance: one small
+campaign under each of the study's three policies on a small repository,
+with seeded defects, ground truth and complete records, without anyone
+stepping in.
+
+**Safety.** The production instance shares faepkub3 with code.tugraz.at.
+
+- Every study feature is off by default; production enables none of them
+  until Chris decides.
+- The container limits in `deploy/compose/compose.yaml` are not raised.
+- Campaigns, pool load and agent runs for the study use local instances
+  (`scripts/dev-up.sh`), never production; full test suites of large codes
+  run on the cluster.
+
 ## Work in fo
 
 Tracked in fo; needed from M3 on (see

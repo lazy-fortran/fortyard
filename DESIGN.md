@@ -362,8 +362,9 @@ Rules:
   input and tool output go to a redacted trace and never become a review body.
 - fortyard performs every commit, push and pull-request operation. The agent
   never merges.
-- Runs have a wall-clock budget, not a turn limit, with time reserved for the
-  final submission. Repeated identical commands are suppressed with recovery
+- Runs have a budget in tokens and steps, with part of it reserved for the
+  final submission. Nothing the model sees contains durations, so its
+  behaviour does not depend on the speed of the machine. Repeated identical commands are suppressed with recovery
   hints.
 - When the conversation approaches the model's context limit, the harness
   replaces older turns with a summary of established facts and a list of the
