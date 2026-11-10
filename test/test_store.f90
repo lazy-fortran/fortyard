@@ -2,7 +2,8 @@ program test_store
     use fy_sqlite, only: db_t, db_close, db_exec
     use fy_store, only: store_open, store_bootstrap, store_token_lookup, &
         store_token_create, store_schema_version, token_identity_t, SCHEMA_VERSION, &
-        store_snapshot, store_check_add, store_check_claim, store_check_finish
+        store_snapshot, store_check_add, store_check_claim, store_check_finish, &
+        store_check_release
     use, intrinsic :: iso_fortran_env, only: int64
     implicit none
 
@@ -10,7 +11,7 @@ program test_store
     type(db_t) :: db
     type(token_identity_t) :: who
     character(len=:), allocatable :: admin, second, again
-    integer :: stat
+    integer :: stat, released
     integer(int64) :: id
     character(len=:), allocatable :: repo, ref
     logical :: found
@@ -80,6 +81,13 @@ program test_store
         stat)
     call store_check_claim(db, 'r2', id, repo, ref, found)
     call check(found .and. ref == 'refs/c', 'another runner takes a check that has waited')
+    ! A runner that restarts hands back the check it held; it runs again.
+    call store_check_release(db, 'r1', released)
+    call check(released == 0, 'a runner holding nothing hands nothing back')
+    call store_check_release(db, 'r2', released)
+    call check(released == 1, 'a restarted runner hands back its running check')
+    call store_check_claim(db, 'r2', id, repo, ref, found)
+    call check(found .and. ref == 'refs/c', 'the handed back check is taken again')
     call db_close(db)
 
 contains

@@ -36,6 +36,7 @@ module fy_server
         store_open, store_token_list, store_token_revoke, store_token_revoke_hash, repo_info_t, &
         store_repo_add, store_repo_list, store_repo_fetched, store_repo_set_mode, landing_t, &
         store_landing_add, store_landing_next, store_landing_requeue, store_landing_finish, &
+        store_check_release, &
         store_landing_list, release_t, store_release_add, store_release_ready, store_release_list, &
         store_jobs, store_job, store_job_counts, store_jobs_state, store_snapshot, &
         store_check_add, store_check_claim, store_check_finish, store_check_get
@@ -1250,6 +1251,8 @@ contains
         !! POST /api/v1/checks/claim: the oldest queued check for the calling
         !! runner (200 with {"id","repo","ref"}, or 204 when there is none).
         !! POST /api/v1/checks/N/result {"passed":true|false,"log":"..."}.
+        !! POST /api/v1/checks/release: the calling runner's running checks
+        !! are queued again (it restarted).
         type(http_request_t), intent(in) :: req
         type(db_t), intent(in) :: db
         type(response_t), intent(inout) :: res
@@ -1265,6 +1268,13 @@ contains
         if (index(' '//who%scopes//' ', ' admin ') == 0 .and. &
             index(' '//who%scopes//' ', ' runner ') == 0) then
             call fail(res, 403, 'checks need the runner or admin scope')
+            return
+        end if
+        if (req%path == '/api/v1/checks/release') then
+            call store_check_release(db, who%token_name, k)
+            if (k > 0) call events_notify('checks')
+            write (num, '(i0)') k
+            res%body = '{"released":'//trim(num)//'}'
             return
         end if
         if (req%path == '/api/v1/checks/claim') then

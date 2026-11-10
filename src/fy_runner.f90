@@ -36,6 +36,7 @@ contains
             call remote_main(server, token, data_dir)
             return
         end if
+        call release_checks(server, token)
         call events_set_dir(data_dir//'/events')
         release = ''
         if (len(follow) > 0) release = proc_readlink(follow)
@@ -89,6 +90,7 @@ contains
         close (u)
         call proc_run([character(len=1024) :: 'chmod', '600', data_dir//'/credentials'], &
             out, stat, 4096)
+        call release_checks(server, token)
         last_cleanup = -1
         do
             call system_clock(now, rate)
@@ -119,6 +121,17 @@ contains
             call proc_sleep_ms(5000)
         end do
     end subroutine remote_main
+
+    subroutine release_checks(server, token)
+        !! A starting runner hands back the checks it held when it stopped
+        !! (killed or updated), so they run again instead of waiting for a
+        !! result that never comes. Each runner has a token of its own.
+        character(len=*), intent(in) :: server, token
+        character(len=:), allocatable :: body
+        integer :: code, stat
+        call client_request(server, 'POST', '/api/v1/checks/release', token, '{}', code, body, &
+            stat)
+    end subroutine release_checks
 
     subroutine run_one(server, token, data_dir, claim, remote)
         character(len=*), intent(in) :: server, token, data_dir, claim

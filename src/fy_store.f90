@@ -18,7 +18,8 @@ module fy_store
     public :: store_landing_finish, store_landing_list
     public :: release_t, store_release_add, store_release_ready, store_release_list
     public :: store_jobs, store_job, store_job_counts, store_jobs_state
-    public :: store_check_add, store_check_claim, store_check_finish, store_check_get
+    public :: store_check_add, store_check_claim, store_check_finish, store_check_get, &
+        store_check_release
 
     integer, parameter, public :: SCHEMA_VERSION = 11
 
@@ -814,6 +815,25 @@ contains
         end if
         call stmt_finalize(st)
     end subroutine store_check_claim
+
+    subroutine store_check_release(db, runner, count)
+        !! Queues the running checks of `runner` again; `count` of them.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: runner
+        integer, intent(out) :: count
+        type(stmt_t) :: st
+        integer :: stat
+
+        count = 0
+        call db_prepare(db, "UPDATE checks SET state = 'queued', runner = NULL, claimed_at = NULL"// &
+            " WHERE state = 'running' AND runner = ?1 RETURNING id;", st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, runner, stat)
+        do while (stmt_step(st) == SQLITE_ROW)
+            count = count + 1
+        end do
+        call stmt_finalize(st)
+    end subroutine store_check_release
 
     subroutine store_check_finish(db, id, state, log, found)
         !! Records the result of a running check: "passed" or "failed".
