@@ -7,7 +7,7 @@ module fy_runner
     !! repository fetched over the API's git endpoint, asks for work every few
     !! seconds, and stops when the server runs a different release, so that it
     !! restarts on the same one. Either way it talks to the server over its API.
-    use, intrinsic :: iso_fortran_env, only: error_unit
+    use, intrinsic :: iso_fortran_env, only: error_unit, int64
     use fx_json_build, only: json_escape_string
     use fx_json_parse, only: json_extract_string
     use fy_client, only: client_request
@@ -71,6 +71,7 @@ contains
         character(len=*), intent(in) :: server, token, data_dir
         character(len=:), allocatable :: body, out, commit, host
         integer :: code, stat, u, ios, s, e
+        integer(int64) :: now, rate, last_cleanup
 
         call proc_run([character(len=1024) :: 'mkdir', '-p', data_dir//'/mirrors'], out, &
             stat, 4096)
@@ -88,7 +89,13 @@ contains
         close (u)
         call proc_run([character(len=1024) :: 'chmod', '600', data_dir//'/credentials'], &
             out, stat, 4096)
+        last_cleanup = -1
         do
+            call system_clock(now, rate)
+            if (last_cleanup < 0 .or. now - last_cleanup > 3600*rate) then
+                call expire_state(data_dir)
+                last_cleanup = now
+            end if
             call client_request(server, 'GET', '/api/v1/version', '', '', code, body, stat)
             if (stat == 0 .and. code == 200) then
                 commit = ''
@@ -116,7 +123,7 @@ contains
     subroutine run_one(server, token, data_dir, claim, remote)
         character(len=*), intent(in) :: server, token, data_dir, claim
         logical, intent(in), optional :: remote
-        character(len=:), allocatable :: repo, ref, out, body, work, id
+        character(len=:), allocatable :: repo, ref, out, body, work, id, kept
         character(len=256) :: tmp
         ! Fixed length: gfortran overflows typed array constructors around
         ! deferred-length strings.
@@ -172,11 +179,70 @@ contains
             out = 'The runner could not check out '//ref//'.'//new_line('a')//out
             code = 1
         else
+            ! The work tree is kept between checks with its build directory.
+            ! A failure is confirmed from an empty build directory before it
+            ! is reported, so stale build state can never fail a landing.
+            call proc_run([character(len=1024) :: 'touch', w], body, stat, 4096)
             call land_check(work, out, code)
+            if (code /= 0) then
+                inquire (file=work//'/build/.', exist=found)
+                if (found) then
+                    kept = out
+                    call proc_run([character(len=1024) :: 'rm', '-rf', trim(w)//'/build'], &
+                        body, stat, 4096)
+                    call land_check(work, out, code)
+                    out = 'With the kept build directory the check failed; it was rerun '// &
+                        'from an empty build directory.'//new_line('a')// &
+                        '--- with the kept build directory (end) ---'//new_line('a')// &
+                        tail_text(kept, 4000)//new_line('a')// &
+                        '--- from an empty build directory ---'//new_line('a')//out
+                end if
+            end if
+            out = out//new_line('a')//disk_report(trim(tmp), data_dir)
         end if
         call client_request(server, 'POST', '/api/v1/checks/'//id//'/result', token, &
             '{"passed":'//merge('true ', 'false', code == 0)//',"log":"'// &
             json_escape_string(out)//'"}', code, body, stat)
     end subroutine run_one
+
+    subroutine expire_state(data_dir)
+        !! Work trees and mirrors of repositories not checked for 30 days are
+        !! removed, so a persistent runner's disk use stays bounded; ccache
+        !! and fo's cache bound themselves (CCACHE_MAXSIZE, FO_CACHE_MAX_SIZE).
+        character(len=*), intent(in) :: data_dir
+        character(len=256) :: tmp
+        character(len=:), allocatable :: out
+        integer :: n, stat
+
+        call get_environment_variable('TMPDIR', tmp, n, stat)
+        if (stat /= 0 .or. n == 0) tmp = '/tmp'
+        call proc_run([character(len=1024) :: 'sh', '-c', &
+            'for d in "$1/fy-work" "$2/mirrors"; do [ -d "$d" ] && '// &
+            'find "$d" -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} +; done; true', &
+            'expire', trim(tmp), data_dir], out, stat, 4096)
+    end subroutine expire_state
+
+    function disk_report(tmp, data_dir) result(text)
+        !! The runner's disk use, appended to every check log so growth shows.
+        character(len=*), intent(in) :: tmp, data_dir
+        character(len=:), allocatable :: text
+        integer :: stat
+
+        call proc_run([character(len=1024) :: 'sh', '-c', &
+            'printf "runner disk:"; for d in "$1/fy-work" "$2/mirrors" "${CCACHE_DIR:-}" '// &
+            '"${FO_CACHE_DIR:-}"; do [ -n "$d" ] && [ -d "$d" ] && '// &
+            'printf " %s %s" "$(basename "$d")" "$(du -sh "$d" 2>/dev/null | cut -f1)"; done; '// &
+            'printf "; free %s\\n" "$(df -h "$1" | awk ''NR==2 {print $4}'')"', &
+            'disk', tmp, data_dir], text, stat, 4096)
+    end function disk_report
+
+    function tail_text(text, n) result(tail)
+        character(len=*), intent(in) :: text
+        integer, intent(in) :: n
+        character(len=:), allocatable :: tail
+
+        tail = text
+        if (len(text) > n) tail = text(len(text) - n + 1:)
+    end function tail_text
 
 end module fy_runner

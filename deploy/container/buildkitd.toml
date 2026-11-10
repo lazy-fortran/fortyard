@@ -1,0 +1,9 @@
+# fortyard's own BuildKit instance (`docker buildx create --name fortyard`,
+# see scripts/buildx-builder.sh). Its cache is separate from the host's
+# default builder, which other services on the same host use, and its
+# garbage collection keeps it within these bounds.
+[worker.oci]
+  gc = true
+  reservedSpace = "5GB"
+  maxUsedSpace = "30GB"
+  minFreeSpace = "50GB"

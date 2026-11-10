@@ -13,8 +13,9 @@ v=0.13.0
 sha=$(curl -fsSL "https://github.com/fortran-lang/fpm/releases/download/v$v/fpm-$v-linux-x86_64-gcc-12.sha256" | cut -d' ' -f1)
 ctx=$(mktemp -d "${TMPDIR:-/var/tmp}/fy-toolchain.XXXXXX")
 trap 'rm -rf "$ctx"' EXIT
-docker build --quiet --target base --build-arg FPM_SHA256="$sha" -f "$dockerfile" \
-    -t fortyard-toolchain-base "$ctx" >/dev/null
+builder=$("$(dirname "$0")/buildx-builder.sh")
+docker buildx build --builder "$builder" --load --quiet --target base \
+    --build-arg FPM_SHA256="$sha" -f "$dockerfile" -t fortyard-toolchain-base "$ctx" >/dev/null
 mkdir -p "$home"
 if [ -d "$home/fo/.git" ]; then
     git -C "$home/fo" fetch --quiet origin
@@ -25,5 +26,6 @@ git -C "$home/fo" checkout --quiet --force "$FO_REV"
 docker run --rm --init --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$home/fo:/work" -w /work \
     fortyard-toolchain-base fpm install --profile release --prefix /work/prefix >/dev/null
 cp "$home/fo/prefix/bin/fo" "$ctx/fo"
-docker build --quiet --build-arg FPM_SHA256="$sha" -f "$dockerfile" -t "$tag" "$ctx" >/dev/null
+docker buildx build --builder "$builder" --load --quiet --build-arg FPM_SHA256="$sha" \
+    -f "$dockerfile" -t "$tag" "$ctx" >/dev/null
 echo "$tag"

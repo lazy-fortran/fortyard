@@ -79,8 +79,16 @@ INFO
                 ctx=$home/image-web
                 rm -rf "$ctx" && mkdir -p "$ctx"
                 git -C "$mirror" show "$head:deploy/container/Dockerfile.web" > "$ctx/Dockerfile"
-                docker build --quiet -t "$web_image" --build-arg LFORTRAN_REV="$rev" \
-                    --build-arg JOBS=8 "$ctx" >"$out.image.log" 2>&1 || {
+                git -C "$mirror" show "$head:deploy/container/buildkitd.toml" > "$ctx/buildkitd.toml"
+                git -C "$mirror" show "$head:scripts/buildx-builder.sh" > "$ctx/buildx-builder.sh"
+                # The helper resolves its config next to deploy/container.
+                mkdir -p "$ctx/scripts" "$ctx/deploy/container"
+                mv "$ctx/buildx-builder.sh" "$ctx/scripts/" && chmod 755 "$ctx/scripts/buildx-builder.sh"
+                mv "$ctx/buildkitd.toml" "$ctx/deploy/container/"
+                builder=$("$ctx/scripts/buildx-builder.sh")
+                docker buildx build --builder "$builder" --load --quiet -t "$web_image" \
+                    --build-arg LFORTRAN_REV="$rev" --build-arg JOBS=8 \
+                    -f "$ctx/Dockerfile" "$ctx" >"$out.image.log" 2>&1 || {
                     tail -30 "$out.image.log" >&2
                     return 1
                 }
@@ -121,6 +129,18 @@ INFO
         "{\"version\":\"$version\",\"commit\":\"$head\",\"notes\":\"$notes\"}" "$api" >/dev/null
     curl -fsS -m 300 -H "$auth" -H "X-Content-SHA256: $sha" -T "$out.tar" \
         "$api/$version/release.tar" >/dev/null
+    # Web images of earlier LFortran pins are removed by name; the current one
+    # and the one before it stay, and nothing else on the host is touched.
+    if [ -n "${web_image:-}" ]; then
+        prev=$(cat "$home/web.image" 2>/dev/null || true)
+        if [ "$prev" != "$web_image" ]; then
+            for old in $(docker image ls fortyard-web --format '{{.Repository}}:{{.Tag}}' |
+                grep ':lf-' || true); do
+                [ "$old" = "$web_image" ] || [ "$old" = "$prev" ] || docker image rm "$old" >/dev/null 2>&1 || true
+            done
+            echo "$web_image" > "$home/web.image"
+        fi
+    fi
     # The builder updates itself: a release with a different builder script
     # replaces this one, which then restarts as the new version.
     if [ -f "$out/scripts/release-builder.sh" ] &&

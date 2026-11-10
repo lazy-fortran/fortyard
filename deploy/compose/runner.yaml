@@ -18,7 +18,13 @@ services:
       FY_RUNNER: "@HOME@"
       HOME: /tmp
       TMPDIR: "@HOME@/tmp"
+      # Bounded caches that persist between checks (ccache and fo evict the
+      # oldest entries themselves); base_dir lets work trees share hits.
       CCACHE_DIR: "@HOME@/ccache"
+      CCACHE_MAXSIZE: "20G"
+      CCACHE_BASEDIR: "@HOME@/tmp/fy-work"
+      FO_CACHE_DIR: "@HOME@/fo-cache"
+      FO_CACHE_MAX_SIZE: "20G"
     volumes:
       - "@HOME@:@HOME@"
     entrypoint: ["@HOME@/bin/remote-runner.sh"]

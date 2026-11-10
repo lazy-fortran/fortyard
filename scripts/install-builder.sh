@@ -12,8 +12,9 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p "$dir/bin"
 cp "$here/scripts/release-builder.sh" "$dir/bin/release-builder.sh"
 chmod 755 "$dir/bin/release-builder.sh"
-docker build --quiet -t fortyard-builder:1 -f "$here/deploy/container/Dockerfile.builder" \
-    "$here/deploy/container" >/dev/null
+builder=$("$here/scripts/buildx-builder.sh")
+docker buildx build --builder "$builder" --load --quiet -t fortyard-builder:1 \
+    -f "$here/deploy/container/Dockerfile.builder" "$here/deploy/container" >/dev/null
 dgid=$(stat -c %g /var/run/docker.sock)
 sed -e "s|@UID@|$(id -u)|g" -e "s|@GID@|$(id -g)|g" -e "s|@DOCKER_GID@|$dgid|g" \
     -e "s|@TARGET@|$target|g" -e "s|@HOME@|$dir|g" -e "s|@TOOLCHAIN@|$toolchain|g" \

@@ -2,7 +2,9 @@ program test_runner
     !! With checks left to a runner, a landing waits for a separate runner
     !! process: a passing check lands, a failing one does not, and the commit's
     !! temporary check ref is gone afterwards. A remote runner, with its own
-    !! empty data directory, checks a third landing through the API alone.
+    !! empty data directory, checks a third landing through the API alone. The
+    !! build directory is kept between checks, and a failure is confirmed from
+    !! an empty one before it is reported.
     use, intrinsic :: iso_fortran_env, only: int64
     use fy_posix, only: tcp_listen, tcp_connect, sock_send_all, sock_recv, sock_close, &
         sock_bound_port, sock_set_timeouts
@@ -80,6 +82,9 @@ program test_runner
     reply = get('/api/v1/jobs/2')
     call check(index(reply, 'runner says hi') > 0, 'a failing check reports the runner''s output')
     call check(index(reply, 'checks seen 2') > 0, 'the build directory is kept between checks')
+    call check(index(reply, 'rerun from an empty build directory') > 0 .and. &
+        index(reply, 'checks seen 1') > 0, 'a failure is confirmed from an empty build directory')
+    call check(index(reply, 'runner disk:') > 0, 'the check log reports the runner''s disk use')
 
     call proc_kill(run, SIGTERM)
     call proc_wait(run, stat)
