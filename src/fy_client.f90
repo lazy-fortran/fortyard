@@ -1,8 +1,12 @@
 module fy_client
-    !! Plain-HTTP client for a fortyard server inside a private network, and
-    !! the stored login. HTTPS servers will go through libcurl.
+    !! HTTP client for a fortyard server, and the stored login. Plain HTTP
+    !! inside a private network is spoken directly; an https:// server is
+    !! reached through curl (as the sign-in does), so runners on other hosts
+    !! can use the public address.
     use fy_posix, only: tcp_connect, sock_send_all, sock_recv, sock_close, &
         sock_set_timeouts
+    use fy_proc, only: proc_find, proc_spawn, fd_read, fd_write_all, fd_close, &
+        proc_exit_status
     implicit none
     private
 
@@ -17,6 +21,82 @@ module fy_client
     end type config_t
 
 contains
+
+    subroutine curl_request(server, method, path, token, payload, code, body, stat)
+        !! One request through curl. Token and payload go to curl on standard
+        !! input as its configuration, never on its command line; the status
+        !! code follows the body on a line of its own.
+        character(len=*), intent(in) :: server, method, path, token, payload
+        integer, intent(out) :: code, stat
+        character(len=:), allocatable, intent(out) :: body
+        character(len=:), allocatable :: curl, conf
+        character(len=65536) :: buf
+        character(len=16) :: argv(3)
+        character(len=40) :: env(1)
+        integer :: pid, to_child, from_child, n, cut, ios
+
+        code = 0
+        body = ''
+        stat = 1
+        curl = proc_find('curl')
+        if (len(curl) == 0) return
+        conf = 'url = "'//quoted(server//path)//'"'//new_line('a')// &
+            'request = "'//method//'"'//new_line('a')// &
+            'max-time = 60'//new_line('a')//'silent'//new_line('a')// &
+            'proto = "=https"'//new_line('a')// &
+            'write-out = "\n%{http_code}"'//new_line('a')
+        if (len(token) > 0) conf = conf//'header = "Authorization: Bearer '// &
+            quoted(token)//'"'//new_line('a')
+        if (method /= 'GET') conf = conf//'header = "Content-Type: application/json"'// &
+            new_line('a')//'data-binary = "'//quoted(payload)//'"'//new_line('a')
+        argv(1) = 'curl'
+        argv(2) = '-K'
+        argv(3) = '-'
+        env(1) = 'PATH=/usr/local/bin:/usr/bin:/bin'
+        call proc_spawn(curl, argv, env, pid, to_child, from_child)
+        if (pid < 0) return
+        call fd_write_all(to_child, conf, stat)
+        call fd_close(to_child)
+        do
+            n = fd_read(from_child, buf)
+            if (n <= 0) exit
+            if (len(body) + n > 16777216) exit
+            body = body//buf(1:n)
+        end do
+        call fd_close(from_child)
+        stat = proc_exit_status(pid)
+        if (stat /= 0) return
+        cut = index(body, new_line('a'), back=.true.)
+        read (body(cut + 1:), *, iostat=ios) code
+        if (ios /= 0) then
+            stat = 1
+            return
+        end if
+        body = body(1:max(0, cut - 1))
+    end subroutine curl_request
+
+    function quoted(text) result(out)
+        !! text inside a double-quoted curl configuration value.
+        character(len=*), intent(in) :: text
+        character(len=:), allocatable :: out
+        integer :: i
+
+        out = ''
+        do i = 1, len(text)
+            select case (text(i:i))
+            case ('"', '\')
+                out = out//'\'//text(i:i)
+            case (achar(10))
+                out = out//'\n'
+            case (achar(13))
+                out = out//'\r'
+            case (achar(9))
+                out = out//'\t'
+            case default
+                out = out//text(i:i)
+            end select
+        end do
+    end function quoted
 
     subroutine parse_url(url, host, port, base, stat)
         !! Accepts http://HOST[:PORT][/PREFIX]; HOST must be an IPv4 address.
@@ -64,6 +144,10 @@ contains
 
         code = 0
         body = ''
+        if (index(server, 'https://') == 1) then
+            call curl_request(server, method, path, token, payload, code, body, stat)
+            return
+        end if
         call parse_url(server, host, port, base, stat)
         if (stat /= 0) return
         call tcp_connect(host, port, fd, stat)

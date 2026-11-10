@@ -1,7 +1,8 @@
 program test_runner
     !! With checks left to a runner, a landing waits for a separate runner
     !! process: a passing check lands, a failing one does not, and the commit's
-    !! temporary check ref is gone afterwards.
+    !! temporary check ref is gone afterwards. A remote runner, with its own
+    !! empty data directory, checks a third landing through the API alone.
     use, intrinsic :: iso_fortran_env, only: int64
     use fy_posix, only: tcp_listen, tcp_connect, sock_send_all, sock_recv, sock_close, &
         sock_bound_port, sock_set_timeouts
@@ -13,6 +14,7 @@ program test_runner
     implicit none
 
     character(len=*), parameter :: data = 'build/test_runner_data', work = 'build/test_runner_work'
+    character(len=*), parameter :: remote_dir = 'build/test_runner_remote'
     character(len=*), parameter :: git = 'env GIT_TERMINAL_PROMPT=0 GIT_CONFIG_GLOBAL=/dev/null '// &
         'GIT_CONFIG_NOSYSTEM=1 git -c user.name=T -c user.email=t@example.org -c credential.helper= '
     character(len=2), parameter :: CRLF = achar(13)//achar(10)
@@ -77,6 +79,22 @@ program test_runner
     reply = get('/api/v1/jobs/2')
     call check(index(reply, 'runner says hi') > 0, 'a failing check reports the runner''s output')
 
+    call proc_kill(run, SIGTERM)
+    call proc_wait(run, stat)
+    call execute_command_line('rm -rf '//remote_dir//' && mkdir -p '//remote_dir, exitstat=stat)
+    run = proc_fork()
+    if (run == 0) then
+        call runner_main('http://'//base, runner, remote_dir, '')
+        call proc_exit(0)
+    end if
+    call execute_command_line(git//'-C '//work//' fetch -q '//url//' main && '//git//'-C '// &
+        work//' checkout -q -B third FETCH_HEAD && printf "more\n" >> '//work//'/README && '// &
+        git//'-C '//work//' commit -q -am "More" && '//git//'-C '//work//' push -q '// &
+        url//' HEAD:third', exitstat=stat)
+    reply = post('/api/v1/repos/demo/land', '{"branch":"third"}')
+    call wait_landing(3, 'landed')
+    inquire (file=remote_dir//'/mirrors/demo.git/HEAD', exist=exists)
+    call check(exists, 'the remote runner checked out from its own mirror')
     call proc_kill(run, SIGTERM)
     call proc_wait(run, stat)
     call proc_kill(sup, SIGTERM)
