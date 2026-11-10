@@ -1,0 +1,26 @@
+# A landing-check runner on a build host (scripts/install-runner.sh fills in
+# the @...@ values). It runs `fy runner` in remote mode through
+# scripts/remote-runner.sh: checks and repositories over the API, its own
+# limits, nothing shared with the server's host.
+services:
+  fortyard-runner:
+    image: "@IMAGE@"
+    container_name: fortyard-runner
+    restart: unless-stopped
+    init: true
+    user: "@UID@:@GID@"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:size=4g,exec"]
+    environment:
+      FY_TARGET: "@TARGET@"
+      FY_RUNNER: "@HOME@"
+      HOME: /tmp
+      TMPDIR: "@HOME@/tmp"
+    volumes:
+      - "@HOME@:@HOME@"
+    entrypoint: ["@HOME@/bin/remote-runner.sh"]
+    mem_limit: "@MEMORY@"
+    cpus: "@CPUS@"
+    pids_limit: 2048
