@@ -40,6 +40,10 @@ program fy
         call cmd_jobs()
     case ('job')
         call cmd_job()
+    case ('push')
+        call cmd_push()
+    case ('change')
+        call cmd_change()
     case ('git-credential')
         call cmd_git_credential()
     case ('mcp')
@@ -80,6 +84,16 @@ contains
             '                      push HEAD to BRANCH, land it on main after its check', &
             '                      passed and follow it to the end (admin)', &
             '  land REPO BRANCH    land a branch that is already pushed', &
+            '  push [BRANCH]       push HEAD to BRANCH, which opens or updates its change', &
+            '  change list [--all] open changes (--all: also landed and closed ones)', &
+            '  change view N       a change with its versions, comments and landings', &
+            '  change diff N [--version V] [--from W]', &
+            '                      the diff of a version, or between versions W and V', &
+            '  change comment N [-m TEXT]   comment (TEXT or standard input)', &
+            '  change edit N [--title T] [--description-file F|-]', &
+            '  change land N [--no-wait]    land the change and follow it', &
+            '  change close N, change reopen N', &
+            '                      (change and push take --repo NAME outside a checkout)', &
             '  landings [REPO]     recent landings of a repository', &
             '  jobs [REPO]         running, waiting and recent jobs', &
             '  job ID [--wait]     a job''s state and log; --wait follows it', &
@@ -534,6 +548,200 @@ contains
             cli_field(body, 'state'), cli_field(body, 'log')
     end subroutine cmd_job
 
+    subroutine cmd_push()
+        !! fy push [BRANCH] [--repo NAME]: pushes HEAD to BRANCH (default: the
+        !! current branch), which opens a change or adds a version to it, and
+        !! names the change.
+        type(config_t) :: cfg
+        character(len=:), allocatable :: repo, branch, body, number
+        integer :: code, stat
+
+        call config_load(cfg)
+        call require_login(cfg)
+        repo = option('--repo', '')
+        if (len(repo) == 0) repo = remote_repo(cfg%server)
+        branch = positional(1)
+        if (len(branch) == 0) branch = git_line('git symbolic-ref --quiet --short HEAD')
+        if (len(branch) == 0 .or. branch == 'main') then
+            write (error_unit, '(a)') 'fy: name the branch to push: fy push BRANCH'
+            call quit(2)
+        end if
+        call push_head(cfg, repo, branch)
+        call client_request(cfg%server, 'GET', '/api/v1/repos/'//repo//'/changes', cfg%token, &
+            '', code, body, stat)
+        number = change_of_branch(body, branch)
+        if (len(number) == 0) then
+            write (output_unit, '(a)') 'pushed '//branch//' to '//repo
+        else
+            write (output_unit, '(a)') 'change #'//number//': '//cfg%server//'/'//repo// &
+                '/-/changes/'//number
+        end if
+    end subroutine cmd_push
+
+    function change_of_branch(body, branch) result(number)
+        !! The number of the change of `branch` in a change list, or ''.
+        character(len=*), intent(in) :: body, branch
+        character(len=:), allocatable :: number, rows, line
+        integer :: at, eol, sp
+
+        number = ''
+        rows = cli_table(body, 'changes', [character(len=8) :: 'branch', 'number'])
+        at = index(rows, new_line('a')) + 1
+        do while (at <= len(rows))
+            eol = index(rows(at:), new_line('a'))
+            if (eol == 0) eol = len(rows) - at + 2
+            line = rows(at:at + eol - 2)
+            at = at + eol
+            sp = index(line, ' ')
+            if (sp == 0) cycle
+            if (line(1:sp - 1) == branch) then
+                number = trim(adjustl(line(sp:)))
+                return
+            end if
+        end do
+    end function change_of_branch
+
+    subroutine cmd_change()
+        !! fy change list|view|diff|comment|edit|land|close|reopen ...
+        type(config_t) :: cfg
+        character(len=:), allocatable :: what, repo, n, body, path, payload, text, state
+        integer :: code, stat
+
+        call config_load(cfg)
+        call require_login(cfg)
+        what = positional(1)
+        n = positional(2)
+        repo = option('--repo', '')
+        if (len(repo) == 0) repo = remote_repo(cfg%server)
+        path = '/api/v1/repos/'//repo//'/changes'
+        if (what /= 'list' .and. (len(n) == 0 .or. verify(n, '0123456789') /= 0)) then
+            write (error_unit, '(a)') 'fy: usage: fy change '//what//' NUMBER'
+            call quit(2)
+        end if
+        select case (what)
+        case ('list')
+            state = 'open'
+            if (flag('--all')) state = 'all'
+            call client_request(cfg%server, 'GET', path//'?state='//state, cfg%token, '', &
+                code, body, stat)
+            if (stat /= 0 .or. code /= 200 .or. flag('--json')) call report(code, body, stat)
+            if (stat /= 0 .or. code /= 200 .or. flag('--json')) return
+            write (output_unit, '(a)', advance='no') cli_table(body, 'changes', &
+                [character(len=8) :: 'number', 'state', 'author', 'versions', 'branch', 'title'])
+        case ('view')
+            call client_request(cfg%server, 'GET', path//'/'//n, cfg%token, '', code, body, stat)
+            if (stat /= 0 .or. code /= 200 .or. flag('--json')) call report(code, body, stat)
+            if (stat /= 0 .or. code /= 200 .or. flag('--json')) return
+            write (output_unit, '(a)') '#'//n//' '//cli_field(body, 'title'), &
+                cli_field(body, 'state')//', '//cli_field(body, 'versions')// &
+                ' version(s) by '//cli_field(body, 'author')//', branch '// &
+                cli_field(body, 'branch'), cfg%server//'/'//repo//'/-/changes/'//n, ''
+            text = cli_field(body, 'description')
+            if (len(text) > 0) write (output_unit, '(a)') text, ''
+            text = cli_table(body, 'versions_list', [character(len=8) :: 'version', 'head', &
+                'pusher', 'created'])
+            if (len(text) > 0) write (output_unit, '(a)', advance='no') text
+            text = cli_table(body, 'comments', [character(len=8) :: 'account', 'created', 'body'])
+            if (len(text) > 0) write (output_unit, '(a)', advance='no') new_line('a')//text
+            text = cli_table(body, 'landings', [character(len=8) :: 'landing', 'state', 'commit'])
+            if (len(text) > 0) write (output_unit, '(a)', advance='no') new_line('a')//text
+        case ('diff')
+            text = ''
+            if (len(option('--version', '')) > 0) text = '?version='//option('--version', '')
+            if (len(option('--from', '')) > 0) then
+                if (len(text) == 0) then
+                    text = '?from='//option('--from', '')
+                else
+                    text = text//'&from='//option('--from', '')
+                end if
+            end if
+            call client_request(cfg%server, 'GET', path//'/'//n//'/diff'//text, cfg%token, '', &
+                code, body, stat)
+            call report(code, body, stat)
+        case ('comment')
+            text = option('-m', '')
+            if (len(text) == 0) text = read_stdin()
+            call client_request(cfg%server, 'POST', path//'/'//n//'/comments', cfg%token, &
+                '{"body":"'//json_escape_string(text)//'"}', code, body, stat)
+            if (stat /= 0 .or. code /= 201) call report(code, body, stat)
+            write (output_unit, '(a)') 'commented on #'//n
+        case ('edit')
+            payload = ''
+            if (len(option('--title', '')) > 0) payload = '"title":"'// &
+                json_escape_string(option('--title', ''))//'"'
+            if (len(option('--description-file', '')) > 0) then
+                if (option('--description-file', '') == '-') then
+                    text = read_stdin()
+                else
+                    text = read_file(option('--description-file', ''))
+                end if
+                if (len(payload) > 0) payload = payload//','
+                payload = payload//'"description":"'//json_escape_string(text)//'"'
+            end if
+            call client_request(cfg%server, 'POST', path//'/'//n, cfg%token, '{'//payload//'}', &
+                code, body, stat)
+            if (stat /= 0 .or. code /= 200) call report(code, body, stat)
+            write (output_unit, '(a)') 'edited #'//n
+        case ('close', 'reopen')
+            state = 'closed'
+            if (what == 'reopen') state = 'open'
+            call client_request(cfg%server, 'POST', path//'/'//n, cfg%token, &
+                '{"state":"'//state//'"}', code, body, stat)
+            if (stat /= 0 .or. code /= 200) call report(code, body, stat)
+            write (output_unit, '(a)') '#'//n//' '//state
+        case ('land')
+            call client_request(cfg%server, 'POST', path//'/'//n//'/land', cfg%token, '', &
+                code, body, stat)
+            if (stat /= 0 .or. code /= 202) call report(code, body, stat)
+            write (output_unit, '(a)') 'landing '//cli_field(body, 'landing')//' of #'//n// &
+                ' queued'
+            flush (output_unit)
+            if (.not. flag('--no-wait')) call follow_job(cfg, cli_field(body, 'landing'))
+        case default
+            write (error_unit, '(a)') 'fy: usage: fy change list|view|diff|comment|edit|'// &
+                'land|close|reopen'
+            call quit(2)
+        end select
+    end subroutine cmd_change
+
+    function read_stdin() result(text)
+        character(len=:), allocatable :: text
+        character(len=4096) :: line
+        integer :: ios, n
+        text = ''
+        do
+            read (*, '(a)', iostat=ios, size=n, advance='no') line
+            if (is_iostat_end(ios)) exit
+            text = text//line(1:n)
+            if (ios /= 0) text = text//new_line('a')
+            if (ios /= 0 .and. .not. is_iostat_eor(ios)) exit
+        end do
+        if (len(text) > 0) then
+            if (text(len(text):) == new_line('a')) text = text(1:len(text) - 1)
+        end if
+    end function read_stdin
+
+    function read_file(path) result(text)
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: text
+        integer :: u, ios, n
+        text = ''
+        open (newunit=u, file=path, access='stream', form='unformatted', action='read', &
+            status='old', iostat=ios)
+        if (ios /= 0) then
+            write (error_unit, '(a)') 'fy: cannot read '//path
+            call quit(1)
+        end if
+        inquire (unit=u, size=n)
+        deallocate (text)
+        allocate (character(len=n) :: text)
+        if (n > 0) read (u, iostat=ios) text
+        close (u)
+        if (len(text) > 0) then
+            if (text(len(text):) == new_line('a')) text = text(1:len(text) - 1)
+        end if
+    end function read_file
+
     subroutine quit(status)
         !! Ends fy with `status` after its output, without a runtime message.
         integer, intent(in) :: status
@@ -583,7 +791,7 @@ contains
         do while (i <= command_argument_count())
             if (index(arg(i), '--') == 1) then
                 select case (arg(i))
-                case ('--no-push', '--no-wait', '--wait', '--json', '--init')
+                case ('--no-push', '--no-wait', '--wait', '--json', '--init', '--all')
                     i = i + 1
                 case default
                     i = i + 2
@@ -661,7 +869,7 @@ contains
             call quit(1)
         end if
         write (output_unit, '(a)') body
-        if (code < 200 .or. code >= 300) error stop 1
+        if (code < 200 .or. code >= 300) call quit(1)
     end subroutine report
 
     subroutine cmd_mcp()

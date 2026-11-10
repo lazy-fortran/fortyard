@@ -20,7 +20,7 @@ module fy_store
     public :: store_jobs, store_job, store_job_counts, store_jobs_state
     public :: store_check_add, store_check_claim, store_check_finish, store_check_get
 
-    integer, parameter, public :: SCHEMA_VERSION = 8
+    integer, parameter, public :: SCHEMA_VERSION = 9
 
     type :: token_identity_t
         logical :: found = .false.
@@ -58,6 +58,8 @@ module fy_store
         integer(int64) :: id = 0
         character(len=:), allocatable :: repo, branch, account, state, created, finished
         character(len=:), allocatable :: commit, log, started
+        !! The change it lands (fy_change), or 0.
+        integer(int64) :: change = 0
     end type landing_t
 
     character(len=*), parameter :: NOW = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
@@ -199,6 +201,28 @@ contains
             ! The lander process (1, 2, ...) that runs a landing.
             call db_exec(db, 'BEGIN;ALTER TABLE landings ADD COLUMN lander INTEGER;'// &
                 'DELETE FROM schema_version; INSERT INTO schema_version VALUES (8);'// &
+                'COMMIT;', stat)
+            if (stat /= SQLITE_OK) then
+                call db_exec(db, 'ROLLBACK;', version)
+                return
+            end if
+        end if
+        if (store_schema_version(db) < 9) then
+            ! Changes (fy_change): one per reviewed branch, with its versions and
+            ! comments; a landing may land a change.
+            call db_exec(db, 'BEGIN;'// &
+                'CREATE TABLE changes (id INTEGER PRIMARY KEY, repo TEXT NOT NULL,'// &
+                ' number INTEGER NOT NULL, change_key TEXT NOT NULL, branch TEXT NOT NULL,'// &
+                ' title TEXT NOT NULL, description TEXT NOT NULL, author TEXT NOT NULL,'// &
+                " state TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL,"// &
+                ' updated_at TEXT NOT NULL, commit_id TEXT, UNIQUE (repo, number));'// &
+                'CREATE TABLE change_versions (change INTEGER NOT NULL, version INTEGER NOT NULL,'// &
+                ' head TEXT NOT NULL, base TEXT NOT NULL, pusher TEXT, created_at TEXT NOT NULL,'// &
+                ' PRIMARY KEY (change, version));'// &
+                'CREATE TABLE change_comments (id INTEGER PRIMARY KEY, change INTEGER NOT NULL,'// &
+                ' account TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL);'// &
+                'ALTER TABLE landings ADD COLUMN change INTEGER;'// &
+                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (9);'// &
                 'COMMIT;', stat)
             if (stat /= SQLITE_OK) then
                 call db_exec(db, 'ROLLBACK;', version)
@@ -448,21 +472,27 @@ contains
         call stmt_finalize(st)
     end subroutine store_repo_set_mode
 
-    subroutine store_landing_add(db, repo, branch, account, id, stat)
-        !! Queues the landing of `branch` on `main` of `repo`.
+    subroutine store_landing_add(db, repo, branch, account, id, stat, change)
+        !! Queues the landing of `branch` on `main` of `repo`, of `change` if given.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: repo, branch, account
+        integer(int64), intent(in), optional :: change
         integer(int64), intent(out) :: id
         integer, intent(out) :: stat
         type(stmt_t) :: st
 
         id = 0
-        call db_prepare(db, 'INSERT INTO landings (repo, branch, account, created_at)'// &
-            ' VALUES (?1, ?2, ?3, '//NOW//') RETURNING id;', st, stat)
+        call db_prepare(db, 'INSERT INTO landings (repo, branch, account, created_at, change)'// &
+            ' VALUES (?1, ?2, ?3, '//NOW//', nullif(?4, 0)) RETURNING id;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, repo, stat)
         call stmt_bind_text(st, 2, branch, stat)
         call stmt_bind_text(st, 3, account, stat)
+        if (present(change)) then
+            call stmt_bind_int(st, 4, change, stat)
+        else
+            call stmt_bind_int(st, 4, 0_int64, stat)
+        end if
         stat = 1
         if (stmt_step(st) == SQLITE_ROW) then
             id = stmt_int(st, 0)
@@ -485,7 +515,7 @@ contains
         call db_prepare(db, "UPDATE landings SET state = 'running', lander = ?1, started_at = "// &
             NOW//" WHERE id = (SELECT min(id) FROM landings WHERE state = 'queued' AND repo NOT IN"// &
             " (SELECT repo FROM landings WHERE state = 'running'))"// &
-            ' RETURNING id, repo, branch, account, created_at;', st, stat)
+            ' RETURNING id, repo, branch, account, created_at, coalesce(change, 0);', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, int(lander, int64), stat)
         if (stmt_step(st) == SQLITE_ROW) then
@@ -494,6 +524,7 @@ contains
             l%branch = stmt_text(st, 2)
             l%account = stmt_text(st, 3)
             l%created = stmt_text(st, 4)
+            l%change = stmt_int(st, 5)
             l%state = 'running'
             found = .true.
         end if

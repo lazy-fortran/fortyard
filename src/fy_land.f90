@@ -69,7 +69,7 @@ contains
     end subroutine land_hook_install
 
     subroutine land_branch(repo, work, name, branch, ident, base_url, upstream, commit, log, ok, &
-            runner)
+            runner, number, message_in, min_number)
         !! Lands `branch` of the bare repository `repo` (called `name` in URLs),
         !! using the scratch directory `work`. `ident` names this landing uniquely
         !! and goes into the commit as a `Landing:` trailer. The commit is numbered
@@ -79,6 +79,11 @@ contains
         character(len=:), allocatable, intent(out) :: commit, log
         logical, intent(out) :: ok
         procedure(check_runner_i), optional :: runner
+        !! A change's number and commit message (with its trailers), and the
+        !! lowest number a landing without a change may take (numbers of open
+        !! changes are taken).
+        integer, intent(in), optional :: number, min_number
+        character(len=*), intent(in), optional :: message_in
         logical :: passed
         character(len=:), allocatable :: runner_log
         character(len=:), allocatable :: out, subjects, message, num
@@ -113,7 +118,13 @@ contains
         end if
         call git([character(len=1024) :: 'rev-parse', '--verify', '--quiet', 'origin/main'])
         has_main = status == 0
-        num = itoa(next_number())
+        if (present(number)) then
+            num = itoa(number)
+        else
+            k = next_number()
+            if (present(min_number)) k = max(k, min_number)
+            num = itoa(k)
+        end if
 
         ! A branch that is main plus one merge commit lands as that merge.
         merged = ''
@@ -142,7 +153,14 @@ contains
             call git([character(len=1024) :: 'checkout', '--quiet', '--orphan', 'landing', &
                 'origin/'//branch])
         end if
-        call git([character(len=1024) :: 'log', '--reverse', '--format=%s', trim(range)])
+        ! Commits whose patch main already has (a branch not rebased after an
+        ! earlier landing of part of it) do not name the landing.
+        if (has_main) then
+            call git([character(len=1024) :: 'log', '--reverse', '--format=%s', '--no-merges', &
+                '--cherry-pick', '--right-only', 'origin/main...origin/'//branch])
+        else
+            call git([character(len=1024) :: 'log', '--reverse', '--format=%s', trim(range)])
+        end if
         subjects = out
         n = count_lines(subjects)
         if (n == 0) then
@@ -156,13 +174,17 @@ contains
             message = first_line(subjects)//new_line('a')//new_line('a')// &
                 'Squashed commits:'//new_line('a')//bulleted(subjects)
         end if
-        k = index(message, new_line('a'))
-        if (k == 0) k = len(message) + 1
-        message = message(1:k - 1)//' (#'//num//')'//message(k:)
-        if (len(base_url) > 0) message = message//new_line('a')//new_line('a')// &
-            'Change: '//base_url//'/'//name//'/-/changes/'//num
-        if (len(base_url) == 0) message = message//new_line('a')
-        message = message//new_line('a')//'Landing: '//ident
+        if (present(message_in)) then
+            message = message_in//new_line('a')//'Landing: '//ident
+        else
+            k = index(message, new_line('a'))
+            if (k == 0) k = len(message) + 1
+            message = message(1:k - 1)//' (#'//num//')'//message(k:)
+            if (len(base_url) > 0) message = message//new_line('a')//new_line('a')// &
+                'Change: '//base_url//'/'//name//'/-/changes/'//num
+            if (len(base_url) == 0) message = message//new_line('a')
+            message = message//new_line('a')//'Landing: '//ident
+        end if
         call git([character(len=1024) :: 'log', '--reverse', '--format=%an <%ae>', trim(range)])
         author = first_line(out)
         call write_file(work//'/.git/LANDING_MSG', message//new_line('a'))

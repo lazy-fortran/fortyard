@@ -97,9 +97,12 @@ In order:
       primary (`fy repo create`, `fy repo mode`); pushes need the admin scope
       until roles exist. SSH later.
 - [ ] Size limit and repository checks on receive; same checks in `fy push`.
-- [ ] Changes, minimal: a push to a non-protected branch opens or updates a
-      change (title, description, versions by change ID); `main` refuses
-      direct pushes.
+- [x] Changes, minimal: a push to a branch other than `main` and `wip/...`
+      opens or updates a change (title and description from its commits,
+      versions matched by `Change-Id` or branch, comments, interdiff); landing
+      it gives the commit the change's number, description and trailers;
+      `fy push`, `fy change list|view|diff|comment|edit|land|close|reopen`.
+- [ ] Change pages in the web application.
 - [x] Landing, minimal: `main` takes no pushes; `fy land REPO BRANCH` queues a
       pushed branch, which lands one at a time as one squashed commit with
       `(#N)` and a `Change:` trailer after the repository's check (`fo test`, or
@@ -109,8 +112,10 @@ In order:
 - [x] The edge timer follows the instance's own `main`; fortyard is primary on
       its development instance and GitHub is its mirror.
 - [ ] Tags to the upstream.
-- [ ] `fy` and `fy mcp` grow with each step (push, change list and view, land,
-      queue status).
+- [x] `fy` covers the daily work: `fy land` pushes, lands and follows a
+      branch; `fy jobs`, `fy job`, `fy landings` print tables and logs;
+      `fy login` stores a proxy; `fy git-credential` serves plain git.
+- [ ] `fy mcp` grows with each step (changes, land, queue status).
 - [ ] Audit log (append-only, hash-chained) from the first landing on.
 
 ### M4a Namespaces

@@ -161,11 +161,12 @@ program test_git_http
         git//'-C '//work//'-clone merge -q --no-ff -m "Merge upstream" side && '//git//'-C '// &
         work//'-clone push -q '//url//' HEAD:sync', exitstat=stat)
     call check(stat == 0, 'a merge onto main is pushed')
+    ! Each branch pushed above opened a change (#1 to #4), so this is #5.
     reply = post('/api/v1/repos/demo/land', '{"branch":"sync"}')
     call wait_landing(4, 'landed')
     call execute_command_line('test "$(git --git-dir='//data//'/repos/demo.git rev-parse main^2)" = '// &
         '"$('//git//'-C '//work//'-clone rev-parse side)" && test "$(git --git-dir='//data// &
-        '/repos/demo.git log -1 --format=%s main)" = "Merge upstream (#2)"', exitstat=stat)
+        '/repos/demo.git log -1 --format=%s main)" = "Merge upstream (#5)"', exitstat=stat)
     call check(stat == 0, 'the merge landed as a merge commit with the merged history')
     ! A merge onto an older main would lose that history when squashed.
     call execute_command_line(git//'-C '//work//'-clone checkout -q -B side2 origin/main && '// &

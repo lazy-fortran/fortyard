@@ -9,6 +9,8 @@ module fy_server
         http_basic_password
     use fy_git_http, only: git_http_route, git_http_serve
     use fy_land, only: land_branch, land_hook_install, land_check
+    use fy_change, only: change_t, change_sync, change_by_id, change_by_branch, change_landed, &
+        change_next_number, change_api, change_message
     use fy_events, only: events_set_dir, events_notify, events_stream, events_watch_open, &
         events_wait, events_watch_close
     use fortui, only: ui_init, ui_frame_begin, ui_present, ui_shutdown
@@ -274,8 +276,10 @@ contains
         character(len=:), allocatable :: commit, log, upstream, mode, base
         character(len=:), allocatable :: work
         character(len=1024) :: url
-        integer :: stat, i, n, watch
-        logical :: found, ok, changed
+        character(len=:), allocatable :: change_url
+        type(change_t) :: ch
+        integer :: stat, i, n, watch, next
+        logical :: found, ok, changed, has_change
 
         call get_environment_variable('FY_URL', url, n, stat)
         base = ''
@@ -314,13 +318,33 @@ contains
             work = tmp_dir()//'/fy-land-'//itoa(int(l%id))
             ! Unique across instances and restarts: number and time of queueing.
             lander_db = db
-            if (checks_mode == 'runner') then
-                call land_branch(repo_path(l%repo), work, l%repo, l%branch, &
-                    itoa(int(l%id))//'@'//l%created, base, upstream, commit, log, ok, &
-                    runner=runner_check)
+            has_change = .false.
+            if (l%change > 0) call change_by_id(db, l%change, ch, has_change)
+            if (has_change) then
+                change_url = ''
+                if (len(base) > 0) change_url = base//'/'//l%repo//'/-/changes/'//itoa(ch%number)
+                if (checks_mode == 'runner') then
+                    call land_branch(repo_path(l%repo), work, l%repo, l%branch, &
+                        itoa(int(l%id))//'@'//l%created, base, upstream, commit, log, ok, &
+                        runner=runner_check, number=ch%number, message_in=change_message(ch, change_url))
+                else
+                    call land_branch(repo_path(l%repo), work, l%repo, l%branch, &
+                        itoa(int(l%id))//'@'//l%created, base, upstream, commit, log, ok, &
+                        number=ch%number, message_in=change_message(ch, change_url))
+                end if
+                if (ok) call change_landed(db, ch%id, commit)
             else
-                call land_branch(repo_path(l%repo), work, l%repo, l%branch, &
-                    itoa(int(l%id))//'@'//l%created, base, upstream, commit, log, ok)
+                ! Numbers of open changes are taken.
+                next = change_next_number(db, l%repo, repo_path(l%repo))
+                if (checks_mode == 'runner') then
+                    call land_branch(repo_path(l%repo), work, l%repo, l%branch, &
+                        itoa(int(l%id))//'@'//l%created, base, upstream, commit, log, ok, &
+                        runner=runner_check, min_number=next)
+                else
+                    call land_branch(repo_path(l%repo), work, l%repo, l%branch, &
+                        itoa(int(l%id))//'@'//l%created, base, upstream, commit, log, ok, &
+                        min_number=next)
+                end if
             end if
             call execute_command_line('rm -rf '''//work//'''')
             if (ok) then
@@ -384,7 +408,10 @@ contains
         type(repo_info_t), allocatable :: repos(:)
         character(len=:), allocatable :: rest, name, sub, ref, path, upstream
         integer :: slash, i, status, stat, k
-        logical :: found, exists
+        logical :: found, exists, has_change
+        type(change_t) :: ch
+        integer(int64) :: number
+        character(len=24) :: num
 
         if (.not. authenticated(req, db, who, res)) return
         if (req%path == '/api/v1/repos') then
@@ -430,6 +457,16 @@ contains
         if (k > 1) then
             call releases_route(rest(1:k - 1), rest(k + 9:))
             return
+        end if
+        k = index(rest, '/changes')
+        if (k > 1) then
+            if (len(rest) == k + 7) then
+                call changes(rest(1:k - 1), '')
+                return
+            else if (rest(k + 8:k + 8) == '/') then
+                call changes(rest(1:k - 1), rest(k + 8:))
+                return
+            end if
         end if
         if (req%method == 'POST' .and. len(rest) > 5) then
             if (rest(len(rest) - 4:) == '/mode') then
@@ -601,7 +638,13 @@ contains
                 call fail(res, 400, 'body must be {"branch":"..."} naming a branch other than main')
                 return
             end if
-            call store_landing_add(db, target, branch, who%account, number, stat)
+            ! The branch's open change lands with it.
+            call change_by_branch(db, target, branch, ch, has_change)
+            if (has_change) then
+                call store_landing_add(db, target, branch, who%account, number, stat, ch%id)
+            else
+                call store_landing_add(db, target, branch, who%account, number, stat)
+            end if
             if (stat == 0) call events_notify('jobs')
             if (stat /= 0) then
                 call fail(res, 500, 'landing not queued')
@@ -611,6 +654,42 @@ contains
             res%code = 202
             res%body = '{"landing":'//trim(num)//',"state":"queued"}'
         end subroutine queue_landing
+
+        subroutine changes(target, sub)
+            !! /api/v1/repos/NAME/changes...: see fy_change; landing a change
+            !! queues its branch like POST /land.
+            character(len=*), intent(in) :: target, sub
+            character(len=:), allocatable :: answer, ctype, branch
+            integer :: code
+
+            inquire (file=repo_path(target)//'/HEAD', exist=exists)
+            if (.not. repo_name_ok(target) .or. .not. exists) then
+                call fail(res, 404, 'no such repository')
+                return
+            end if
+            if (req%method == 'POST' .and. index(' '//who%scopes//' ', ' admin ') == 0 .and. &
+                index(' '//who%scopes//' ', ' write ') == 0) then
+                call fail(res, 403, 'changing a change needs the admin or write scope')
+                return
+            end if
+            call change_api(db, req%method, target, repo_path(target), sub, req%query, req%body, &
+                who%account, index(' '//who%scopes//' ', ' admin ') > 0, code, answer, ctype, &
+                branch)
+            if (len(branch) > 0) then
+                call change_by_branch(db, target, branch, ch, has_change)
+                call store_landing_add(db, target, branch, who%account, number, stat, ch%id)
+                if (stat /= 0) then
+                    call fail(res, 500, 'landing not queued')
+                    return
+                end if
+                call events_notify('jobs')
+                write (num, '(i0)') number
+                answer = '{"landing":'//trim(num)//',"state":"queued"}'
+            end if
+            res%code = code
+            res%ctype = ctype
+            res%body = answer
+        end subroutine changes
 
         subroutine list_landings(target)
             character(len=*), intent(in) :: target
@@ -930,6 +1009,9 @@ contains
                 status = 409
             else
                 call git_http_serve(cfd, req, rest, repos_dir, repo, who%account, status)
+                ! A push opens changes for new branches and versions for moved ones.
+                if (write .and. status == 0 .and. index(req%path, '/git-receive-pack') > 0) &
+                    call change_sync(db, repo, repo_path(repo), who%account)
             end if
             if (status /= 0) call http_send_response(cfd, status, 'text/plain; charset=utf-8', &
                 git_error(status)//new_line('a'))
