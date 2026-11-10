@@ -135,7 +135,9 @@ contains
         id = claim(s:e - 1)
         call get_environment_variable('TMPDIR', tmp, n, stat)
         if (stat /= 0 .or. n == 0) tmp = '/tmp'
-        work = trim(tmp)//'/fy-check-'//id
+        ! One work tree per repository, kept between checks with its build
+        ! directory, so a check builds incrementally instead of from scratch.
+        work = trim(tmp)//'/fy-work/'//repo
         w = work
         src = data_dir//'/repos/'//repo//'.git'
         r = ref
@@ -161,17 +163,17 @@ contains
         end if
         write (error_unit, '(a)') 'fy runner: check '//id//' of '//repo//' '//ref
         flush (error_unit)
-        call proc_run([character(len=1024) :: 'rm', '-rf', w], out, stat, 4096)
-        call proc_run([character(len=1024) :: 'sh', '-c', 'git clone --quiet --shared "$1" "$2" '// &
-            '&& cd "$2" && git fetch --quiet origin "$3" && git checkout --quiet FETCH_HEAD 2>&1', &
-            'checkout', src, w, r], out, stat, 65536)
+        call proc_run([character(len=1024) :: 'sh', '-c', &
+            '{ [ -d "$2/.git" ] || { rm -rf "$2" && mkdir -p "$(dirname "$2")" && '// &
+            'git clone --quiet --shared "$1" "$2"; }; } && cd "$2" && '// &
+            'git fetch --quiet origin "$3" && git checkout --quiet --force FETCH_HEAD && '// &
+            'git clean -ffdxq -e /build/ 2>&1', 'checkout', src, w, r], out, stat, 65536)
         if (stat /= 0) then
             out = 'The runner could not check out '//ref//'.'//new_line('a')//out
             code = 1
         else
             call land_check(work, out, code)
         end if
-        call proc_run([character(len=1024) :: 'rm', '-rf', w], body, stat, 4096)
         call client_request(server, 'POST', '/api/v1/checks/'//id//'/result', token, &
             '{"passed":'//merge('true ', 'false', code == 0)//',"log":"'// &
             json_escape_string(out)//'"}', code, body, stat)

@@ -58,6 +58,7 @@ program test_runner
     url = 'http://x:'//admin//'@'//base//'/demo.git'
     call execute_command_line('git init -q -b main '//work//' && mkdir '//work//'/.fortyard'// &
         ' && printf "hello\n" > '//work//'/README && printf "#!/bin/sh\necho runner says hi\n'// &
+        'mkdir -p build && echo x >> build/count && echo checks seen \$(wc -l < build/count)\n'// &
         'test -f README\n" > '//work//'/.fortyard/check && chmod +x '//work//'/.fortyard/check'// &
         ' && '//git//'-C '//work//' add -A && '//git//'-C '//work//' commit -q -m "First" && '// &
         git//'-C '//work//' push -q '//url//' HEAD:first', exitstat=stat)
@@ -78,6 +79,7 @@ program test_runner
     call wait_landing(2, 'failed')
     reply = get('/api/v1/jobs/2')
     call check(index(reply, 'runner says hi') > 0, 'a failing check reports the runner''s output')
+    call check(index(reply, 'checks seen 2') > 0, 'the build directory is kept between checks')
 
     call proc_kill(run, SIGTERM)
     call proc_wait(run, stat)

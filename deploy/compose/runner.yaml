@@ -18,6 +18,7 @@ services:
       FY_RUNNER: "@HOME@"
       HOME: /tmp
       TMPDIR: "@HOME@/tmp"
+      CCACHE_DIR: "@HOME@/ccache"
     volumes:
       - "@HOME@:@HOME@"
     entrypoint: ["@HOME@/bin/remote-runner.sh"]
