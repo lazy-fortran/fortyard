@@ -1,0 +1,32 @@
+# The browser build: LFortran for wasm32-unknown-emscripten and Arch's
+# emscripten, the toolchain the web application is developed with. LFortran
+# is built from LFORTRAN_REV against LLVM 11 from conda-forge, like the
+# development machine's compiler. The release builder runs scripts/build-web.sh
+# in it, so releases need no developer machine. Python appears only inside
+# LFortran's own source generation.
+FROM archlinux:base-devel
+ARG LFORTRAN_REPO=https://github.com/lfortran/lfortran.git
+ARG LFORTRAN_REV
+ARG JOBS=8
+RUN pacman -Syu --noconfirm --needed git emscripten nodejs-lts-jod \
+    && pacman -Scc --noconfirm
+RUN curl -fsSL https://micro.mamba.pm/api/micromamba/linux-64/latest \
+        | tar -xj -C /usr/local bin/micromamba \
+    && micromamba create -y -q -p /opt/lfenv -c conda-forge \
+        llvmdev=11 zlib zstd re2c=3.1 bison=3.4 cmake=3.29.1 ninja python=3.12 toml \
+    && micromamba clean -a -y -q
+ENV EMSDK_PATH=/opt/emsdk
+RUN mkdir -p /opt/emsdk/upstream && ln -s /usr/lib/emscripten /opt/emsdk/upstream/emscripten
+RUN git clone --quiet "$LFORTRAN_REPO" /tmp/lf \
+    && git -C /tmp/lf checkout --quiet "$LFORTRAN_REV" \
+    && cd /tmp/lf \
+    && PATH=/opt/lfenv/bin:$PATH ./build0.sh >/dev/null 2>&1 \
+    && PATH=/opt/lfenv/bin:$PATH cmake -S . -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release -DWITH_LLVM=yes -DWITH_TARGET_WASM=yes \
+        -DCMAKE_C_COMPILER=/usr/bin/cc -DCMAKE_CXX_COMPILER=/usr/bin/c++ \
+        -DLLVM_DIR=/opt/lfenv/lib/cmake/llvm -DCMAKE_PREFIX_PATH=/opt/lfenv \
+        -DCMAKE_INSTALL_PREFIX=/opt/lfortran >/dev/null \
+    && PATH=/opt/lfenv/bin:$PATH cmake --build build -j "$JOBS" >/dev/null \
+    && cmake --install build >/dev/null \
+    && rm -rf /tmp/lf
+ENV PATH=/opt/lfortran/bin:$PATH HOME=/tmp

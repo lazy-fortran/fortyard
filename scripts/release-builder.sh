@@ -6,6 +6,11 @@
 #   FY_BUILDER builder directory with `token` (scopes release and read access)
 #   FY_TOOLCHAIN the toolchain image of the instance's system
 #   FY_PROXY   optional SOCKS proxy (socks5h://HOST:PORT) to reach FY_TARGET
+#   FY_WEB_IMAGE optional image with LFortran and emscripten
+#              (deploy/container/Dockerfile.web); without it the browser files
+#              are built with the host's tools
+#   FY_BUILD_LIMITS optional docker run limits for the build containers,
+#              e.g. "--cpus 8 --memory 12g"
 # fy is compiled in the toolchain image, incrementally (its build tree and fo's
 # cache persist); the browser files are built here and reused while the code
 # they come from is unchanged.
@@ -16,11 +21,13 @@ if [ -n "${FY_PROXY:-}" ]; then
     export ALL_PROXY="$FY_PROXY" https_proxy="$FY_PROXY" http_proxy="$FY_PROXY"
 fi
 home=$FY_BUILDER
+limits=${FY_BUILD_LIMITS:-}
+user="$(id -u):$(id -g)"
 tok=$(cat "$home/token")
 auth="Authorization: Bearer $tok"
 api="$FY_TARGET/api/v1/repos/$repo/releases"
 mirror=$home/src.git
-mkdir -p "$home/cache" "$home/out"
+mkdir -p "$home/cache/home" "$home/out"
 [ -d "$mirror" ] || git -c http.extraHeader="$auth" clone --quiet --bare \
     "$FY_TARGET/$repo.git" "$mirror"
 for tree in fy web; do
@@ -46,7 +53,8 @@ end module fy_build_info
 INFO
     # The tree borrows objects from the mirror, so the mirror is mounted at its
     # path. --init: fo cannot start compilers as process 1 of a container.
-    docker run --rm --init --user "$(id -u):$(id -g)" -v "$home/fy:/work" -v "$home/cache:/cache" \
+    # shellcheck disable=SC2086 # limits are separate words
+    docker run --rm --init $limits --user "$user" -v "$home/fy:/work" -v "$home/cache:/cache" \
         -v "$mirror:$mirror:ro" \
         -w /work "$FY_TOOLCHAIN" fo install --prefix /work/build/prefix >"$out.log" 2>&1 || {
         tail -30 "$out.log" >&2
@@ -60,9 +68,21 @@ INFO
         -- src/ui web fpm.toml scripts/build-web.sh; then
         git -C "$home/web" fetch --quiet origin main
         git -C "$home/web" checkout --quiet --force "$head"
-        (cd "$home/web" && fo build >/dev/null 2>&1) || true
         rm -rf "$home/web.new"
-        "$home/web/scripts/build-web.sh" "$home/web" "$home/web.new" >"$out.web.log" 2>&1 || {
+        if [ -n "${FY_WEB_IMAGE:-}" ]; then
+            # fo build fetches fx and fortui at the pinned versions; the
+            # builder directory has the same path inside the containers.
+            # shellcheck disable=SC2086
+            docker run --rm --init $limits --user "$user" -v "$home:$home" -v "$home/cache:/cache" \
+                -w "$home/web" "$FY_TOOLCHAIN" fo build >/dev/null 2>&1 || true
+            # shellcheck disable=SC2086
+            docker run --rm --init $limits --user "$user" -v "$home:$home" -e HOME="$home/cache/home" \
+                -w "$home/web" "$FY_WEB_IMAGE" scripts/build-web.sh "$home/web" "$home/web.new" \
+                >"$out.web.log" 2>&1
+        else
+            (cd "$home/web" && fo build >/dev/null 2>&1) || true
+            "$home/web/scripts/build-web.sh" "$home/web" "$home/web.new" >"$out.web.log" 2>&1
+        fi || {
             tail -30 "$out.web.log" >&2
             return 1
         }

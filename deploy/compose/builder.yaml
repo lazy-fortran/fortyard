@@ -1,0 +1,27 @@
+# The release builder on a build host inside the instance's network
+# (scripts/install-builder.sh fills in the @...@ values). The builder
+# directory has the same path inside and outside, because the build
+# containers it starts mount its subdirectories by host path. It runs no
+# compiler itself; the build containers get FY_BUILD_LIMITS.
+services:
+  fortyard-builder:
+    image: fortyard-builder:1
+    container_name: fortyard-builder
+    restart: unless-stopped
+    init: true
+    user: "@UID@:@GID@"
+    group_add: ["@DOCKER_GID@"]
+    environment:
+      FY_TARGET: "@TARGET@"
+      FY_BUILDER: "@HOME@"
+      FY_TOOLCHAIN: "@TOOLCHAIN@"
+      FY_WEB_IMAGE: "@WEB_IMAGE@"
+      FY_BUILD_LIMITS: "@LIMITS@"
+      HOME: /tmp
+    volumes:
+      - "@HOME@:@HOME@"
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: ["@HOME@/bin/release-builder.sh"]
+    mem_limit: 1g
+    cpus: 1
+    pids_limit: 256

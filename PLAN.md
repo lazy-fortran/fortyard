@@ -128,6 +128,11 @@ In order:
       file); fortyard and fortui primary there; the development instance
       becomes staging.
 - [ ] Per-repository deploy keys for pushing landings to GitHub.
+- [ ] Release builder independent of any developer machine: a container on a
+      build host inside the instance's network (`scripts/install-builder.sh`),
+      the browser files built in an image with LFortran and emscripten
+      (`deploy/container/Dockerfile.web`), every build container limited
+      (`FY_BUILD_LIMITS`). Deploys then need neither a workstation nor SSH.
 - [ ] Landing checks in the toolchain image with CPU and memory limits.
 - [ ] Release notes drafted by the agent; health watch after a switch with
       automatic rollback.
