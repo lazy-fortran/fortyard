@@ -17,6 +17,7 @@ services:
       FY_TOOLCHAIN: "@TOOLCHAIN@"
       FY_WEB_IMAGE: "@WEB_IMAGE@"
       FY_BUILD_LIMITS: "@LIMITS@"
+      BUILDX_CONFIG: "@HOME@/buildx"
       HOME: /tmp
     volumes:
       - "@HOME@:@HOME@"

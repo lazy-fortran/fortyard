@@ -13,6 +13,7 @@ v=0.13.0
 sha=$(curl -fsSL "https://github.com/fortran-lang/fpm/releases/download/v$v/fpm-$v-linux-x86_64-gcc-12.sha256" | cut -d' ' -f1)
 ctx=$(mktemp -d "${TMPDIR:-/var/tmp}/fy-toolchain.XXXXXX")
 trap 'rm -rf "$ctx"' EXIT
+export BUILDX_CONFIG="${BUILDX_CONFIG:-$home/buildx}"
 builder=$("$(dirname "$0")/buildx-builder.sh")
 docker buildx build --builder "$builder" --load --quiet --target base \
     --build-arg FPM_SHA256="$sha" -f "$dockerfile" -t fortyard-toolchain-base "$ctx" >/dev/null

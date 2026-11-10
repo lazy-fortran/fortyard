@@ -12,6 +12,7 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p "$dir/bin"
 cp "$here/scripts/release-builder.sh" "$dir/bin/release-builder.sh"
 chmod 755 "$dir/bin/release-builder.sh"
+export BUILDX_CONFIG="$dir/buildx"
 builder=$("$here/scripts/buildx-builder.sh")
 docker buildx build --builder "$builder" --load --quiet -t fortyard-builder:1 \
     -f "$here/deploy/container/Dockerfile.builder" "$here/deploy/container" >/dev/null
