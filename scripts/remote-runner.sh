@@ -27,6 +27,13 @@ while :; do
                 echo "$sha  $dir.tar" | sha256sum -c --quiet - &&
                 tar -xf "$dir.tar" -C "$dir"; then
                 rm -f "$dir.tar"
+                # The runner updates itself: a release with a different
+                # start script replaces this one, which restarts as it.
+                if [ -f "$dir/scripts/remote-runner.sh" ] &&
+                    ! cmp -s "$dir/scripts/remote-runner.sh" "$0"; then
+                    cp "$dir/scripts/remote-runner.sh" "$0.new" && chmod 755 "$0.new" &&
+                        mv -f "$0.new" "$0" && exec "$0"
+                fi
                 # Older releases are not needed any more.
                 for old in "$home/releases"/*; do
                     [ "$old" = "$dir" ] || rm -rf "$old"

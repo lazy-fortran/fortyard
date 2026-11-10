@@ -91,7 +91,8 @@ INFO
         echo "$head" > "$home/web.commit"
     fi
     cp -r "$home/web.out" "$out/web"
-    for f in release.sh deploy.sh edge-update.sh self-update.sh start.sh; do
+    for f in release.sh deploy.sh edge-update.sh self-update.sh start.sh \
+        release-builder.sh remote-runner.sh; do
         git -C "$mirror" show "$head:scripts/$f" > "$out/scripts/$f" 2>/dev/null && chmod 755 "$out/scripts/$f"
     done
     (cd "$out" && sha256sum fy > fy.sha256 && sha256sum web/* > web.sha256)
@@ -103,9 +104,18 @@ INFO
         "{\"version\":\"$version\",\"commit\":\"$head\",\"notes\":\"$notes\"}" "$api" >/dev/null
     curl -fsS -m 300 -H "$auth" -H "X-Content-SHA256: $sha" -T "$out.tar" \
         "$api/$version/release.tar" >/dev/null
+    # The builder updates itself: a release with a different builder script
+    # replaces this one, which then restarts as the new version.
+    if [ -f "$out/scripts/release-builder.sh" ] &&
+        ! cmp -s "$out/scripts/release-builder.sh" "$0"; then
+        cp "$out/scripts/release-builder.sh" "$0.new" && chmod 755 "$0.new" &&
+            mv -f "$0.new" "$0" && restart=1
+    fi
     rm -rf "$out" "$out.tar" "$out.log" "$out.web.log"
     echo "released $version ($short)"
 }
+
+restart=0
 
 while :; do
     if git -C "$mirror" -c http.extraHeader="$auth" fetch --quiet origin \
@@ -117,6 +127,7 @@ while :; do
             day=$(date -u +%Y.%m.%d)
             n=$(printf '%s\n' "$list" | grep -c "^$day\." || true)
             build "$head" "$day.$n" || : > "$home/failed-$head"
+            [ "$restart" = 1 ] && exec "$0"
         fi
     fi
     sleep 3
