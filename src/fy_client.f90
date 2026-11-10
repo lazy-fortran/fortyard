@@ -11,16 +11,25 @@ module fy_client
     private
 
     public :: client_request, parse_url, config_t, config_load, config_save, &
-        config_path
+        config_path, client_set_proxy
 
     character(len=2), parameter :: CRLF = achar(13)//achar(10)
+    !! A proxy for every request (curl's syntax, e.g. socks5h://127.0.0.1:1080),
+    !! for servers reached only through a tunnel; empty for none.
+    character(len=:), allocatable :: proxy
 
     type :: config_t
         character(len=:), allocatable :: server
         character(len=:), allocatable :: token
+        character(len=:), allocatable :: proxy
     end type config_t
 
 contains
+
+    subroutine client_set_proxy(url)
+        character(len=*), intent(in) :: url
+        proxy = url
+    end subroutine client_set_proxy
 
     subroutine curl_request(server, method, path, token, payload, code, body, stat)
         !! One request through curl. Token and payload go to curl on standard
@@ -43,8 +52,11 @@ contains
         conf = 'url = "'//quoted(server//path)//'"'//new_line('a')// &
             'request = "'//method//'"'//new_line('a')// &
             'max-time = 60'//new_line('a')//'silent'//new_line('a')// &
-            'proto = "=https"'//new_line('a')// &
+            'proto = "=http,https"'//new_line('a')// &
             'write-out = "\n%{http_code}"'//new_line('a')
+        if (allocated(proxy)) then
+            if (len(proxy) > 0) conf = conf//'proxy = "'//quoted(proxy)//'"'//new_line('a')
+        end if
         if (len(token) > 0) conf = conf//'header = "Authorization: Bearer '// &
             quoted(token)//'"'//new_line('a')
         if (method /= 'GET') conf = conf//'header = "Content-Type: application/json"'// &
@@ -141,10 +153,13 @@ contains
         character(len=8192) :: buf
         character(len=16) :: clen
         integer :: port, fd, n, head_end, ios
+        logical :: use_curl
 
         code = 0
         body = ''
-        if (index(server, 'https://') == 1) then
+        use_curl = index(server, 'https://') == 1
+        if (allocated(proxy)) use_curl = use_curl .or. len(proxy) > 0
+        if (use_curl) then
             call curl_request(server, method, path, token, payload, code, body, stat)
             return
         end if
@@ -193,13 +208,15 @@ contains
     end function config_path
 
     subroutine config_load(cfg)
-        !! Stored login, overridden by FY_SERVER and FY_TOKEN.
+        !! Stored login, overridden by FY_SERVER, FY_TOKEN and FY_PROXY; the proxy
+        !! applies to every request of this process.
         type(config_t), intent(out) :: cfg
         character(len=4096) :: line
         integer :: u, ios, eq
 
         cfg%server = ''
         cfg%token = ''
+        cfg%proxy = ''
         open (newunit=u, file=config_path(), status='old', action='read', iostat=ios)
         if (ios == 0) then
             do
@@ -210,6 +227,7 @@ contains
                 select case (line(1:eq - 1))
                 case ('server'); cfg%server = trim(line(eq + 1:))
                 case ('token'); cfg%token = trim(line(eq + 1:))
+                case ('proxy'); cfg%proxy = trim(line(eq + 1:))
                 end select
             end do
             close (u)
@@ -218,6 +236,9 @@ contains
         if (ios == 0 .and. len_trim(line) > 0) cfg%server = trim(line)
         call get_environment_variable('FY_TOKEN', line, status=ios)
         if (ios == 0 .and. len_trim(line) > 0) cfg%token = trim(line)
+        call get_environment_variable('FY_PROXY', line, status=ios)
+        if (ios == 0 .and. len_trim(line) > 0) cfg%proxy = trim(line)
+        call client_set_proxy(cfg%proxy)
     end subroutine config_load
 
     subroutine config_save(cfg, stat)
@@ -235,6 +256,9 @@ contains
         if (stat /= 0) return
         write (u, '(a)') 'server='//cfg%server
         write (u, '(a)') 'token='//cfg%token
+        if (allocated(cfg%proxy)) then
+            if (len(cfg%proxy) > 0) write (u, '(a)') 'proxy='//cfg%proxy
+        end if
         close (u)
         call execute_command_line("chmod 600 '"//path//"'", exitstat=stat)
     end subroutine config_save
