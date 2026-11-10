@@ -204,7 +204,11 @@ the others are new.
       affected cases within a budget, none), review before or after landing,
       bisection and repair on or off, batch size, limit on unreviewed
       changes. Defaults keep today's behaviour.
-- [ ] S2 `fy runner` with leases, heartbeats and per-case limits (M3).
+- [ ] S2 `fy runner` with leases, heartbeats and per-case limits (M3). Done:
+      remote runners on build hosts (HTTPS through curl, a mirror and a kept
+      work tree with its build directory per repository, restart on a new
+      server release; `scripts/install-runner.sh`). Production's landing
+      checks run on faepkub4 since 2026-11-10, not on the server's host.
 - [ ] S3 Batched merge queue that blames a change only when the failure
       reproduces with that change alone (M8).
 - [ ] S4 Continuous pool: candidates by key change, staleness and audit
