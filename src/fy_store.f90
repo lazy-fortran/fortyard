@@ -20,7 +20,7 @@ module fy_store
     public :: store_jobs, store_job, store_job_counts, store_jobs_state
     public :: store_check_add, store_check_claim, store_check_finish, store_check_get
 
-    integer, parameter, public :: SCHEMA_VERSION = 10
+    integer, parameter, public :: SCHEMA_VERSION = 11
 
     type :: token_identity_t
         logical :: found = .false.
@@ -60,6 +60,8 @@ module fy_store
         character(len=:), allocatable :: commit, log, started
         !! The change it lands (fy_change), or 0.
         integer(int64) :: change = 0
+        !! "landing", or "verify" for a verification of main (fy_verify).
+        character(len=:), allocatable :: kind
     end type landing_t
 
     character(len=*), parameter :: NOW = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
@@ -239,6 +241,23 @@ contains
                 'CREATE TABLE issue_comments (id INTEGER PRIMARY KEY, issue INTEGER NOT NULL,'// &
                 ' account TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL);'// &
                 'DELETE FROM schema_version; INSERT INTO schema_version VALUES (10);'// &
+                'COMMIT;', stat)
+            if (stat /= SQLITE_OK) then
+                call db_exec(db, 'ROLLBACK;', version)
+                return
+            end if
+        end if
+        if (store_schema_version(db) < 11) then
+            ! Verifications of main are jobs too (kind 'verify', fy_verify), and
+            ! their runner checks run .fortyard/verify; a regression found by
+            ! bisection is reported once per culprit commit.
+            call db_exec(db, 'BEGIN;'// &
+                "ALTER TABLE landings ADD COLUMN kind TEXT NOT NULL DEFAULT 'landing';"// &
+                "ALTER TABLE checks ADD COLUMN kind TEXT NOT NULL DEFAULT 'check';"// &
+                'CREATE TABLE verify_reports (id INTEGER PRIMARY KEY, repo TEXT NOT NULL,'// &
+                " culprit TEXT NOT NULL, issue INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'open',"// &
+                ' created_at TEXT NOT NULL, UNIQUE (repo, culprit));'// &
+                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (11);'// &
                 'COMMIT;', stat)
             if (stat /= SQLITE_OK) then
                 call db_exec(db, 'ROLLBACK;', version)
@@ -529,8 +548,9 @@ contains
 
         found = .false.
         call db_prepare(db, "UPDATE landings SET state = 'running', lander = ?1, started_at = "// &
-            NOW//" WHERE id = (SELECT min(id) FROM landings WHERE state = 'queued' AND repo NOT IN"// &
-            " (SELECT repo FROM landings WHERE state = 'running'))"// &
+            NOW//" WHERE id = (SELECT min(id) FROM landings WHERE state = 'queued' AND"// &
+            " kind = 'landing' AND repo NOT IN (SELECT repo FROM landings WHERE state = 'running'"// &
+            " AND kind = 'landing'))"// &
             ' RETURNING id, repo, branch, account, created_at, coalesce(change, 0);', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, int(lander, int64), stat)
@@ -555,7 +575,7 @@ contains
         type(stmt_t) :: st
         integer :: stat
         call db_prepare(db, "UPDATE landings SET state = 'queued' WHERE state = 'running'"// &
-            ' AND (lander = ?1 OR (lander IS NULL AND ?1 = 1));', st, stat)
+            " AND kind = 'landing' AND (lander = ?1 OR (lander IS NULL AND ?1 = 1));", st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, int(lander, int64), stat)
         stat = stmt_step(st)
@@ -622,7 +642,7 @@ contains
         type(landing_t) :: l
         character(len=*), parameter :: COLS = "SELECT id, repo, branch, account, state,"// &
             " created_at, coalesce(started_at, ''), coalesce(finished_at, ''),"// &
-            " coalesce(commit_id, '') FROM landings WHERE (?1 = '' OR repo = ?1)"
+            " coalesce(commit_id, ''), kind FROM landings WHERE (?1 = '' OR repo = ?1)"
         integer :: pass
 
         allocate (ls(0))
@@ -646,6 +666,7 @@ contains
                 l%started = stmt_text(st, 6)
                 l%finished = stmt_text(st, 7)
                 l%commit = stmt_text(st, 8)
+                l%kind = stmt_text(st, 9)
                 l%log = ''
                 ls = [ls, l]
             end do
@@ -655,7 +676,7 @@ contains
     end subroutine store_jobs
 
     subroutine store_job(db, id, l, found)
-        !! One landing with its log.
+        !! One job (a landing or a verification) with its log.
         type(db_t), intent(in) :: db
         integer(int64), intent(in) :: id
         type(landing_t), intent(out) :: l
@@ -666,7 +687,7 @@ contains
         found = .false.
         call db_prepare(db, "SELECT id, repo, branch, account, state, created_at,"// &
             " coalesce(started_at, ''), coalesce(finished_at, ''), coalesce(commit_id, ''),"// &
-            " coalesce(log, '') FROM landings WHERE id = ?1;", st, stat)
+            " coalesce(log, ''), kind FROM landings WHERE id = ?1;", st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, id, stat)
         if (stmt_step(st) == SQLITE_ROW) then
@@ -680,6 +701,7 @@ contains
             l%finished = stmt_text(st, 7)
             l%commit = stmt_text(st, 8)
             l%log = stmt_text(st, 9)
+            l%kind = stmt_text(st, 10)
             found = .true.
         end if
         call stmt_finalize(st)
@@ -727,20 +749,27 @@ contains
         call stmt_finalize(st)
     end function store_jobs_state
 
-    subroutine store_check_add(db, repo, ref, id, stat)
-        !! Queues a check of `ref` in `repo` for a runner.
+    subroutine store_check_add(db, repo, ref, id, stat, kind)
+        !! Queues a check of `ref` in `repo` for a runner: of a landing ("check",
+        !! the default) or a verification of main ("verify").
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: repo, ref
         integer(int64), intent(out) :: id
         integer, intent(out) :: stat
+        character(len=*), intent(in), optional :: kind
         type(stmt_t) :: st
 
         id = 0
-        call db_prepare(db, 'INSERT INTO checks (repo, ref, created_at) VALUES (?1, ?2, '// &
-            NOW//') RETURNING id;', st, stat)
+        call db_prepare(db, 'INSERT INTO checks (repo, ref, created_at, kind) VALUES (?1, ?2, '// &
+            NOW//', ?3) RETURNING id;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, repo, stat)
         call stmt_bind_text(st, 2, ref, stat)
+        if (present(kind)) then
+            call stmt_bind_text(st, 3, kind, stat)
+        else
+            call stmt_bind_text(st, 3, 'check', stat)
+        end if
         stat = 1
         if (stmt_step(st) == SQLITE_ROW) then
             id = stmt_int(st, 0)
@@ -749,16 +778,18 @@ contains
         call stmt_finalize(st)
     end subroutine store_check_add
 
-    subroutine store_check_claim(db, runner, id, repo, ref, found)
-        !! Gives `runner` the oldest queued check it may take: one of a
-        !! repository it checked last, or that no runner checked yet, or one
-        !! that has waited AFFINITY_SECONDS. A repository so stays on the
-        !! runner whose build tree and caches are warm for it.
+    subroutine store_check_claim(db, runner, id, repo, ref, found, kind)
+        !! Gives `runner` the oldest queued check it may take, landing checks
+        !! before verifications: one of a repository it checked last, or that
+        !! no runner checked yet, or one that has waited AFFINITY_SECONDS. A
+        !! repository so stays on the runner whose build tree and caches are
+        !! warm for it.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: runner
         integer(int64), intent(out) :: id
         character(len=:), allocatable, intent(out) :: repo, ref
         logical, intent(out) :: found
+        character(len=:), allocatable, intent(out), optional :: kind
         type(stmt_t) :: st
         integer :: stat
 
@@ -767,17 +798,18 @@ contains
         repo = ''
         ref = ''
         call db_prepare(db, "UPDATE checks SET state = 'running', runner = ?1, claimed_at = "// &
-            NOW//" WHERE id = (SELECT min(c.id) FROM checks c WHERE c.state = 'queued' AND"// &
+            NOW//" WHERE id = (SELECT c.id FROM checks c WHERE c.state = 'queued' AND"// &
             ' (coalesce((SELECT p.runner FROM checks p WHERE p.repo = c.repo AND p.runner'// &
             ' IS NOT NULL ORDER BY p.id DESC LIMIT 1), ?1) = ?1 OR c.created_at <='// &
-            " strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-"//AFFINITY_SECONDS//" seconds')))"// &
-            ' RETURNING id, repo, ref;', st, stat)
+            " strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-"//AFFINITY_SECONDS//" seconds'))"// &
+            " ORDER BY c.kind = 'verify', c.id LIMIT 1) RETURNING id, repo, ref, kind;", st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, runner, stat)
         if (stmt_step(st) == SQLITE_ROW) then
             id = stmt_int(st, 0)
             repo = stmt_text(st, 1)
             ref = stmt_text(st, 2)
+            if (present(kind)) kind = stmt_text(st, 3)
             found = .true.
         end if
         call stmt_finalize(st)

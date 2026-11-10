@@ -10,6 +10,7 @@ module fy_server
     use fy_git_http, only: git_http_route, git_http_serve
     use fy_land, only: land_branch, land_hook_install, land_check
     use fy_issue, only: issue_api
+    use fy_verify, only: verifier_main, verify_request
     use fy_change, only: change_t, change_sync, change_by_id, change_by_branch, change_landed, &
         change_next_number, change_api, change_message
     use fy_events, only: events_set_dir, events_notify, events_stream, events_watch_open, &
@@ -102,8 +103,8 @@ contains
         ! mirrors repositories, and the slots after it land branches: several
         ! when runners check them, so one repository's long check does not hold
         ! up the others, else one.
-        integer :: pids(nworkers + 1 + MAX_LANDERS)
-        integer(int64) :: started(nworkers + 1 + MAX_LANDERS), now, rate
+        integer :: pids(nworkers + 2 + MAX_LANDERS)
+        integer(int64) :: started(nworkers + 2 + MAX_LANDERS), now, rate
         integer :: i, pid, status, slots
         character(len=:), allocatable :: followed
         integer :: me
@@ -113,7 +114,8 @@ contains
         if (allocated(repos_dir)) then
             slots = nworkers + 2
             if (checks_mode_set()) then
-                if (checks_mode == 'runner') slots = nworkers + 1 + MAX_LANDERS
+                ! The last slot verifies main (fy_verify), on runners only.
+                if (checks_mode == 'runner') slots = nworkers + 2 + MAX_LANDERS
             end if
         end if
         do i = 1, slots
@@ -189,7 +191,9 @@ contains
             end do
             if (pids(slot) /= 0) return
             if (.not. proc_die_with_parent(me)) call proc_exit(0)
-            if (slot > nworkers + 1) then
+            if (slot == nworkers + 2 + MAX_LANDERS) then
+                call verifier_main(db_path, repos_dir)
+            else if (slot > nworkers + 1) then
                 call lander_main(db_path, slot - nworkers - 1)
             else if (slot > nworkers) then
                 call mirror_main(db_path)
@@ -488,6 +492,12 @@ contains
                 call queue_landing(rest(1:len(rest) - 5))
                 return
             end if
+            if (len(rest) > 7) then
+                if (rest(len(rest) - 6:) == '/verify') then
+                    call queue_verify(rest(1:len(rest) - 7))
+                    return
+                end if
+            end if
         end if
         if (len(rest) > 9) then
             if (rest(len(rest) - 8:) == '/landings') then
@@ -665,6 +675,32 @@ contains
             res%code = 202
             res%body = '{"landing":'//trim(num)//',"state":"queued"}'
         end subroutine queue_landing
+
+        subroutine queue_verify(target)
+            !! POST /api/v1/repos/NAME/verify: verifies main's newest commit
+            !! again (fy_verify); 202 with the job's id.
+            character(len=*), intent(in) :: target
+            integer(int64) :: id
+            character(len=24) :: jn
+
+            if (index(' '//who%scopes//' ', ' admin ') == 0) then
+                call fail(res, 403, 'verifying needs the admin scope')
+                return
+            end if
+            inquire (file=repo_path(target)//'/HEAD', exist=exists)
+            if (.not. repo_name_ok(target) .or. .not. exists) then
+                call fail(res, 404, 'no such repository')
+                return
+            end if
+            id = verify_request(db, target, repo_path(target))
+            if (id == 0) then
+                call fail(res, 409, 'the repository has no main yet')
+                return
+            end if
+            write (jn, '(i0)') id
+            res%code = 202
+            res%body = '{"job":'//trim(jn)//',"state":"queued"}'
+        end subroutine queue_verify
 
         subroutine issues(target, sub)
             !! /api/v1/repos/NAME/issues...: see fy_issue.
@@ -1218,7 +1254,7 @@ contains
         type(db_t), intent(in) :: db
         type(response_t), intent(inout) :: res
         type(token_identity_t) :: who
-        character(len=:), allocatable :: repo, ref, log
+        character(len=:), allocatable :: repo, ref, log, kind
         character(len=24) :: num
         integer(int64) :: id
         integer :: ios, k
@@ -1232,7 +1268,7 @@ contains
             return
         end if
         if (req%path == '/api/v1/checks/claim') then
-            call store_check_claim(db, who%token_name, id, repo, ref, found)
+            call store_check_claim(db, who%token_name, id, repo, ref, found, kind)
             if (.not. found) then
                 res%code = 204
                 res%body = ''
@@ -1240,7 +1276,8 @@ contains
             end if
             call events_notify('checks')
             write (num, '(i0)') id
-            res%body = '{"id":'//trim(num)//',"repo":"'//repo//'","ref":"'//ref//'"}'
+            res%body = '{"id":'//trim(num)//',"repo":"'//repo//'","ref":"'//ref//'","kind":"'// &
+                kind//'"}'
             return
         end if
         k = index(req%path, '/result')
@@ -1333,7 +1370,7 @@ contains
             logical, intent(in) :: with_log
             character(len=:), allocatable :: s
             write (num, '(i0)') j%id
-            s = '{"id":'//trim(num)//',"kind":"landing","repo":"'//j%repo//'","branch":"'// &
+            s = '{"id":'//trim(num)//',"kind":"'//j%kind//'","repo":"'//j%repo//'","branch":"'// &
                 json_escape_string(j%branch)//'","account":"'//json_escape_string(j%account)// &
                 '","state":"'//j%state//'","queued":"'//j%created//'","started":"'// &
                 j%started//'","finished":"'//j%finished//'","commit":"'//j%commit//'"'

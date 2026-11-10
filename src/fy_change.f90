@@ -14,7 +14,7 @@ module fy_change
     implicit none
     private
 
-    public :: change_t, change_sync, change_get, change_by_id, change_by_branch, change_landed, &
+    public :: change_t, change_sync, change_get, change_by_id, change_by_branch, change_comment, change_landed, &
         change_next_number, change_api, change_message
 
     type :: change_t
@@ -576,6 +576,14 @@ contains
         end if
         json = json//']}'
     end function change_json
+
+    subroutine change_comment(db, change, account, text)
+        !! A comment on a change (by its id), as from a person or fortyard.
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: change
+        character(len=*), intent(in) :: account, text
+        call comment_add(db, change, account, text)
+    end subroutine change_comment
 
     subroutine comment_add(db, change, account, text)
         type(db_t), intent(in) :: db

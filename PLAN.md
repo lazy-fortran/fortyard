@@ -111,6 +111,12 @@ In order:
       pushed branch, which lands one at a time as one squashed commit with
       `(#N)` and a `Change:` trailer after the repository's check (`fo test`, or
       `.fortyard/check`) passed on that commit under a memory cap.
+- [x] Eventual correctness, repository level: after main moves, a runner
+      verifies its newest commit with the full suite (`.fortyard/verify`, else
+      every fpm test run again), after landing checks; a failure after a pass
+      is bisected over main's commits, reported as an issue with the log and
+      on the culprit's change, and closed when main passes again; `fy verify`.
+      Case level (keys from fo's plan, staleness, flaky detection) follows.
 - [ ] Batched merge queue, `Change-Id` trailers, landing from a change page.
 - [x] Push of `main` to the repository's upstream after each landing.
 - [x] The edge timer follows the instance's own `main`; fortyard is primary on

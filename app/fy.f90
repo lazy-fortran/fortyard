@@ -38,6 +38,8 @@ program fy
         call cmd_landings()
     case ('jobs')
         call cmd_jobs()
+    case ('verify')
+        call cmd_verify()
     case ('job')
         call cmd_job()
     case ('push')
@@ -102,7 +104,10 @@ contains
             '  issue comment N [-m TEXT], issue edit N [--title T] [--body-file F|-]', &
             '  issue close N, issue reopen N', &
             '  landings [REPO]     recent landings of a repository', &
-            '  jobs [REPO]         running, waiting and recent jobs', &
+            '  jobs [REPO]         running, waiting and recent jobs (landings and', &
+            '                      verifications of main)', &
+            '  verify [REPO] [--no-wait]', &
+            '                      verify main''s newest commit with the full suite', &
             '  job ID [--wait]     a job''s state and log; --wait follows it', &
             '                      (--json: the answer of the API instead of text)', &
             '  git-credential get  git credential helper for the stored login:', &
@@ -383,9 +388,10 @@ contains
                 body, stat)
             if (stat /= 0 .or. code /= 200) call report(code, body, stat)
             state = cli_field(body, 'state')
-            if (state == 'landed' .or. state == 'failed') exit
+            if (state == 'landed' .or. state == 'failed' .or. state == 'passed' .or. &
+                state == 'cancelled') exit
             if (state /= last) then
-                write (output_unit, '(a)') 'landing '//id//' '//state
+                write (output_unit, '(a)') cli_field(body, 'kind')//' '//id//' '//state
                 flush (output_unit)
                 last = state
             end if
@@ -394,8 +400,12 @@ contains
         if (state == 'landed') then
             write (output_unit, '(a)') 'landing '//id//' landed as '//cli_field(body, 'commit')
             return
+        else if (state == 'passed') then
+            write (output_unit, '(a)') 'verification '//id//' of '//cli_field(body, 'commit')// &
+                ' passed'
+            return
         end if
-        write (output_unit, '(a)') 'landing '//id//' failed:', &
+        write (output_unit, '(a)') cli_field(body, 'kind')//' '//id//' '//state//':', &
             cli_tail(cli_field(body, 'log'), 40)
         call quit(1)
     end subroutine follow_job
@@ -488,6 +498,26 @@ contains
         path = trim(dir)//'/fy-'//trim(num)
     end function scratch_file
 
+    subroutine cmd_verify()
+        !! fy verify [REPO] [--no-wait]: verifies main's newest commit with the
+        !! repository's full suite and follows it.
+        type(config_t) :: cfg
+        character(len=:), allocatable :: body, repo, id
+        integer :: code, stat
+
+        call config_load(cfg)
+        call require_login(cfg)
+        repo = positional(1)
+        if (len(repo) == 0) repo = remote_repo(cfg%server)
+        call client_request(cfg%server, 'POST', '/api/v1/repos/'//repo//'/verify', cfg%token, &
+            '{}', code, body, stat)
+        if (stat /= 0 .or. code /= 202) call report(code, body, stat)
+        id = cli_field(body, 'job')
+        write (output_unit, '(a)') 'verification '//id//' of '//repo//' main queued'
+        flush (output_unit)
+        if (.not. flag('--no-wait')) call follow_job(cfg, id)
+    end subroutine cmd_verify
+
     subroutine cmd_landings()
         !! fy landings [REPO]: recent landings of a repository.
         type(config_t) :: cfg
@@ -524,7 +554,7 @@ contains
             return
         end if
         write (output_unit, '(a)', advance='no') cli_table(body, 'jobs', &
-            [character(len=8) :: 'id', 'repo', 'state', 'started', 'branch'])
+            [character(len=8) :: 'id', 'kind', 'repo', 'state', 'started', 'branch'])
     end subroutine cmd_jobs
 
     subroutine cmd_job()

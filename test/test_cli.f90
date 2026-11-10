@@ -77,7 +77,7 @@ program test_cli
         index(out, 'check ran') > 0, 'a failed landing exits 1 with the check''s output: '//out)
 
     call run(env//fy//' jobs')
-    call check(index(out, 'ID  REPO  STATE   STARTED') == 1 .and. index(out, 'landed') > 0 &
+    call check(index(out, 'ID  KIND     REPO  STATE   STARTED') == 1 .and. index(out, 'landed') > 0 &
         .and. index(out, 'broken') > 0, 'fy jobs prints a table: '//out)
     call run('cd '//work//' && '//env//fy//' landings')
     call check(index(out, 'LANDING  STATE') == 1 .and. index(out, 'first') > 0, &

@@ -349,32 +349,57 @@ contains
 
     end subroutine land_branch
 
-    subroutine land_check(work, out, code)
+    subroutine land_check(work, out, code, verify)
         !! The check of a landing commit checked out in `work`: fo build and fo
         !! test for an fpm project (applications built, so tests may run them),
         !! else an executable .fortyard/check; under a memory cap when systemd can
-        !! give one. `out` is its output, `code` its exit status.
+        !! give one. `out` is its output, `code` its exit status. With `verify`,
+        !! the verification of main instead (fy_verify): .fortyard/verify, the
+        !! repository's full suite, else for an fpm project every test run
+        !! again, without reusing earlier passes.
         character(len=*), intent(in) :: work
         character(len=:), allocatable, intent(out) :: out
         integer, intent(out) :: code
+        logical, intent(in), optional :: verify
         character(len=1024), allocatable :: cmd(:)
         character(len=256) :: runtime
+        character(len=8) :: limit
         integer :: rn, rs
-        logical :: exists
+        logical :: exists, full
 
-        inquire (file=work//'/fpm.toml', exist=exists)
-        if (exists) then
-            cmd = [character(len=1024) :: 'sh', '-c', 'fo build && fo test']
-        else
-            inquire (file=work//'/.fortyard/check', exist=exists)
-            if (.not. exists) then
-                out = 'No check is configured (fpm.toml or .fortyard/check).'
-                code = 0
-                return
+        full = .false.
+        if (present(verify)) full = verify
+        limit = '3600'
+        if (full) then
+            ! The full suite of a large code may take hours.
+            limit = '21600'
+            inquire (file=work//'/.fortyard/verify', exist=exists)
+            if (exists) then
+                cmd = [character(len=1024) :: './.fortyard/verify']
+            else
+                inquire (file=work//'/fpm.toml', exist=exists)
+                if (.not. exists) then
+                    out = 'No verification is configured (.fortyard/verify or fpm.toml).'
+                    code = 0
+                    return
+                end if
+                cmd = [character(len=1024) :: 'sh', '-c', 'fo build && FO_TEST_RERUN=1 fo test']
             end if
-            cmd = [character(len=1024) :: './.fortyard/check']
+        else
+            inquire (file=work//'/fpm.toml', exist=exists)
+            if (exists) then
+                cmd = [character(len=1024) :: 'sh', '-c', 'fo build && fo test']
+            else
+                inquire (file=work//'/.fortyard/check', exist=exists)
+                if (.not. exists) then
+                    out = 'No check is configured (fpm.toml or .fortyard/check).'
+                    code = 0
+                    return
+                end if
+                cmd = [character(len=1024) :: './.fortyard/check']
+            end if
         end if
-        cmd = [character(len=1024) :: 'timeout', '3600', cmd]
+        cmd = [character(len=1024) :: 'timeout', trim(limit), cmd]
         call get_environment_variable('XDG_RUNTIME_DIR', runtime, rn, rs)
         if (rs == 0 .and. len(proc_find('systemd-run')) > 0) cmd = [character(len=1024) :: &
             'systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', &

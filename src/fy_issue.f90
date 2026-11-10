@@ -12,11 +12,11 @@ module fy_issue
     use fx_json_parse, only: json_extract_string
     use fy_change, only: change_next_number
     use fy_sqlite, only: db_t, stmt_t, db_prepare, stmt_bind_text, stmt_bind_int, stmt_step, &
-        stmt_text, stmt_int, stmt_finalize, SQLITE_OK, SQLITE_ROW
+        stmt_text, stmt_int, stmt_finalize, SQLITE_OK, SQLITE_ROW, SQLITE_DONE
     implicit none
     private
 
-    public :: issue_api
+    public :: issue_api, issue_open, issue_comment, issue_set_state
 
     character(len=*), parameter :: NOW = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
     character(len=*), parameter :: COLUMNS = 'id, number, title, body, author, state,'// &
@@ -184,6 +184,56 @@ contains
         end subroutine edit
 
     end subroutine issue_api
+
+    integer function issue_open(db, repo, git_dir, title, text, account) result(number)
+        !! Opens an issue and returns its number, or 0.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: repo, git_dir, title, text, account
+        type(stmt_t) :: st
+        integer :: stat
+
+        number = change_next_number(db, repo, git_dir)
+        call db_prepare(db, 'INSERT INTO issues (repo, number, title, body, author,'// &
+            ' created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, '//NOW//', '//NOW//');', &
+            st, stat)
+        if (stat /= SQLITE_OK) then
+            number = 0
+            return
+        end if
+        call stmt_bind_text(st, 1, repo, stat)
+        call stmt_bind_int(st, 2, int(number, int64), stat)
+        call stmt_bind_text(st, 3, title, stat)
+        call stmt_bind_text(st, 4, text, stat)
+        call stmt_bind_text(st, 5, account, stat)
+        if (stmt_step(st) /= SQLITE_DONE) number = 0
+        call stmt_finalize(st)
+    end function issue_open
+
+    subroutine issue_comment(db, repo, number, account, text)
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: repo, account, text
+        integer, intent(in) :: number
+        type(issue_t) :: it
+        logical :: found
+
+        call issue_get(db, repo, number, it, found)
+        if (.not. found) return
+        call exec_text3(db, 'INSERT INTO issue_comments (issue, account, body, created_at)'// &
+            ' VALUES (?1, ?2, ?3, '//NOW//');', it%id, account, text)
+    end subroutine issue_comment
+
+    subroutine issue_set_state(db, repo, number, state)
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: repo, state
+        integer, intent(in) :: number
+        type(issue_t) :: it
+        logical :: found
+
+        call issue_get(db, repo, number, it, found)
+        if (.not. found) return
+        call exec_text3(db, 'UPDATE issues SET state = ?2, updated_at = '//NOW// &
+            ' WHERE id = ?1 AND ?3 = ?3;', it%id, state, '')
+    end subroutine issue_set_state
 
     subroutine issue_get(db, repo, number, it, found)
         type(db_t), intent(in) :: db

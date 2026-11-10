@@ -123,7 +123,7 @@ contains
     subroutine run_one(server, token, data_dir, claim, remote)
         character(len=*), intent(in) :: server, token, data_dir, claim
         logical, intent(in), optional :: remote
-        character(len=:), allocatable :: repo, ref, out, body, work, id, kept
+        character(len=:), allocatable :: repo, ref, out, body, work, id, kept, kind
         character(len=256) :: tmp
         ! Fixed length: gfortran overflows typed array constructors around
         ! deferred-length strings.
@@ -133,6 +133,8 @@ contains
 
         call json_extract_string(claim, 'repo', repo, found)
         call json_extract_string(claim, 'ref', ref, found)
+        call json_extract_string(claim, 'kind', kind, found)
+        if (.not. found) kind = 'check'
         s = index(claim, '"id":') + 5
         e = s
         do while (e <= len(claim))
@@ -184,14 +186,14 @@ contains
             ! A failure is confirmed from an empty build directory before it
             ! is reported, so stale build state can never fail a landing.
             call proc_run([character(len=1024) :: 'touch', w], body, stat, 4096)
-            call land_check(work, out, code)
+            call land_check(work, out, code, verify=kind == 'verify')
             if (code /= 0) then
                 inquire (file=work//'/build/.', exist=found)
                 if (found) then
                     kept = out
                     call proc_run([character(len=1024) :: 'rm', '-rf', trim(w)//'/build'], &
                         body, stat, 4096)
-                    call land_check(work, out, code)
+                    call land_check(work, out, code, verify=kind == 'verify')
                     out = 'With the kept build directory the check failed; it was rerun '// &
                         'from an empty build directory.'//new_line('a')// &
                         '--- with the kept build directory (end) ---'//new_line('a')// &
