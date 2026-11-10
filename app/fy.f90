@@ -44,6 +44,8 @@ program fy
         call cmd_push()
     case ('change')
         call cmd_change()
+    case ('issue')
+        call cmd_issue()
     case ('git-credential')
         call cmd_git_credential()
     case ('mcp')
@@ -94,6 +96,11 @@ contains
             '  change land N [--no-wait]    land the change and follow it', &
             '  change close N, change reopen N', &
             '                      (change and push take --repo NAME outside a checkout)', &
+            '  issue list [--all]  open issues (--all: also closed ones)', &
+            '  issue view N        an issue with its comments', &
+            '  issue new --title T [--body-file F|-]', &
+            '  issue comment N [-m TEXT], issue edit N [--title T] [--body-file F|-]', &
+            '  issue close N, issue reopen N', &
             '  landings [REPO]     recent landings of a repository', &
             '  jobs [REPO]         running, waiting and recent jobs', &
             '  job ID [--wait]     a job''s state and log; --wait follows it', &
@@ -741,6 +748,100 @@ contains
             if (text(len(text):) == new_line('a')) text = text(1:len(text) - 1)
         end if
     end function read_file
+
+    subroutine cmd_issue()
+        !! fy issue list|view|new|comment|edit|close|reopen ...
+        type(config_t) :: cfg
+        character(len=:), allocatable :: what, repo, n, body, path, payload, text, state
+        integer :: code, stat
+
+        call config_load(cfg)
+        call require_login(cfg)
+        what = positional(1)
+        n = positional(2)
+        repo = option('--repo', '')
+        if (len(repo) == 0) repo = remote_repo(cfg%server)
+        path = '/api/v1/repos/'//repo//'/issues'
+        if (what /= 'list' .and. what /= 'new' .and. &
+            (len(n) == 0 .or. verify(n, '0123456789') /= 0)) then
+            write (error_unit, '(a)') 'fy: usage: fy issue '//what//' NUMBER'
+            call quit(2)
+        end if
+        select case (what)
+        case ('list')
+            state = 'open'
+            if (flag('--all')) state = 'all'
+            call client_request(cfg%server, 'GET', path//'?state='//state, cfg%token, '', &
+                code, body, stat)
+            if (stat /= 0 .or. code /= 200 .or. flag('--json')) call report(code, body, stat)
+            if (stat /= 0 .or. code /= 200 .or. flag('--json')) return
+            write (output_unit, '(a)', advance='no') cli_table(body, 'issues', &
+                [character(len=8) :: 'number', 'state', 'author', 'comments', 'title'])
+        case ('view')
+            call client_request(cfg%server, 'GET', path//'/'//n, cfg%token, '', code, body, stat)
+            if (stat /= 0 .or. code /= 200 .or. flag('--json')) call report(code, body, stat)
+            if (stat /= 0 .or. code /= 200 .or. flag('--json')) return
+            write (output_unit, '(a)') '#'//n//' '//cli_field(body, 'title'), &
+                cli_field(body, 'state')//', opened by '//cli_field(body, 'author')//' on '// &
+                cli_field(body, 'created'), cfg%server//'/'//repo//'/-/issues/'//n, ''
+            text = cli_field(body, 'body')
+            if (len(text) > 0) write (output_unit, '(a)') text
+            text = cli_table(body, 'comments_list', [character(len=8) :: 'account', 'created', &
+                'body'])
+            if (len(text) > 0) write (output_unit, '(a)', advance='no') new_line('a')//text
+        case ('new')
+            text = option('--body-file', '')
+            if (text == '-') then
+                text = read_stdin()
+            else if (len(text) > 0) then
+                text = read_file(text)
+            end if
+            if (len(option('--title', '')) == 0) then
+                write (error_unit, '(a)') 'fy: usage: fy issue new --title T [--body-file F|-]'
+                call quit(2)
+            end if
+            call client_request(cfg%server, 'POST', path, cfg%token, '{"title":"'// &
+                json_escape_string(option('--title', ''))//'","body":"'// &
+                json_escape_string(text)//'"}', code, body, stat)
+            if (stat /= 0 .or. code /= 201) call report(code, body, stat)
+            n = cli_field(body, 'issue')
+            write (output_unit, '(a)') 'issue #'//n//': '//cfg%server//'/'//repo//'/-/issues/'//n
+        case ('comment')
+            text = option('-m', '')
+            if (len(text) == 0) text = read_stdin()
+            call client_request(cfg%server, 'POST', path//'/'//n//'/comments', cfg%token, &
+                '{"body":"'//json_escape_string(text)//'"}', code, body, stat)
+            if (stat /= 0 .or. code /= 201) call report(code, body, stat)
+            write (output_unit, '(a)') 'commented on #'//n
+        case ('edit')
+            payload = ''
+            if (len(option('--title', '')) > 0) payload = '"title":"'// &
+                json_escape_string(option('--title', ''))//'"'
+            if (len(option('--body-file', '')) > 0) then
+                if (option('--body-file', '') == '-') then
+                    text = read_stdin()
+                else
+                    text = read_file(option('--body-file', ''))
+                end if
+                if (len(payload) > 0) payload = payload//','
+                payload = payload//'"body":"'//json_escape_string(text)//'"'
+            end if
+            call client_request(cfg%server, 'POST', path//'/'//n, cfg%token, '{'//payload//'}', &
+                code, body, stat)
+            if (stat /= 0 .or. code /= 200) call report(code, body, stat)
+            write (output_unit, '(a)') 'edited #'//n
+        case ('close', 'reopen')
+            state = 'closed'
+            if (what == 'reopen') state = 'open'
+            call client_request(cfg%server, 'POST', path//'/'//n, cfg%token, &
+                '{"state":"'//state//'"}', code, body, stat)
+            if (stat /= 0 .or. code /= 200) call report(code, body, stat)
+            write (output_unit, '(a)') '#'//n//' '//state
+        case default
+            write (error_unit, '(a)') 'fy: usage: fy issue list|view|new|comment|edit|close|reopen'
+            call quit(2)
+        end select
+    end subroutine cmd_issue
 
     subroutine quit(status)
         !! Ends fy with `status` after its output, without a runtime message.

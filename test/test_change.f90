@@ -5,7 +5,8 @@ program test_change
     !! interdiff; comments and edits show in fy change view; fy change land
     !! lands it as "TITLE (#N)" with the description and the Change-Id, and
     !! marks it landed. A landing without a change takes a number after those
-    !! of open changes, and a closed change can be reopened.
+    !! of open changes, and a closed change can be reopened. Issues share the
+    !! numbers.
     use fy_posix, only: tcp_listen, sock_bound_port, sock_close
     use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, SIGTERM
     use fy_server, only: server_supervise, server_set_data_dir
@@ -109,6 +110,19 @@ program test_change
         index(out, 'Change-Id: I0123abcd') > 0, 'the landed commit carries the change: '//out)
     call run(in//fy//' change view 2')
     call check(index(out, 'landed, 2 version(s) by admin') > 0, 'the change is landed with its 2 versions: '//out)
+
+    ! Issues take numbers from the same sequence as changes.
+    call run(in//'printf "Steps:\n1. run it\n" | '//fy//' issue new --title "It fails" '// &
+        '--body-file - && '//fy//' issue comment 4 -m "Seen too." && '//fy//' issue view 4')
+    call check(stat == 0 .and. index(out, 'issue #4: '//server//'/demo/-/issues/4') > 0 .and. &
+        index(out, '#4 It fails') > 0 .and. index(out, '1. run it') > 0 .and. &
+        index(out, 'Seen too.') > 0, 'an issue is opened, commented and shown: '//out)
+    call run(in//fy//' issue close 4 && '//fy//' issue list --all')
+    call check(index(out, '4       closed  admin   1         It fails') > 0, &
+        'fy issue list --all shows the closed issue: '//out)
+    call run(in//'git checkout -q -b later FETCH_HEAD && printf "y\n" > Y && '//git// &
+        'add Y && '//git//'commit -q -m Later && '//fy//' push')
+    call check(index(out, 'change #5') > 0, 'the next change follows the issue: '//out)
 
     call proc_kill(sup, SIGTERM)
     call proc_wait(sup, stat)

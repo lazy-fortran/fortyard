@@ -75,6 +75,9 @@ contains
             key = trim_nl(key)
             if (len(key) == 0) key = 'branch:'//branch
             call find_open(db, repo, key, branch, c, found)
+            ! A branch left at a version of a change (landed, closed or another
+            ! branch's) is no new work.
+            if (.not. found .and. known_head(db, repo, tip)) cycle
             if (.not. found) then
                 call open_change(db, repo, git_dir, key, branch, tip, base, account, c, found)
                 if (.not. found) cycle
@@ -176,8 +179,8 @@ contains
     end subroutine add_version
 
     integer function change_next_number(db, repo, git_dir) result(m)
-        !! One more than the highest number of the repository's changes and of
-        !! the "(#N)" ending a subject on main.
+        !! One more than the highest number of the repository's changes and
+        !! issues and of the "(#N)" ending a subject on main.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: repo, git_dir
         type(stmt_t) :: st
@@ -185,7 +188,8 @@ contains
         integer :: stat, status, pos, e, s, v, ios
 
         m = 1
-        call db_prepare(db, 'SELECT coalesce(max(number), 0) FROM changes WHERE repo = ?1;', st, stat)
+        call db_prepare(db, 'SELECT max(coalesce((SELECT max(number) FROM changes WHERE repo = ?1),'// &
+            ' 0), coalesce((SELECT max(number) FROM issues WHERE repo = ?1), 0));', st, stat)
         if (stat == SQLITE_OK) then
             call stmt_bind_text(st, 1, repo, stat)
             if (stmt_step(st) == SQLITE_ROW) m = int(stmt_int(st, 0)) + 1
@@ -635,6 +639,22 @@ contains
         end if
         call stmt_finalize(st)
     end subroutine find_open
+
+    logical function known_head(db, repo, head)
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: repo, head
+        type(stmt_t) :: st
+        integer :: stat
+
+        known_head = .false.
+        call db_prepare(db, 'SELECT 1 FROM change_versions v JOIN changes c ON c.id = v.change'// &
+            ' WHERE c.repo = ?1 AND v.head = ?2 LIMIT 1;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, repo, stat)
+        call stmt_bind_text(st, 2, head, stat)
+        known_head = stmt_step(st) == SQLITE_ROW
+        call stmt_finalize(st)
+    end function known_head
 
     logical function has_version(db, change, head)
         type(db_t), intent(in) :: db

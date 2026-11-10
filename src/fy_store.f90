@@ -20,7 +20,7 @@ module fy_store
     public :: store_jobs, store_job, store_job_counts, store_jobs_state
     public :: store_check_add, store_check_claim, store_check_finish, store_check_get
 
-    integer, parameter, public :: SCHEMA_VERSION = 9
+    integer, parameter, public :: SCHEMA_VERSION = 10
 
     type :: token_identity_t
         logical :: found = .false.
@@ -223,6 +223,22 @@ contains
                 ' account TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL);'// &
                 'ALTER TABLE landings ADD COLUMN change INTEGER;'// &
                 'DELETE FROM schema_version; INSERT INTO schema_version VALUES (9);'// &
+                'COMMIT;', stat)
+            if (stat /= SQLITE_OK) then
+                call db_exec(db, 'ROLLBACK;', version)
+                return
+            end if
+        end if
+        if (store_schema_version(db) < 10) then
+            ! Issues (fy_issue), numbered with the changes of their repository.
+            call db_exec(db, 'BEGIN;'// &
+                'CREATE TABLE issues (id INTEGER PRIMARY KEY, repo TEXT NOT NULL,'// &
+                ' number INTEGER NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,'// &
+                " author TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open',"// &
+                ' created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (repo, number));'// &
+                'CREATE TABLE issue_comments (id INTEGER PRIMARY KEY, issue INTEGER NOT NULL,'// &
+                ' account TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL);'// &
+                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (10);'// &
                 'COMMIT;', stat)
             if (stat /= SQLITE_OK) then
                 call db_exec(db, 'ROLLBACK;', version)

@@ -9,6 +9,7 @@ module fy_server
         http_basic_password
     use fy_git_http, only: git_http_route, git_http_serve
     use fy_land, only: land_branch, land_hook_install, land_check
+    use fy_issue, only: issue_api
     use fy_change, only: change_t, change_sync, change_by_id, change_by_branch, change_landed, &
         change_next_number, change_api, change_message
     use fy_events, only: events_set_dir, events_notify, events_stream, events_watch_open, &
@@ -458,6 +459,16 @@ contains
             call releases_route(rest(1:k - 1), rest(k + 9:))
             return
         end if
+        k = index(rest, '/issues')
+        if (k > 1) then
+            if (len(rest) == k + 6) then
+                call issues(rest(1:k - 1), '')
+                return
+            else if (rest(k + 7:k + 7) == '/') then
+                call issues(rest(1:k - 1), rest(k + 7:))
+                return
+            end if
+        end if
         k = index(rest, '/changes')
         if (k > 1) then
             if (len(rest) == k + 7) then
@@ -654,6 +665,28 @@ contains
             res%code = 202
             res%body = '{"landing":'//trim(num)//',"state":"queued"}'
         end subroutine queue_landing
+
+        subroutine issues(target, sub)
+            !! /api/v1/repos/NAME/issues...: see fy_issue.
+            character(len=*), intent(in) :: target, sub
+            character(len=:), allocatable :: answer
+            integer :: code
+
+            inquire (file=repo_path(target)//'/HEAD', exist=exists)
+            if (.not. repo_name_ok(target) .or. .not. exists) then
+                call fail(res, 404, 'no such repository')
+                return
+            end if
+            if (req%method == 'POST' .and. index(' '//who%scopes//' ', ' admin ') == 0 .and. &
+                index(' '//who%scopes//' ', ' write ') == 0) then
+                call fail(res, 403, 'writing issues needs the admin or write scope')
+                return
+            end if
+            call issue_api(db, req%method, target, repo_path(target), sub, req%query, req%body, &
+                who%account, index(' '//who%scopes//' ', ' admin ') > 0, code, answer)
+            res%code = code
+            res%body = answer
+        end subroutine issues
 
         subroutine changes(target, sub)
             !! /api/v1/repos/NAME/changes...: see fy_change; landing a change

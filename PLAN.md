@@ -102,7 +102,9 @@ In order:
       versions matched by `Change-Id` or branch, comments, interdiff); landing
       it gives the commit the change's number, description and trailers;
       `fy push`, `fy change list|view|diff|comment|edit|land|close|reopen`.
-- [ ] Change pages in the web application.
+- [x] Issues, numbered with the changes: `fy issue list|view|new|comment|edit|
+      close|reopen` and the API.
+- [ ] Change and issue pages in the web application.
 - [x] Landing, minimal: `main` takes no pushes; `fy land REPO BRANCH` queues a
       pushed branch, which lands one at a time as one squashed commit with
       `(#N)` and a `Change:` trailer after the repository's check (`fo test`, or
