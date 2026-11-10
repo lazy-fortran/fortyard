@@ -360,6 +360,7 @@ contains
         select case (code)
         case (200); text = 'OK'
         case (201); text = 'Created'
+        case (302); text = 'Found'
         case (304); text = 'Not Modified'
         case (415); text = 'Unsupported Media Type'
         case (400); text = 'Bad Request'

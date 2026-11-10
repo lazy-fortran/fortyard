@@ -10,7 +10,7 @@ module fy_store
     private
 
     public :: store_open, store_migrate, store_schema_version, store_snapshot
-    public :: store_bootstrap, store_token_lookup, store_token_create
+    public :: store_bootstrap, store_token_lookup, store_token_create, store_account_find
     public :: store_token_list, store_token_revoke, store_token_revoke_hash
     public :: token_identity_t, token_info_t, random_token
     public :: repo_info_t, store_repo_add, store_repo_list, store_repo_fetched, store_repo_set_mode
@@ -230,6 +230,31 @@ contains
         call stmt_finalize(st)
         call store_token_create(db, account_id, 'bootstrap', 'admin', token, stat)
     end subroutine store_bootstrap
+
+    subroutine store_account_find(db, name, account_id, kind, found)
+        !! An active account by name.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: name
+        integer(int64), intent(out) :: account_id
+        character(len=:), allocatable, intent(out) :: kind
+        logical, intent(out) :: found
+        type(stmt_t) :: st
+        integer :: stat
+
+        account_id = 0
+        kind = ''
+        found = .false.
+        call db_prepare(db, 'SELECT id, kind FROM accounts WHERE name = ?1 AND active = 1;', &
+            st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, name, stat)
+        if (stmt_step(st) == SQLITE_ROW) then
+            found = .true.
+            account_id = stmt_int(st, 0)
+            kind = stmt_text(st, 1)
+        end if
+        call stmt_finalize(st)
+    end subroutine store_account_find
 
     subroutine store_token_create(db, account_id, name, scopes, token, stat, days)
         !! A token that expires after `days`, or never when absent.

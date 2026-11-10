@@ -21,9 +21,12 @@ module fy_server
         repo_blob, repo_commit_json, repo_refs_json, repo_clone, repo_fetch, repo_init
     use fy_posix, only: tcp_accept, sock_close, sock_set_timeouts, sock_recv
     use fy_sqlite, only: db_t
+    use fy_oidc, only: oidc_config_t, oidc_load, oidc_authorize_url, oidc_exchange, &
+        oidc_check, oidc_claims_t, oidc_is_admin, oidc_value_ok
     use fy_proc, only: proc_fork, proc_wait_any, proc_exit, proc_pid, &
         proc_die_with_parent, proc_sleep_ms, proc_poll_child, proc_readlink, proc_reexec, proc_kill, proc_wait, SIGTERM
     use fx_hash, only: sha256_file
+    use fy_store, only: store_account_find, random_token
     use fy_store, only: token_identity_t, token_info_t, store_token_lookup, store_token_create, &
         store_open, store_token_list, store_token_revoke, store_token_revoke_hash, repo_info_t, &
         store_repo_add, store_repo_list, store_repo_fetched, store_repo_set_mode, landing_t, &
@@ -42,6 +45,8 @@ module fy_server
 
     character(len=*), parameter :: JSON = 'application/json'
     character(len=*), parameter :: SESSION_COOKIE = 'fy_session'
+    !! State, PKCE verifier and nonce of a sign-in on its way through the provider.
+    character(len=*), parameter :: LOGIN_COOKIE = 'fy_login'
     integer, parameter :: SESSION_DAYS = 14
     character(len=*), parameter :: SESSION_MAX_AGE = '1209600'
     !! Name of the tokens that are browser sessions.
@@ -57,6 +62,8 @@ module fy_server
 
     !! Directory of the web application; empty serves the status page at /.
     character(len=:), allocatable :: web_dir
+    !! Sign-in through the OpenID Connect provider, from <data>/oidc.conf.
+    type(oidc_config_t) :: oidc
     !! Directory of the repository mirrors.
     character(len=:), allocatable :: repos_dir
     !! Path below the host where fortyard is served (e.g. "/yard"), empty at the
@@ -352,6 +359,7 @@ contains
         !! Set once before workers start; read-only afterwards.
         character(len=*), intent(in) :: dir
         repos_dir = dir//'/repos'
+        call oidc_load(dir//'/oidc.conf', oidc)
         call events_set_dir(dir//'/events')
     end subroutine server_set_data_dir
 
@@ -978,6 +986,12 @@ contains
             else
                 call fail(res, 405, 'use GET or POST')
             end if
+        case ('/login')
+            if (.not. method_is(req, 'GET', res)) return
+            call login_start(res)
+        case ('/-/login/callback')
+            if (.not. method_is(req, 'GET', res)) return
+            call login_finish(req, db, res)
         case ('/api/v1/session')
             if (req%method == 'POST') then
                 call open_session(req, db, res)
@@ -1348,7 +1362,8 @@ contains
             return
         end if
         res%headers = 'Set-Cookie: '//SESSION_COOKIE//'='//session// &
-            '; Path='//cookie_path()//'; HttpOnly; SameSite=Strict; Max-Age='//SESSION_MAX_AGE//CRLF
+            '; Path='//cookie_path()//'; HttpOnly; SameSite=Strict'//secure()// &
+            '; Max-Age='//SESSION_MAX_AGE//CRLF
         res%body = '{"account":"'//json_escape_string(who%account)//'"}'
     end subroutine open_session
 
@@ -1361,9 +1376,148 @@ contains
         token = http_cookie(req, SESSION_COOKIE)
         if (len(token) > 0) call store_token_revoke_hash(db, token)
         res%headers = 'Set-Cookie: '//SESSION_COOKIE// &
-            '=; Path='//cookie_path()//'; HttpOnly; SameSite=Strict; Max-Age=0'//CRLF
+            '=; Path='//cookie_path()//'; HttpOnly; SameSite=Strict'//secure()//'; Max-Age=0'//CRLF
         res%body = '{"closed":true}'
     end subroutine close_session
+
+    subroutine login_start(res)
+        !! Sends the browser to the provider. The state, PKCE verifier and nonce
+        !! wait in a Lax cookie, which the browser returns on the redirect back.
+        type(response_t), intent(inout) :: res
+        character(len=:), allocatable :: state, verifier, nonce
+
+        if (.not. oidc%enabled) then
+            call fail(res, 404, 'sign-in through a provider is not configured')
+            return
+        end if
+        state = random_token()
+        verifier = random_token()
+        nonce = random_token()
+        res%code = 302
+        res%ctype = 'text/plain; charset=utf-8'
+        res%body = ''
+        res%headers = 'Location: '//oidc_authorize_url(oidc, state, verifier, nonce)//CRLF// &
+            'Set-Cookie: '//LOGIN_COOKIE//'='//state//'.'//verifier//'.'//nonce// &
+            '; Path='//b()//'/-/login; HttpOnly; SameSite=Lax'//secure()//'; Max-Age=600'//CRLF
+    end subroutine login_start
+
+    subroutine login_finish(req, db, res)
+        !! The provider's redirect back: checks the state, trades the code for
+        !! the ID token and opens a session. Only configured subjects get in;
+        !! everyone else is refused until fortyard grants them access.
+        type(http_request_t), intent(in) :: req
+        type(db_t), intent(in) :: db
+        type(response_t), intent(inout) :: res
+        character(len=:), allocatable :: pending, state, verifier, nonce, code, id_token, &
+            error, kind, session
+        type(oidc_claims_t) :: claims
+        integer(int64) :: account_id
+        integer :: d1, d2, stat
+        logical :: found
+
+        res%headers = 'Set-Cookie: '//LOGIN_COOKIE//'=; Path='//b()// &
+            '/-/login; HttpOnly; SameSite=Lax'//secure()//'; Max-Age=0'//CRLF
+        if (.not. oidc%enabled) then
+            call login_page(res, 404, 'Sign-in through a provider is not configured.')
+            return
+        end if
+        error = http_query_param(req%query, 'error')
+        if (len(error) > 0) then
+            call login_page(res, 401, 'The sign-in was cancelled or refused.')
+            return
+        end if
+        pending = http_cookie(req, LOGIN_COOKIE)
+        d1 = index(pending, '.')
+        d2 = index(pending, '.', back=.true.)
+        state = http_query_param(req%query, 'state')
+        if (d1 == 0 .or. d2 == d1 .or. len(state) == 0 .or. pending(1:max(d1 - 1, 0)) /= state) then
+            call login_page(res, 400, 'This sign-in has expired. Please start again.')
+            return
+        end if
+        verifier = pending(d1 + 1:d2 - 1)
+        nonce = pending(d2 + 1:)
+        code = http_query_param(req%query, 'code')
+        if (.not. oidc_value_ok(code)) then
+            call login_page(res, 400, 'The provider sent no usable code.')
+            return
+        end if
+        call oidc_exchange(oidc, code, verifier, id_token, error)
+        if (len(error) == 0) call oidc_check(oidc, id_token, nonce, claims, error)
+        if (len(error) > 0) then
+            write (error_unit, '(a)') 'fy: sign-in failed: '//error
+            call login_page(res, 502, 'The sign-in could not be completed. Please try again.')
+            return
+        end if
+        if (.not. oidc_is_admin(oidc, claims%sub)) then
+            write (error_unit, '(a)') 'fy: sign-in refused for '//claims%username// &
+                ' ('//claims%sub//')'
+            call login_page(res, 403, 'You are signed in as '//claims%username// &
+                ', but this account has no access to fortyard yet. '// &
+                'Please ask an administrator.')
+            return
+        end if
+        call store_account_find(db, 'admin', account_id, kind, found)
+        if (.not. found) then
+            call login_page(res, 500, 'The administrator account is missing.')
+            return
+        end if
+        call store_token_create(db, account_id, SESSION_NAME, kind, session, stat, &
+            days=SESSION_DAYS)
+        if (stat /= 0) then
+            call login_page(res, 500, 'The session could not be created.')
+            return
+        end if
+        ! A page, not a redirect: the browser came from the provider, and a
+        ! redirect would still count as cross-site and withhold the Strict cookie.
+        res%code = 200
+        res%ctype = 'text/html; charset=utf-8'
+        res%body = '<!doctype html><html lang="en"><head><meta charset="utf-8">'// &
+            '<meta http-equiv="refresh" content="0;url='//b()//'/">'// &
+            '<title>fortyard</title></head><body><a href="'//b()//'/">Continue</a>'// &
+            '</body></html>'
+        res%headers = res%headers// &
+            'Set-Cookie: '//SESSION_COOKIE//'='//session//'; Path='//cookie_path()// &
+            '; HttpOnly; SameSite=Strict'//secure()//'; Max-Age='//SESSION_MAX_AGE//CRLF
+    end subroutine login_finish
+
+    subroutine login_page(res, code, message)
+        type(response_t), intent(inout) :: res
+        integer, intent(in) :: code
+        character(len=*), intent(in) :: message
+
+        res%code = code
+        res%ctype = 'text/html; charset=utf-8'
+        res%body = '<!doctype html><html lang="en"><head><meta charset="utf-8">'// &
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'// &
+            '<title>Sign-in · fortyard</title></head><body style="font:16px/1.5 system-ui,'// &
+            'sans-serif;max-width:32rem;margin:15vh auto;padding:0 16px">'// &
+            '<h1 style="font-size:1.4rem">Sign-in</h1><p>'//html_escape(message)//'</p>'// &
+            '<p><a href="'//b()//'/">Back to fortyard</a></p></body></html>'
+    end subroutine login_page
+
+    function html_escape(s) result(e)
+        character(len=*), intent(in) :: s
+        character(len=:), allocatable :: e
+        integer :: k
+
+        e = ''
+        do k = 1, len(s)
+            select case (s(k:k))
+            case ('<'); e = e//'&lt;'
+            case ('>'); e = e//'&gt;'
+            case ('&'); e = e//'&amp;'
+            case ('"'); e = e//'&quot;'
+            case default; e = e//s(k:k)
+            end select
+        end do
+    end function html_escape
+
+    function secure() result(s)
+        !! Cookies only over HTTPS when fortyard's public URL is HTTPS.
+        character(len=:), allocatable :: s
+        s = ''
+        if (oidc%enabled .and. index(oidc%url, 'https://') == 1) s = '; Secure'
+    end function secure
 
     function repos_json(db) result(s)
         !! The mirrored repositories as GET /api/v1/repos returns them.
@@ -1678,7 +1832,7 @@ contains
         character(len=:), allocatable :: s
 
         s = '{"version":"'//FY_VERSION//'","commit":"'//FY_COMMIT// &
-            '","built":"'//FY_BUILT//'"}'
+            '","built":"'//FY_BUILT//'","login":'//trim(merge('true ', 'false', oidc%enabled))//'}'
     end function version_json
 
     function status_page() result(s)

@@ -6,7 +6,7 @@ module fy_ui_app
     !! code and sends it as HTML with the responses that produced it.
     use fortui
     use fx_json_build, only: json_escape_string
-    use fx_json_parse, only: json_extract_string, json_parser_t, json_event_t, &
+    use fx_json_parse, only: json_extract_string, json_extract_bool, json_parser_t, json_event_t, &
         json_parser_init, json_parser_next, JSON_KEY, JSON_STRING, JSON_INTEGER, &
         JSON_BOOL, JSON_OBJECT_END, JSON_END_OF_INPUT, JSON_ERROR
     use fy_fetch, only: request_t, fetch_start, fetch_ready
@@ -37,6 +37,8 @@ module fy_ui_app
     character(len=16) :: action = ''
     integer :: page = R_REPOS, theme_choice = 1
     logical :: signed_in = .false., checked = .false., submitted = .false.
+    !! The server can send people through the institute's sign-in (Keycloak).
+    logical :: login_offered = .false.
     logical :: pinned = .false., drawer_open = .false., copied = .false.
     real :: page_w = 1000.0, page_h = 800.0
     ! Text sizes and spacing of the page, in CSS pixels as forges use them.
@@ -357,8 +359,15 @@ contains
     subroutine sign_in_view()
         call column_begin(12.0, id="card-signin")
         call text("Sign in to fortyard", size=TITLE, style=UI_HEADING)
-        call text("Paste an access token. The browser keeps only a session cookie.", &
-            size=BODY, tone=UI_TONE_MUTED, width=UI_FILL)
+        if (login_offered) then
+            if (button("signin-sso", "Sign in with TU Graz account", width=UI_FILL, &
+                height=ROW_H, size=BODY)) call nav_assign("/login")
+            call text("Or paste an access token, as programs and the command line do.", &
+                size=BODY, tone=UI_TONE_MUTED, width=UI_FILL)
+        else
+            call text("Paste an access token. The browser keeps only a session cookie.", &
+                size=BODY, tone=UI_TONE_MUTED, width=UI_FILL)
+        end if
         call text("Access token", size=BODY, style=UI_HEADING)
         if (text_input("token", token_input, placeholder="fy_...", submitted=submitted, &
             width=UI_FILL, size=BODY)) continue
@@ -606,6 +615,8 @@ contains
         if (.not. found) commit = ''
         call json_extract_string(body, 'built', built, found)
         if (.not. found) built = ''
+        call json_extract_bool(body, 'login', login_offered, found)
+        if (.not. found) login_offered = .false.
     end subroutine apply_version
 
     subroutine apply_whoami(body, status)
