@@ -8,7 +8,9 @@
 #   FY_PROXY   optional SOCKS proxy (socks5h://HOST:PORT) to reach FY_TARGET
 #   FY_WEB_IMAGE optional image with LFortran and emscripten
 #              (deploy/container/Dockerfile.web); without it the browser files
-#              are built with the host's tools
+#              are built with the host's tools. When the commit pins LFortran
+#              in web/lfortran.rev, the image of that LFortran is used instead
+#              and built here when missing (fortyard-web:lf-<12 hex digits>)
 #   FY_BUILD_LIMITS optional docker run limits for the build containers,
 #              e.g. "--cpus 8 --memory 12g"
 # fy is compiled in the toolchain image, incrementally (its build tree and fo's
@@ -69,7 +71,22 @@ INFO
         git -C "$home/web" fetch --quiet origin main
         git -C "$home/web" checkout --quiet --force "$head"
         rm -rf "$home/web.new"
-        if [ -n "${FY_WEB_IMAGE:-}" ]; then
+        web_image=${FY_WEB_IMAGE:-}
+        rev=$(git -C "$mirror" show "$head:web/lfortran.rev" 2>/dev/null | head -c 40 || true)
+        if [ -n "$web_image" ] && [ ${#rev} -eq 40 ]; then
+            web_image=fortyard-web:lf-$(printf %.12s "$rev")
+            if ! docker image inspect "$web_image" >/dev/null 2>&1; then
+                ctx=$home/image-web
+                rm -rf "$ctx" && mkdir -p "$ctx"
+                git -C "$mirror" show "$head:deploy/container/Dockerfile.web" > "$ctx/Dockerfile"
+                docker build --quiet -t "$web_image" --build-arg LFORTRAN_REV="$rev" \
+                    --build-arg JOBS=8 "$ctx" >"$out.image.log" 2>&1 || {
+                    tail -30 "$out.image.log" >&2
+                    return 1
+                }
+            fi
+        fi
+        if [ -n "$web_image" ]; then
             # fo build fetches fx and fortui at the pinned versions; the
             # builder directory has the same path inside the containers.
             # shellcheck disable=SC2086
@@ -77,7 +94,7 @@ INFO
                 -w "$home/web" "$FY_TOOLCHAIN" fo build >/dev/null 2>&1 || true
             # shellcheck disable=SC2086
             docker run --rm --init $limits --user "$user" -v "$home:$home" -e HOME="$home/cache/home" \
-                -w "$home/web" "$FY_WEB_IMAGE" scripts/build-web.sh "$home/web" "$home/web.new" \
+                -w "$home/web" "$web_image" scripts/build-web.sh "$home/web" "$home/web.new" \
                 >"$out.web.log" 2>&1
         else
             (cd "$home/web" && fo build >/dev/null 2>&1) || true
@@ -111,7 +128,7 @@ INFO
         cp "$out/scripts/release-builder.sh" "$0.new" && chmod 755 "$0.new" &&
             mv -f "$0.new" "$0" && restart=1
     fi
-    rm -rf "$out" "$out.tar" "$out.log" "$out.web.log"
+    rm -rf "$out" "$out.tar" "$out.log" "$out.web.log" "$out.image.log"
     echo "released $version ($short)"
 }
 

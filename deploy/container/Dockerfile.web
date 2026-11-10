@@ -5,7 +5,7 @@
 # in it, so releases need no developer machine. Python appears only inside
 # LFortran's own source generation.
 FROM archlinux:base-devel
-ARG LFORTRAN_REPO=https://github.com/lfortran/lfortran.git
+ARG LFORTRAN_REPO=https://github.com/lazy-fortran/lfortran.git
 ARG LFORTRAN_REV
 ARG JOBS=8
 RUN pacman -Syu --noconfirm --needed git emscripten nodejs-lts-jod \
