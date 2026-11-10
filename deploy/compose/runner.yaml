@@ -19,14 +19,16 @@ services:
       HOME: /tmp
       TMPDIR: "@HOME@/tmp"
       # Bounded caches that persist between checks (ccache and fo evict the
-      # oldest entries themselves); base_dir lets work trees share hits.
-      CCACHE_DIR: "@HOME@/ccache"
+      # oldest entries themselves). Runners of one host share them, as both
+      # take concurrent users; base_dir lets their work trees share hits.
+      CCACHE_DIR: "@CACHE@/ccache"
       CCACHE_MAXSIZE: "20G"
       CCACHE_BASEDIR: "@HOME@/tmp/fy-work"
-      FO_CACHE_DIR: "@HOME@/fo-cache"
+      FO_CACHE_DIR: "@CACHE@/fo"
       FO_CACHE_MAX_SIZE: "20G"
     volumes:
       - "@HOME@:@HOME@"
+      - "@CACHE@:@CACHE@"
     entrypoint: ["@HOME@/bin/remote-runner.sh"]
     mem_limit: "@MEMORY@"
     cpus: "@CPUS@"
