@@ -117,7 +117,9 @@ In order:
       is bisected over main's commits, reported as an issue with the log and
       on the culprit's change, and closed when main passes again; `fy verify`.
       Case level (keys from fo's plan, staleness, flaky detection) follows.
-- [ ] Batched merge queue, `Change-Id` trailers, landing from a change page.
+- [x] Batched merge queue (landings queued behind a running one share a
+      candidate and its check; a failing candidate is split), `Change-Id`
+      trailers, landing from a change page.
 - [x] Push of `main` to the repository's upstream after each landing.
 - [x] The edge timer follows the instance's own `main`; fortyard is primary on
       its development instance and GitHub is its mirror.
@@ -224,7 +226,7 @@ the others are new.
       work tree with its build directory per repository, restart on a new
       server release; `scripts/install-runner.sh`). Production's landing
       checks run on faepkub4 since 2026-11-10, not on the server's host.
-- [ ] S3 Batched merge queue that blames a change only when the failure
+- [x] S3 Batched merge queue that blames a change only when the failure
       reproduces with that change alone (M8).
 - [ ] S4 Continuous pool: candidates by key change, staleness and audit
       draw, ordered by staleness, failure likelihood and cost

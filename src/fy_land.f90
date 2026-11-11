@@ -8,7 +8,7 @@ module fy_land
     implicit none
     private
 
-    public :: land_branch, land_hook_install, land_check, check_runner_i
+    public :: land_branch, land_candidate, land_hook_install, land_check, check_runner_i
 
     abstract interface
         subroutine check_runner_i(repo, ref, passed, log)
@@ -69,7 +69,7 @@ contains
     end subroutine land_hook_install
 
     subroutine land_branch(repo, work, name, branch, ident, base_url, upstream, commit, log, ok, &
-            runner, number, message_in, min_number)
+            runner, number, message_in, min_number, onto, hold, alone)
         !! Lands `branch` of the bare repository `repo` (called `name` in URLs),
         !! using the scratch directory `work`. `ident` names this landing uniquely
         !! and goes into the commit as a `Landing:` trailer. The commit is numbered
@@ -84,6 +84,12 @@ contains
         !! changes are taken).
         integer, intent(in), optional :: number, min_number
         character(len=*), intent(in), optional :: message_in
+        !! For the merge queue: with `hold`, the landing commit is made on the ref
+        !! `onto` (main when empty), pushed to the ref `hold` and neither checked
+        !! nor landed. A branch that cannot share a candidate (a merge, or the
+        !! first commit of main) sets `alone` instead and is left untouched.
+        character(len=*), intent(in), optional :: onto, hold
+        logical, intent(out), optional :: alone
         logical :: passed
         character(len=:), allocatable :: runner_log
         character(len=:), allocatable :: out, subjects, message, num
@@ -118,6 +124,28 @@ contains
         end if
         call git([character(len=1024) :: 'rev-parse', '--verify', '--quiet', 'origin/main'])
         has_main = status == 0
+        if (present(alone)) alone = .false.
+        if (present(hold)) then
+            call git([character(len=1024) :: 'rev-parse', '--verify', '--quiet', &
+                'origin/'//branch//'^2'])
+            if (status == 0 .or. .not. has_main) then
+                if (present(alone)) alone = .true.
+                status = 0
+                return
+            end if
+            if (present(onto)) then
+                if (len(onto) > 0) then
+                    ! The candidate stands in for main in everything below.
+                    call git([character(len=1024) :: 'fetch', '--quiet', 'origin', onto])
+                    if (status == 0) call git([character(len=1024) :: 'update-ref', &
+                        'refs/remotes/origin/main', 'FETCH_HEAD'])
+                    if (status /= 0) then
+                        log = 'The queue candidate could not be fetched.'//new_line('a')//out
+                        return
+                    end if
+                end if
+            end if
+        end if
         if (present(number)) then
             num = itoa(number)
         else
@@ -228,6 +256,19 @@ contains
             return
         end if
 
+        if (present(hold)) then
+            call run([character(len=1024) :: 'env', 'FY_LANDING=1', 'git', 'push', '--quiet', &
+                'origin', '+HEAD:'//hold], work)
+            if (status /= 0) then
+                log = 'The landing commit could not be queued.'//new_line('a')//out
+                return
+            end if
+            call git([character(len=1024) :: 'rev-parse', 'HEAD'])
+            commit = first_line(out)
+            ok = .true.
+            call run([character(len=1024) :: 'rm', '-rf', work], '')
+            return
+        end if
         ! The check runs on exactly the commit that will become main: by a runner
         ! (its own container and limits) when there is one, else here.
         if (present(runner)) then
@@ -348,6 +389,96 @@ contains
         end subroutine run
 
     end subroutine land_branch
+
+    subroutine land_candidate(repo, work, name, ref, branches, holds, upstream, log, ok, runner)
+        !! Checks the queue candidate at the ref `ref` of the bare repository
+        !! `repo` once and, when it passes, moves main to it and removes the
+        !! landed `branches`. The refs `holds` of the candidate's commits are
+        !! removed either way.
+        character(len=*), intent(in) :: repo, work, name, ref, upstream
+        character(len=*), intent(in) :: branches(:), holds(:)
+        character(len=:), allocatable, intent(out) :: log
+        logical, intent(out) :: ok
+        procedure(check_runner_i), optional :: runner
+        character(len=:), allocatable :: out, runner_log
+        character(len=1024), allocatable :: argv(:)
+        integer :: status, i
+        logical :: passed
+
+        ok = .false.
+        log = ''
+        call run([character(len=1024) :: 'rm', '-rf', work], '')
+        call run([character(len=1024) :: 'git', 'clone', '--quiet', '--shared', repo, work], '')
+        if (status == 0) call run([character(len=1024) :: 'git', 'fetch', '--quiet', 'origin', &
+            ref], work)
+        if (status == 0) call run([character(len=1024) :: 'git', 'checkout', '--quiet', '-B', &
+            'landing', 'FETCH_HEAD'], work)
+        if (status /= 0) then
+            log = 'The queue candidate could not be checked out.'//new_line('a')//out
+            call drop_holds()
+            return
+        end if
+        if (present(runner)) then
+            call runner(name, ref, passed, runner_log)
+            out = runner_log
+            if (passed) out = 'Checked by a runner.'//new_line('a')//runner_log
+            status = merge(0, 1, passed)
+        else
+            call land_check(work, out, status)
+        end if
+        log = out
+        if (status /= 0) then
+            log = 'The check failed (exit status '//itoa(status)//').'//new_line('a')//out
+            call drop_holds()
+            return
+        end if
+        argv = [character(len=1024) :: 'env', 'FY_LANDING=1', 'git', 'push', '--quiet', 'origin', &
+            'landing:main']
+        do i = 1, size(branches)
+            argv = [character(len=1024) :: argv, ':'//trim(branches(i))]
+        end do
+        call run(argv, work)
+        if (status /= 0) then
+            log = log//new_line('a')//'main could not be moved forward.'//new_line('a')//out
+            call drop_holds()
+            return
+        end if
+        ok = .true.
+        call drop_holds()
+        if (len(upstream) > 0) then
+            call run([character(len=1024) :: 'env', 'GIT_TERMINAL_PROMPT=0', 'timeout', '300', &
+                'git', '--git-dir', repo, 'push', '--quiet', upstream, &
+                'refs/heads/main:refs/heads/main'], '')
+            if (status == 0) then
+                log = log//new_line('a')//'Pushed to '//upstream//'.'
+            else
+                log = log//new_line('a')//'Pushing to '//upstream//' failed:'// &
+                    new_line('a')//out
+            end if
+        end if
+        call run([character(len=1024) :: 'rm', '-rf', work], '')
+
+    contains
+
+        subroutine drop_holds()
+            integer :: k, st
+            character(len=:), allocatable :: o
+
+            do k = 1, size(holds)
+                call proc_run([character(len=1024) :: 'git', '--git-dir', repo, 'update-ref', &
+                    '-d', trim(holds(k))], o, st, LOG_BYTES)
+            end do
+        end subroutine drop_holds
+
+        subroutine run(argv, dir)
+            character(len=*), intent(in) :: argv(:), dir
+            if (len(dir) > 0) then
+                call proc_run(argv, out, status, LOG_BYTES, dir=dir)
+            else
+                call proc_run(argv, out, status, LOG_BYTES)
+            end if
+        end subroutine run
+    end subroutine land_candidate
 
     subroutine land_check(work, out, code, verify)
         !! The check of a landing commit checked out in `work`: fo build and fo

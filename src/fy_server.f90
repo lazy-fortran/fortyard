@@ -8,7 +8,7 @@ module fy_server
         http_bearer_token, http_cookie, http_query_param, http_read_head, http_read_body, &
         http_basic_password
     use fy_git_http, only: git_http_route, git_http_serve
-    use fy_land, only: land_branch, land_hook_install, land_check
+    use fy_land, only: land_branch, land_candidate, land_hook_install, land_check
     use fy_issue, only: issue_api
     use fy_verify, only: verifier_main, verify_request
     use fy_change, only: change_t, change_sync, change_by_id, change_by_branch, change_landed, &
@@ -35,7 +35,7 @@ module fy_server
     use fy_store, only: token_identity_t, token_info_t, store_token_lookup, store_token_create, &
         store_open, store_token_list, store_token_revoke, store_token_revoke_hash, repo_info_t, &
         store_repo_add, store_repo_list, store_repo_fetched, store_repo_set_mode, store_repo_set_number, landing_t, &
-        store_landing_add, store_landing_next, store_landing_requeue, store_landing_finish, &
+        store_landing_add, store_landing_next, store_landing_take, store_landing_requeue, store_landing_finish, &
         store_check_release, &
         store_landing_list, release_t, store_release_add, store_release_ready, store_release_list, &
         store_jobs, store_job, store_job_counts, store_jobs_state, store_snapshot, &
@@ -272,20 +272,20 @@ contains
     end subroutine mirror_main
 
     subroutine lander_main(db_path, lander)
-        !! Lander number `lander`: lands queued branches one at a time, oldest
-        !! first.
+        !! Lander number `lander`: lands queued branches, oldest first, those of
+        !! one repository together.
         character(len=*), intent(in) :: db_path
         integer, intent(in) :: lander
+        !! Most landings that share one candidate.
+        integer, parameter :: LAND_BATCH = 8
         type(db_t) :: db
-        type(landing_t) :: l
+        type(landing_t) :: l, more
+        type(landing_t), allocatable :: group(:)
         type(repo_info_t), allocatable :: repos(:)
-        character(len=:), allocatable :: commit, log, upstream, mode, base
-        character(len=:), allocatable :: work
+        character(len=:), allocatable :: upstream, mode, base
         character(len=1024) :: url
-        character(len=:), allocatable :: change_url
-        type(change_t) :: ch
-        integer :: stat, i, n, watch, next
-        logical :: found, ok, changed, has_change
+        integer :: stat, i, n, watch
+        logical :: found, changed
 
         call get_environment_variable('FY_URL', url, n, stat)
         base = ''
@@ -319,13 +319,38 @@ contains
                 call events_notify('jobs')
                 cycle
             end if
+            lander_db = db
+            ! Queued landings of one repository share a candidate and its check.
+            group = [l]
+            do while (size(group) < LAND_BATCH)
+                call store_landing_take(db, lander, l%repo, more, found)
+                if (.not. found) exit
+                group = [group, more]
+            end do
+            if (size(group) == 1) then
+                call land_one(group(1))
+            else
+                call land_group(group)
+            end if
+        end do
+
+    contains
+
+        subroutine land_one(l)
+            !! Lands one branch by itself: its own commit on main, checked alone.
+            type(landing_t), intent(in) :: l
+            type(change_t) :: ch
+            character(len=:), allocatable :: commit, log, work, change_url
+            logical :: ok, has_change
+            integer :: next
+
             ! Scratch space of a landing lives in the temporary directory and is
             ! removed when the landing ends, whatever its outcome.
             work = tmp_dir()//'/fy-land-'//itoa(int(l%id))
-            ! Unique across instances and restarts: number and time of queueing.
-            lander_db = db
             has_change = .false.
             if (l%change > 0) call change_by_id(db, l%change, ch, has_change)
+            ! The landing's ident is unique across instances and restarts: number
+            ! and time of queueing.
             if (has_change) then
                 change_url = ''
                 if (len(base) > 0) change_url = base//'/'//l%repo//'/-/changes/'//itoa(ch%number)
@@ -353,6 +378,100 @@ contains
                 end if
             end if
             call execute_command_line('rm -rf '''//work//'''')
+            call finish(l, ok, commit, log)
+        end subroutine land_one
+
+        recursive subroutine land_group(g)
+            !! Lands several branches of one repository with one check: each is
+            !! squashed onto the candidate before it, and main moves to the last
+            !! when the check passes. A failing candidate is split in halves, so a
+            !! branch is blamed only when it fails on main by itself.
+            type(landing_t), intent(in) :: g(:)
+            type(change_t) :: ch
+            integer, allocatable :: held(:), single(:)
+            character(len=40), allocatable :: commits(:)
+            character(len=1024), allocatable :: branches(:), holds(:)
+            character(len=:), allocatable :: tip, hold, commit, log, work, change_url
+            logical :: ok, alone, has_change
+            integer :: i, k, next
+
+            tip = ''
+            allocate (held(0), single(0), commits(0), branches(0), holds(0))
+            do i = 1, size(g)
+                hold = 'refs/fortyard/queue/'//itoa(int(g(i)%id))
+                work = tmp_dir()//'/fy-land-'//itoa(int(g(i)%id))
+                has_change = .false.
+                if (g(i)%change > 0) call change_by_id(db, g(i)%change, ch, has_change)
+                if (has_change) then
+                    change_url = ''
+                    if (len(base) > 0) change_url = base//'/'//g(i)%repo//'/-/changes/'// &
+                        itoa(ch%number)
+                    call land_branch(repo_path(g(i)%repo), work, g(i)%repo, g(i)%branch, &
+                        itoa(int(g(i)%id))//'@'//g(i)%created, base, upstream, commit, log, ok, &
+                        number=ch%number, message_in=change_message(ch, change_url), &
+                        onto=tip, hold=hold, alone=alone)
+                else
+                    next = change_next_number(db, g(i)%repo, repo_path(g(i)%repo))
+                    call land_branch(repo_path(g(i)%repo), work, g(i)%repo, g(i)%branch, &
+                        itoa(int(g(i)%id))//'@'//g(i)%created, base, upstream, commit, log, ok, &
+                        min_number=next, onto=tip, hold=hold, alone=alone)
+                end if
+                call execute_command_line('rm -rf '''//work//'''')
+                if (alone) then
+                    single = [single, i]
+                else if (ok) then
+                    held = [held, i]
+                    commits = [character(len=40) :: commits, commit]
+                    branches = [character(len=1024) :: branches, g(i)%branch]
+                    holds = [character(len=1024) :: holds, hold]
+                    tip = hold
+                else
+                    call finish(g(i), .false., '', log)
+                end if
+            end do
+            if (size(held) > 0) then
+                work = tmp_dir()//'/fy-land-'//itoa(int(g(held(1))%id))
+                if (checks_mode == 'runner') then
+                    call land_candidate(repo_path(g(1)%repo), work, g(1)%repo, tip, branches, &
+                        holds, upstream, log, ok, runner=runner_check)
+                else
+                    call land_candidate(repo_path(g(1)%repo), work, g(1)%repo, tip, branches, &
+                        holds, upstream, log, ok)
+                end if
+                call execute_command_line('rm -rf '''//work//'''')
+                if (ok) then
+                    do k = 1, size(held)
+                        if (size(held) > 1) then
+                            call finish(g(held(k)), .true., commits(k), 'Landed as '// &
+                                commits(k)//', checked with '//itoa(size(held) - 1)// &
+                                ' other landing(s) in one candidate.'//new_line('a')//log)
+                        else
+                            call finish(g(held(k)), .true., commits(k), log//new_line('a')// &
+                                'Landed as '//commits(k)//'.')
+                        end if
+                        if (g(held(k))%change > 0) then
+                            call change_by_id(db, g(held(k))%change, ch, has_change)
+                            if (has_change) call change_landed(db, ch%id, commits(k))
+                        end if
+                    end do
+                else if (size(held) == 1) then
+                    call finish(g(held(1)), .false., '', log)
+                else
+                    k = size(held) / 2
+                    call land_group(g(held(1:k)))
+                    call land_group(g(held(k + 1:)))
+                end if
+            end if
+            do k = 1, size(single)
+                call land_one(g(single(k)))
+            end do
+        end subroutine land_group
+
+        subroutine finish(l, ok, commit, log)
+            type(landing_t), intent(in) :: l
+            logical, intent(in) :: ok
+            character(len=*), intent(in) :: commit, log
+
             if (ok) then
                 call store_landing_finish(db, l%id, 'landed', commit, log)
             else
@@ -362,9 +481,7 @@ contains
             write (error_unit, '(a)') 'fy: landing '//itoa(int(l%id))//' of '//l%repo//' '// &
                 l%branch//merge(' landed', ' failed', ok)
             flush (error_unit)
-        end do
-
-    contains
+        end subroutine finish
 
         function tmp_dir() result(s)
             character(len=:), allocatable :: s

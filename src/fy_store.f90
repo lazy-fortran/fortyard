@@ -14,7 +14,7 @@ module fy_store
     public :: store_token_list, store_token_revoke, store_token_revoke_hash
     public :: token_identity_t, token_info_t, random_token
     public :: repo_info_t, store_repo_add, store_repo_list, store_repo_fetched, store_repo_set_mode, &
-        store_repo_set_number
+        store_repo_set_number, store_landing_take
     public :: landing_t, store_landing_add, store_landing_next, store_landing_requeue
     public :: store_landing_finish, store_landing_list
     public :: release_t, store_release_add, store_release_ready, store_release_list
@@ -598,6 +598,38 @@ contains
         end if
         call stmt_finalize(st)
     end subroutine store_landing_next
+
+    subroutine store_landing_take(db, lander, repo, l, found)
+        !! Takes the oldest queued landing of `repo` for `lander`, which already
+        !! runs a landing of that repository, so both can share a candidate.
+        type(db_t), intent(in) :: db
+        integer, intent(in) :: lander
+        character(len=*), intent(in) :: repo
+        type(landing_t), intent(out) :: l
+        logical, intent(out) :: found
+        type(stmt_t) :: st
+        integer :: stat
+
+        found = .false.
+        call db_prepare(db, "UPDATE landings SET state = 'running', lander = ?1, started_at = "// &
+            NOW//" WHERE id = (SELECT min(id) FROM landings WHERE state = 'queued' AND"// &
+            " kind = 'landing' AND repo = ?2)"// &
+            ' RETURNING id, repo, branch, account, created_at, coalesce(change, 0);', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, int(lander, int64), stat)
+        call stmt_bind_text(st, 2, repo, stat)
+        if (stmt_step(st) == SQLITE_ROW) then
+            l%id = stmt_int(st, 0)
+            l%repo = stmt_text(st, 1)
+            l%branch = stmt_text(st, 2)
+            l%account = stmt_text(st, 3)
+            l%created = stmt_text(st, 4)
+            l%change = stmt_int(st, 5)
+            l%state = 'running'
+            found = .true.
+        end if
+        call stmt_finalize(st)
+    end subroutine store_landing_take
 
     subroutine store_landing_requeue(db, lander)
         !! Landings that were running when `lander` stopped run again; lander 1
