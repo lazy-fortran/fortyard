@@ -81,6 +81,7 @@ contains
             '  repo add NAME URL   mirror a repository (https or ssh URL; admin only)', &
             '  repo create NAME    create an empty repository that takes pushes (admin)', &
             '  repo mode NAME MODE primary: take pushes; mirror: follow upstream (admin)', &
+            '  repo numbers NAME N number the next change or issue N and count on (admin)', &
             '  repo list           list repositories', &
             '                      clone and push: git clone http://x:TOKEN@HOST/NAME.git', &
             '  runner --server URL --token-file F --data DIR [--follow LINK]', &
@@ -974,11 +975,20 @@ contains
             call client_request(cfg%server, 'POST', '/api/v1/repos/'//arg(3)//'/mode', &
                 cfg%token, '{"mode":"'//json_escape_string(arg(4))//'"}', code, body, stat)
             call report(code, body, stat)
+        case ('numbers')
+            if (len(arg(3)) == 0 .or. len(arg(4)) == 0) then
+                write (error_unit, '(a)') 'fy: usage: fy repo numbers NAME N'
+                call quit(2)
+            end if
+            call require_login(cfg)
+            call client_request(cfg%server, 'POST', '/api/v1/repos/'//arg(3)//'/numbers', &
+                cfg%token, '{"next":"'//json_escape_string(arg(4))//'"}', code, body, stat)
+            call report(code, body, stat)
         case ('list')
             call cmd_get('/api/v1/repos')
         case default
             write (error_unit, '(a)') 'fy: usage: fy repo add NAME URL | create NAME |'// &
-                ' mode NAME MODE | list'
+                ' mode NAME MODE | numbers NAME N | list'
             call quit(2)
         end select
     end subroutine cmd_repo

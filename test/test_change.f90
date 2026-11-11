@@ -124,6 +124,13 @@ program test_change
         'add Y && '//git//'commit -q -m Later && '//fy//' push')
     call check(index(out, 'change #5') > 0, 'the next change follows the issue: '//out)
 
+    ! A set counter replaces the numbers found on main and skips taken ones.
+    call run(in//fy//' repo numbers demo 4 && git checkout -q -b counted FETCH_HEAD && '// &
+        'printf "z\n" > Z && '//git//'add Z && '//git//'commit -q -m Counted && '//fy//' push'// &
+        ' && '//fy//' issue new --title "Counted too" --body-file /dev/null')
+    call check(stat == 0 .and. index(out, 'change #6') > 0 .and. index(out, 'issue #7') > 0, &
+        'a set counter numbers the next change and issue: '//out)
+
     call proc_kill(sup, SIGTERM)
     call proc_wait(sup, stat)
     print '(a)', 'change: all checks passed'

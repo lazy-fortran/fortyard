@@ -13,7 +13,8 @@ module fy_store
     public :: store_bootstrap, store_token_lookup, store_token_create, store_account_find
     public :: store_token_list, store_token_revoke, store_token_revoke_hash
     public :: token_identity_t, token_info_t, random_token
-    public :: repo_info_t, store_repo_add, store_repo_list, store_repo_fetched, store_repo_set_mode
+    public :: repo_info_t, store_repo_add, store_repo_list, store_repo_fetched, store_repo_set_mode, &
+        store_repo_set_number
     public :: landing_t, store_landing_add, store_landing_next, store_landing_requeue
     public :: store_landing_finish, store_landing_list
     public :: release_t, store_release_add, store_release_ready, store_release_list
@@ -21,7 +22,7 @@ module fy_store
     public :: store_check_add, store_check_claim, store_check_finish, store_check_get, &
         store_check_release
 
-    integer, parameter, public :: SCHEMA_VERSION = 11
+    integer, parameter, public :: SCHEMA_VERSION = 12
 
     type :: token_identity_t
         logical :: found = .false.
@@ -259,6 +260,17 @@ contains
                 " culprit TEXT NOT NULL, issue INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'open',"// &
                 ' created_at TEXT NOT NULL, UNIQUE (repo, culprit));'// &
                 'DELETE FROM schema_version; INSERT INTO schema_version VALUES (11);'// &
+                'COMMIT;', stat)
+            if (stat /= SQLITE_OK) then
+                call db_exec(db, 'ROLLBACK;', version)
+                return
+            end if
+        end if
+        if (store_schema_version(db) < 12) then
+            ! A repository can count its changes and issues from a set number,
+            ! so a fork does not continue the numbers in its upstream's history.
+            call db_exec(db, 'BEGIN;ALTER TABLE repos ADD COLUMN number_next INTEGER;'// &
+                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (12);'// &
                 'COMMIT;', stat)
             if (stat /= SQLITE_OK) then
                 call db_exec(db, 'ROLLBACK;', version)
@@ -507,6 +519,25 @@ contains
         found = stmt_step(st) == SQLITE_ROW
         call stmt_finalize(st)
     end subroutine store_repo_set_mode
+
+    subroutine store_repo_set_number(db, name, next, found)
+        !! The repository's next change or issue takes the number `next`.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: name
+        integer, intent(in) :: next
+        logical, intent(out) :: found
+        type(stmt_t) :: st
+        integer :: stat
+
+        found = .false.
+        call db_prepare(db, 'UPDATE repos SET number_next = ?2 WHERE name = ?1 RETURNING id;', &
+            st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, name, stat)
+        call stmt_bind_int(st, 2, int(next, int64), stat)
+        found = stmt_step(st) == SQLITE_ROW
+        call stmt_finalize(st)
+    end subroutine store_repo_set_number
 
     subroutine store_landing_add(db, repo, branch, account, id, stat, change)
         !! Queues the landing of `branch` on `main` of `repo`, of `change` if given.

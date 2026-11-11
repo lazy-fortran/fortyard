@@ -180,13 +180,34 @@ contains
 
     integer function change_next_number(db, repo, git_dir) result(m)
         !! One more than the highest number of the repository's changes and
-        !! issues and of the "(#N)" ending a subject on main.
+        !! issues and of the "(#N)" ending a subject on main. A repository with
+        !! a set counter (`fy repo numbers`) takes that instead and advances it.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: repo, git_dir
         type(stmt_t) :: st
         character(len=:), allocatable :: subjects
         integer :: stat, status, pos, e, s, v, ios
 
+        m = 0
+        call db_prepare(db, 'SELECT coalesce(number_next, 0) FROM repos WHERE name = ?1;', st, stat)
+        if (stat == SQLITE_OK) then
+            call stmt_bind_text(st, 1, repo, stat)
+            if (stmt_step(st) == SQLITE_ROW) m = int(stmt_int(st, 0))
+            call stmt_finalize(st)
+        end if
+        if (m > 0) then
+            do while (taken(m))
+                m = m + 1
+            end do
+            call db_prepare(db, 'UPDATE repos SET number_next = ?2 WHERE name = ?1;', st, stat)
+            if (stat == SQLITE_OK) then
+                call stmt_bind_text(st, 1, repo, stat)
+                call stmt_bind_int(st, 2, int(m + 1, int64), stat)
+                stat = stmt_step(st)
+                call stmt_finalize(st)
+            end if
+            return
+        end if
         m = 1
         call db_prepare(db, 'SELECT max(coalesce((SELECT max(number) FROM changes WHERE repo = ?1),'// &
             ' 0), coalesce((SELECT max(number) FROM issues WHERE repo = ?1), 0));', st, stat)
@@ -217,6 +238,21 @@ contains
             end if
             pos = e + 2
         end do
+
+    contains
+
+        logical function taken(n)
+            integer, intent(in) :: n
+
+            taken = .false.
+            call db_prepare(db, 'SELECT 1 FROM changes WHERE repo = ?1 AND number = ?2 UNION ALL'// &
+                ' SELECT 1 FROM issues WHERE repo = ?1 AND number = ?2;', st, stat)
+            if (stat /= SQLITE_OK) return
+            call stmt_bind_text(st, 1, repo, stat)
+            call stmt_bind_int(st, 2, int(n, int64), stat)
+            taken = stmt_step(st) == SQLITE_ROW
+            call stmt_finalize(st)
+        end function taken
     end function change_next_number
 
     subroutine change_get(db, repo, number, c, found)

@@ -34,7 +34,7 @@ module fy_server
     use fy_store, only: store_account_find, random_token
     use fy_store, only: token_identity_t, token_info_t, store_token_lookup, store_token_create, &
         store_open, store_token_list, store_token_revoke, store_token_revoke_hash, repo_info_t, &
-        store_repo_add, store_repo_list, store_repo_fetched, store_repo_set_mode, landing_t, &
+        store_repo_add, store_repo_list, store_repo_fetched, store_repo_set_mode, store_repo_set_number, landing_t, &
         store_landing_add, store_landing_next, store_landing_requeue, store_landing_finish, &
         store_check_release, &
         store_landing_list, release_t, store_release_add, store_release_ready, store_release_list, &
@@ -489,6 +489,12 @@ contains
                 call set_mode(rest(1:len(rest) - 5))
                 return
             end if
+            if (len(rest) > 8) then
+                if (rest(len(rest) - 7:) == '/numbers') then
+                    call set_number(rest(1:len(rest) - 8))
+                    return
+                end if
+            end if
             if (rest(len(rest) - 4:) == '/land') then
                 call queue_landing(rest(1:len(rest) - 5))
                 return
@@ -806,6 +812,37 @@ contains
             if (mode == 'primary') call land_hook_install(repo_path(target), status)
             res%body = '{"name":"'//json_escape_string(target)//'","mode":"'//mode//'"}'
         end subroutine set_mode
+
+        subroutine set_number(target)
+            !! POST /api/v1/repos/NAME/numbers {"next":"N"}: the next change or
+            !! issue takes the number N, and later ones count on from it.
+            character(len=*), intent(in) :: target
+            character(len=:), allocatable :: text
+            integer :: next, ios
+            logical :: ok
+
+            if (index(' '//who%scopes//' ', ' admin ') == 0) then
+                call fail(res, 403, 'setting the numbers of a repository needs the admin scope')
+                return
+            end if
+            call json_extract_string(req%body, 'next', text, ok)
+            next = 0
+            ios = 1
+            if (ok) then
+                if (len(text) > 0 .and. len(text) < 10 .and. verify(text, '0123456789') == 0) &
+                    read (text, *, iostat=ios) next
+            end if
+            if (ios /= 0 .or. next < 1) then
+                call fail(res, 400, 'body must be {"next":"N"} with a positive number')
+                return
+            end if
+            call store_repo_set_number(db, target, next, ok)
+            if (.not. ok) then
+                call fail(res, 404, 'no such repository')
+                return
+            end if
+            res%body = '{"name":"'//json_escape_string(target)//'","next":'//text//'}'
+        end subroutine set_number
 
     end subroutine repos_route
 

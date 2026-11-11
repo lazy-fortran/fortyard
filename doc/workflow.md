@@ -59,6 +59,9 @@ and review. Every push of a change creates a new **version** of it.
   Test cases can attach plots automatically, for example a before/after plot
   for every change that touches them.
 - **Numbering.** Issues and changes share one sequence per repository (`#123`).
+  It continues the `(#N)` of the commits on `main`. In a fork those are its
+  upstream's numbers, so there `fy repo numbers NAME N` sets the next number
+  and the sequence counts on from it.
 - **Landing.** A change lands as one squashed commit; a stack lands as one
   commit per change. Each commit's subject ends in its own `(#123)`; the message
   carries its description and the trailers `Change: <URL>` and
