@@ -18,7 +18,9 @@ testing everything on every change.
 - A **runner** is an `fy runner` process on a build host that executes cases
   for the server. A **runner class** is a set of runners with the same
   capabilities, for example ordinary, large memory, quiet (for benchmarks) or,
-  later, cluster.
+  later, cluster. The classes in use are `linux` (the default) and
+  `macos-arm64`; a repository names the classes its verifications of main run
+  on in its policy (`verify_on`).
 - A **trusted result** is one produced by a runner for a commit pushed by a user
   with write access or by fortyard itself (which pushes agents' commits), on any
   branch. Results from contributors without write access and from developer

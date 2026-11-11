@@ -152,11 +152,15 @@ contains
             '                      check_timeout=MINUTES  a runner ends a check that runs', &
             '                        longer; it runs once more, then the landing fails', &
             '                        with the reason timeout (default 60; 0: no limit)', &
+            '                      verify_on=CLASS[,CLASS...]  runner classes each', &
+            '                        verification of main runs on (default linux)', &
             '  repo list           list repositories', &
             '                      clone and push: git clone http://x:TOKEN@HOST/NAME.git', &
         ! runners
-            '  runner --server URL --token-file F --data DIR [--follow LINK]', &
-            '                      perform landing checks for the server (scope runner)', &
+            '  runner --server URL --token-file F --data DIR [--follow LINK] [--class NAME]', &
+            '                      perform landing checks for the server (scope runner);', &
+            '                        --class: the runner class whose checks it takes', &
+            '                        (default linux; e.g. macos-arm64)', &
         ! landing and pushing
             '  land [BRANCH] [--repo NAME] [--no-push] [--no-wait]', &
             '                      push HEAD to BRANCH, land it on main after its check', &
@@ -477,7 +481,7 @@ contains
         end if
         if (len(token) == 0) error stop 'fy runner: --token-file must hold a runner token'
         call runner_main(server, token, option('--data', './fortyard-data'), &
-            option('--follow', ''))
+            option('--follow', ''), option('--class', 'linux'))
     end subroutine cmd_runner
 
     subroutine cmd_land()

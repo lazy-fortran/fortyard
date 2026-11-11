@@ -15,6 +15,9 @@ module fy_policy
     !!                     while N landed changes wait for a review
     !!   check_timeout     0 (no limit) or minutes  a runner ends a check that
     !!                     runs longer, without a verdict (CHECK_TIMEOUT_MAX)
+    !!   verify_on         runner classes, comma-separated  each verification
+    !!                     of main runs once on each and passes when all pass;
+    !!                     landing checks run on linux
     use, intrinsic :: iso_fortran_env, only: &
         int64
     use fx_json_build, only: &
@@ -56,6 +59,7 @@ module fy_policy
     private
 
     public :: &
+        policy_class_name, &
         policy_from_json, &
         policy_get, &
         policy_json, &
@@ -72,7 +76,8 @@ module fy_policy
     integer, parameter, public :: CHECK_TIMEOUT_MAX = 10080
     character(len=*), parameter, public :: POLICY_KEYS = &
         'tests=full|affected|none review=after|before bisect=on|off batch=1..64'// &
-        ' unreviewed_limit=N (0: no limit) check_timeout=MINUTES (0: no limit)'
+        ' unreviewed_limit=N (0: no limit) check_timeout=MINUTES (0: no limit)'// &
+        ' verify_on=CLASS[,CLASS...]'
 
     type :: policy_t
         character(len=:), allocatable :: tests, review
@@ -80,6 +85,7 @@ module fy_policy
         integer :: batch = 8
         integer :: unreviewed_limit = 0
         integer :: check_timeout = 60
+        character(len=:), allocatable :: verify_on
     end type policy_t
 
     !! A landed change that still waits for a review: flagged for a person, or
@@ -101,9 +107,11 @@ contains
 
         p%tests = 'full'
         p%review = 'after'
+        p%verify_on = 'linux'
         if (present(found)) found = .false.
         call db_prepare(db, 'SELECT policy_tests, policy_review, policy_bisect, policy_batch,'// &
-            ' policy_unreviewed_limit, policy_check_timeout FROM repos WHERE name = ?1;', st, stat)
+            ' policy_unreviewed_limit, policy_check_timeout, policy_verify_on FROM repos'// &
+            ' WHERE name = ?1;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, repo, stat)
         if (stmt_step(st) == SQLITE_ROW) then
@@ -113,6 +121,7 @@ contains
             p%batch = int(stmt_int(st, 3))
             p%unreviewed_limit = int(stmt_int(st, 4))
             p%check_timeout = int(stmt_int(st, 5))
+            p%verify_on = stmt_text(st, 6)
             if (present(found)) found = .true.
         end if
         call stmt_finalize(st)
@@ -129,7 +138,8 @@ contains
         found = .false.
         call db_prepare(db, 'UPDATE repos SET policy_tests = ?2, policy_review = ?3,'// &
             ' policy_bisect = ?4, policy_batch = ?5, policy_unreviewed_limit = ?6,'// &
-            ' policy_check_timeout = ?7 WHERE name = ?1 RETURNING id;', st, stat)
+            ' policy_check_timeout = ?7, policy_verify_on = ?8 WHERE name = ?1 RETURNING id;', &
+            st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, repo, stat)
         call stmt_bind_text(st, 2, p%tests, stat)
@@ -138,6 +148,11 @@ contains
         call stmt_bind_int(st, 5, int(p%batch, int64), stat)
         call stmt_bind_int(st, 6, int(p%unreviewed_limit, int64), stat)
         call stmt_bind_int(st, 7, int(p%check_timeout, int64), stat)
+        if (allocated(p%verify_on)) then
+            call stmt_bind_text(st, 8, p%verify_on, stat)
+        else
+            call stmt_bind_text(st, 8, 'linux', stat)
+        end if
         found = stmt_step(st) == SQLITE_ROW
         call stmt_finalize(st)
     end subroutine policy_put
@@ -190,6 +205,13 @@ contains
             else
                 error = 'check_timeout is 0 (no limit) or minutes up to 10080'
             end if
+        case ('verify_on')
+            if (classes_ok(value)) then
+                p%verify_on = value
+            else
+                error = 'verify_on is runner classes separated by commas, each 1 to 32 of'// &
+                    ' a-z, 0-9 and -, at most 8'
+            end if
         case default
             error = 'no such setting: '//key//' ('//POLICY_KEYS//')'
         end select
@@ -205,7 +227,38 @@ contains
             read (text, *, iostat=ios) n
             if (ios /= 0) n = -1
         end function number
+
+        logical function classes_ok(text)
+            character(len=*), intent(in) :: text
+            integer :: i, j, n
+
+            classes_ok = .false.
+            i = 1
+            n = 0
+            do
+                j = index(text(i:), ',')
+                if (j == 0) then
+                    j = len(text) + 1
+                else
+                    j = i + j - 1
+                end if
+                if (.not. policy_class_name(text(i:j - 1))) return
+                n = n + 1
+                if (n > 8) return
+                if (j > len(text)) exit
+                i = j + 1
+            end do
+            classes_ok = .true.
+        end function classes_ok
     end subroutine policy_set
+
+    pure logical function policy_class_name(name)
+        !! A runner class: 1 to 32 of a-z, 0-9 and -.
+        character(len=*), intent(in) :: name
+
+        policy_class_name = len(name) >= 1 .and. len(name) <= 32 .and. &
+            verify(name, 'abcdefghijklmnopqrstuvwxyz0123456789-') == 0
+    end function policy_class_name
 
     subroutine policy_from_json(p, body, error)
         !! Applies the members of the JSON object `body` that name a setting;
@@ -275,19 +328,22 @@ contains
         pure logical function is_setting(name)
             character(len=*), intent(in) :: name
             is_setting = name == 'tests' .or. name == 'review' .or. name == 'bisect' .or. &
-                name == 'batch' .or. name == 'unreviewed_limit' .or. name == 'check_timeout'
+                name == 'batch' .or. name == 'unreviewed_limit' .or. name == 'check_timeout' .or. &
+                name == 'verify_on'
         end function is_setting
     end subroutine policy_from_json
 
     function policy_json(repo, p) result(json)
         character(len=*), intent(in) :: repo
         type(policy_t), intent(in) :: p
-        character(len=:), allocatable :: json
+        character(len=:), allocatable :: json, on
 
+        on = 'linux'
+        if (allocated(p%verify_on)) on = p%verify_on
         json = '{"name":"'//json_escape_string(repo)//'","tests":"'//p%tests//'","review":"'// &
             p%review//'","bisect":"'//trim(merge('on ', 'off', p%bisect))//'","batch":'// &
             itoa(p%batch)//',"unreviewed_limit":'//itoa(p%unreviewed_limit)//',"check_timeout":'// &
-            itoa(p%check_timeout)//'}'
+            itoa(p%check_timeout)//',"verify_on":"'//on//'"}'
     end function policy_json
 
     pure logical function policy_reviewed(c)

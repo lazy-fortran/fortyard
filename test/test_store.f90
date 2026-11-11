@@ -108,6 +108,22 @@ program test_store
     call check(released == 1, 'a restarted runner hands back its running check')
     call store_check_claim(db, 'r2', id, repo, ref, found)
     call check(found .and. ref == 'refs/c', 'the handed back check is taken again')
+    call store_check_finish(db, id, 'r2', 'passed', '', found)
+    ! A check runs only on a runner of its class; a runner naming none is linux.
+    call store_check_add(db, 'demo', 'refs/m', id, stat, kind='verify', class='macos-arm64')
+    call db_exec(db, "UPDATE checks SET created_at = '2000-01-01T00:00:00Z' WHERE ref = 'refs/m';", &
+        stat)
+    call store_check_claim(db, 'r1', id, repo, ref, found)
+    call check(.not. found, 'a linux runner leaves a check of another class')
+    call store_check_claim(db, 'm1', id, repo, ref, found, class='macos-arm64')
+    call check(found .and. ref == 'refs/m', 'a runner of its class takes it')
+    call store_check_finish(db, id, 'm1', 'passed', '', found)
+    call store_check_add(db, 'demo', 'refs/l', id, stat)
+    call store_check_claim(db, 'm1', id, repo, ref, found, class='macos-arm64')
+    call check(.not. found, 'a macos runner leaves a linux check')
+    call store_check_claim(db, 'r2', id, repo, ref, found)
+    call check(found .and. ref == 'refs/l', 'the runner that last checked the repository in'// &
+        ' its class is the warm one, not the macos runner that checked it since')
 
     ! The jobs list looks up, for each of its rows, the entries of the row's
     ! change and its checks: with 6000 landings and their logs that stays a

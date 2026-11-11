@@ -828,6 +828,17 @@ contains
                 cmd = [character(len=1024) :: './.fortyard/check']
             end if
         end if
+        ! A sandbox the host provides (FY_CHECK_WRAP, e.g. srt with its
+        ! settings) takes the check's command as its arguments.
+        call get_environment_variable('FY_CHECK_WRAP', runtime, rn, rs)
+        if (rs == 0 .and. rn > 0) cmd = [words(trim(runtime)), cmd]
+        inquire (file='/proc/self/status', exist=exists)
+        call get_environment_variable('FY_CHECK_WATCHED', runtime, rn, rs)
+        if (rs == 0 .and. rn > 0) exists = .false.
+        if (.not. exists) then
+            call watched_check()
+            return
+        end if
         ! timeout puts the check in a process group of its own and signals the
         ! whole group, so compilers and test programs end with it.
         if (lim > 0) cmd = [character(len=1024) :: 'timeout', '-k', trim(after), trim(seconds), cmd]
@@ -850,7 +861,93 @@ contains
         ! 124: timeout ended it with SIGTERM; 137: with SIGKILL after the grace.
         if (present(timed_out)) timed_out = lim > 0 .and. (code == 124 .or. code == 137) .and. &
             ended - started >= int(lim, int64)*rate
+
+    contains
+
+        subroutine watched_check()
+            !! Without /proc, timeout and systemd (macOS), or with
+            !! FY_CHECK_WATCHED set: a shell watches the
+            !! check's process tree every second. At the time limit it sends
+            !! SIGTERM to the check's process group and SIGKILL after the grace;
+            !! when the tree's resident memory passes FY_CHECK_MEMORY GiB
+            !! (default 8) it kills the group at once. Every process seen in
+            !! the tree, also one that left the group, is killed when the
+            !! check ends.
+            character(len=16) :: gib
+            integer :: gn, gs, mem, ios
+
+            mem = 8
+            call get_environment_variable('FY_CHECK_MEMORY', gib, gn, gs)
+            if (gs == 0 .and. gn > 0) then
+                read (gib, *, iostat=ios) mem
+                if (ios /= 0 .or. mem < 1) mem = 8
+            end if
+            write (gib, '(i0)') mem
+            call system_clock(started, rate)
+            ! The script is longer than the other arguments' 1024 characters.
+            call proc_run([character(len=4096) :: 'sh', '-c', &
+                'o=$(mktemp) && seen=$(mktemp) || exit 125; lim=$1 grace=$2 gib=$3; shift 3; '// &
+            ! perl gives the check a process group of its own; sh's job
+            ! control does not without a terminal (dash).
+                'perl -e ''setpgrp(0, 0); exec { $ARGV[0] } @ARGV or die "$ARGV[0]: $!\n"'''// &
+                ' "$@" > "$o" 2>&1 & p=$!; t=0 why=; '// &
+                'while kill -0 "$p" 2> /dev/null; do sleep 1; t=$((t + 1)); '// &
+                'set -- $(ps -A -o pid=,ppid=,rss= | awk -v r="$p" ''{ pp[$1] = $2; rs[$1] = $3 }'// &
+                ' END { d[r] = 1; do { c = 0; for (x in pp) if (!(x in d) && (pp[x] in d)) {'// &
+                ' d[x] = 1; c = 1 } } while (c); s = 0; l = ""; for (x in d) if (x in rs) {'// &
+                ' s += rs[x]; l = l " " x }; print s l }''); kb=${1:-0}; shift; '// &
+                'for q in "$@"; do echo "$q"; done >> "$seen"; '// &
+                '[ $((t % 60)) -eq 0 ] && sort -u -o "$seen" "$seen"; '// &
+                'if [ "$lim" -gt 0 ] && [ "$t" -ge "$lim" ]; then why=time; break; fi; '// &
+                'if [ "$kb" -gt $((gib * 1048576)) ]; then why=memory; break; fi; done; '// &
+                'if [ "$why" = time ]; then kill -TERM -"$p" 2> /dev/null; i=0; '// &
+                'while kill -0 -"$p" 2> /dev/null && [ "$i" -lt "$grace" ]; do sleep 1; '// &
+                'i=$((i + 1)); done; fi; kill -KILL -"$p" 2> /dev/null; wait "$p"; s=$?; '// &
+            ! Orphans only, seen in the tree or working in the check's
+            ! directory (one may escape before the first look): a number
+            ! seen earlier may belong to another process by now, but not
+            ! to one that launchd adopted.
+                'w=$(pwd -P); for i in 1 2 3; do { ps -A -o pid=,ppid= | awk ''$2 == 1 '// &
+                '{ print "o" $1 }''; sed "s/^/s/" "$seen"; lsof -a -d cwd -u "$(id -u)" -Fpn '// &
+                '2> /dev/null; } | awk -v w="$w" ''/^o/ { o[substr($0, 2)] = 1; next } /^s/ '// &
+                '{ s[substr($0, 2)] = 1; next } /^p/ { p = substr($0, 2); next } /^n/ { c = '// &
+                'substr($0, 2); if (c == w || index(c, w "/") == 1) s[p] = 1 } END { for (x in o) '// &
+                'if (x in s) print x }'' | xargs kill -KILL 2> /dev/null; done; cat "$o"; '// &
+                'rm -f "$o" "$seen"; '// &
+                'case $why in time) exit 124 ;; memory) echo "The check used more than '// &
+                '$gib GiB of memory (FY_CHECK_MEMORY) and was ended."; exit 137 ;; esac; '// &
+                'exit $s', 'check', trim(seconds), trim(after), trim(gib), cmd], out, code, &
+                LOG_BYTES, dir=work)
+            call system_clock(ended)
+            if (present(timed_out)) timed_out = lim > 0 .and. code == 124 .and. &
+                ended - started >= int(lim, int64)*rate
+        end subroutine watched_check
+
     end subroutine land_check
+
+    function words(text) result(w)
+        !! The words of `text`, split at blanks.
+        character(len=*), intent(in) :: text
+        character(len=1024), allocatable :: w(:)
+        integer :: i, j
+
+        allocate (w(0))
+        i = 1
+        do while (i <= len(text))
+            if (text(i:i) == ' ') then
+                i = i + 1
+                cycle
+            end if
+            j = index(text(i:), ' ')
+            if (j == 0) then
+                j = len(text) + 1
+            else
+                j = i + j - 1
+            end if
+            w = [w, text(i:j - 1)]
+            i = j
+        end do
+    end function words
 
     function check_ref(ident) result(ref)
         !! Where a landing commit waits for its runner: refs/fortyard/checks/N.

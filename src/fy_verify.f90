@@ -124,7 +124,7 @@ contains
         do k = 1, size(jobs)
             if (checks(k) > 0) then
                 call finish(db, trim(repos(k)), repos_dir//'/'//trim(repos(k))//'.git', &
-                    trim(commits(k)), jobs(k), checks(k))
+                    trim(commits(k)), jobs(k))
             else
                 call exec(db, "UPDATE landings SET state = 'cancelled', finished_at = "//NOW// &
                     ' WHERE id = ?1 AND ?2 = ?2;', jobs(k), '')
@@ -255,9 +255,10 @@ contains
         integer(int64), intent(in) :: request
         type(stmt_t) :: st
         integer(int64) :: id, check
-        character(len=:), allocatable :: ref, out
+        character(len=:), allocatable :: ref, out, on
         character(len=24) :: num
-        integer :: stat, status
+        type(policy_t) :: p
+        integer :: stat, status, k
 
         id = request
         if (id > 0) then
@@ -279,44 +280,79 @@ contains
         write (num, '(i0)') id
         ref = 'refs/fortyard/verify/'//trim(num)
         call git(git_dir, [character(len=256) :: 'update-ref', ref, commit], out, status)
-        call store_check_add(db, repo, ref, check, stat, kind='verify')
+        ! One check on each runner class of the policy (verify_on).
+        call policy_get(db, repo, p)
+        on = p%verify_on//','
+        do while (len(on) > 1)
+            k = index(on, ',')
+            call store_check_add(db, repo, ref, check, stat, kind='verify', class=on(1:k - 1))
+            on = on(k + 1:)
+        end do
         call events_notify('checks')
         ! The page of the job shows the check while it waits for a runner.
         call events_notify('jobs')
-        call finish(db, repo, git_dir, commit, id, check)
+        call finish(db, repo, git_dir, commit, id)
     end subroutine run
 
-    subroutine finish(db, repo, git_dir, commit, id, check)
-        !! Waits for runner check `check` of verification job `id` and records
-        !! its outcome.
+    subroutine finish(db, repo, git_dir, commit, id)
+        !! Waits for the runner checks of verification job `id`, one per runner
+        !! class, and records its outcome: passed when all passed, else the
+        !! first that did not pass, with its class named when there are several.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: repo, git_dir, commit
-        integer(int64), intent(in) :: id, check
-        character(len=:), allocatable :: state, log, out
+        integer(int64), intent(in) :: id
+        character(len=:), allocatable :: state, log, out, one, text
+        integer(int64), allocatable :: checks(:)
+        character(len=32), allocatable :: classes(:)
         character(len=24) :: num
-        integer :: age, fd, status
-        logical :: changed
+        integer :: age, fd, status, k, j
+        logical :: changed, waiting
 
         write (num, '(i0)') id
+        call checks_of(db, 'refs/fortyard/verify/'//trim(num), checks, classes)
         fd = events_watch_open()
         state = ''
         log = ''
-        do
-            call store_check_get(db, check, state, log, age)
-            if (state == 'passed' .or. state == 'failed') exit
-            ! Ended at its time limit twice: no verdict, but nothing more to wait for.
-            if (state == 'timeout') then
+        if (size(checks) == 0) then
+            state = 'failed'
+            log = 'No check was queued.'
+        end if
+        do while (size(checks) > 0)
+            ! The result waits for every class; it is the first that did not
+            ! pass, else passed.
+            state = 'passed'
+            log = ''
+            k = 0
+            waiting = .false.
+            do j = 1, size(checks)
+                call store_check_get(db, checks(j), one, text, age)
+                if (one == 'queued' .or. one == 'running') then
+                    if ((one == 'queued' .and. age > 21600) .or. &
+                        (one == 'running' .and. age > 28800)) then
+                        one = 'lost'
+                    else
+                        waiting = .true.
+                        cycle
+                    end if
+                end if
+                if (k > 0 .or. one == 'passed') then
+                    if (k == 0) log = text
+                    cycle
+                end if
+                k = j
+                if (one == 'timeout') then
+                    ! Ended at its time limit twice: no verdict, but nothing more to wait for.
+                    text = 'Reason: timeout. The verification reached its time limit a second'// &
+                        ' time and was ended by the runner.'//new_line('a')//text
+                else if (one == 'lost') then
+                    text = 'No runner reported a result.'
+                end if
                 state = 'failed'
-                log = 'Reason: timeout. The verification reached its time limit a second'// &
-                    ' time and was ended by the runner.'//new_line('a')//log
-                exit
-            end if
-            if ((state == 'queued' .and. age > 21600) .or. (state == 'running' .and. age > 28800)) &
-                then
-                state = 'failed'
-                log = 'No runner reported a result.'
-                exit
-            end if
+                log = text
+                if (size(checks) > 1) log = 'On the runner class '//trim(classes(j))//':'// &
+                    new_line('a')//log
+            end do
+            if (.not. waiting) exit
             changed = events_wait(fd, 'checks', 60000)
         end do
         call git(git_dir, [character(len=256) :: 'update-ref', '-d', &
@@ -328,6 +364,26 @@ contains
             commit(1:min(12, len(commit)))//' '//state
         flush (error_unit)
     end subroutine finish
+
+    subroutine checks_of(db, ref, ids, classes)
+        !! The runner checks queued for `ref`, one per class, oldest first.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: ref
+        integer(int64), allocatable, intent(out) :: ids(:)
+        character(len=32), allocatable, intent(out) :: classes(:)
+        type(stmt_t) :: st
+        integer :: stat
+
+        allocate (ids(0), classes(0))
+        call db_prepare(db, 'SELECT id, class FROM checks WHERE ref = ?1 ORDER BY id;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, ref, stat)
+        do while (stmt_step(st) == SQLITE_ROW)
+            ids = [ids, stmt_int(st, 0)]
+            classes = [classes, [character(len=32) :: stmt_text(st, 1)]]
+        end do
+        call stmt_finalize(st)
+    end subroutine checks_of
 
     subroutine report(db, repo, git_dir, culprit, good, base, bisect)
         !! Reports the first failing commit once: an issue, and a comment on

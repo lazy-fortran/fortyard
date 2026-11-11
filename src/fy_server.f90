@@ -84,6 +84,7 @@ module fy_server
         oidc_load, &
         oidc_value_ok
     use fy_policy, only: &
+        policy_class_name, &
         policy_from_json, &
         policy_get, &
         policy_json, &
@@ -1813,9 +1814,10 @@ contains
     end function checks_mode_set
 
     subroutine checks_route(req, db, res)
-        !! POST /api/v1/checks/claim: the next queued check for the calling
-        !! runner (200 with {"id","repo","ref","kind","timeout"}, timeout in
-        !! seconds and 0 for none, or 204 when there is none).
+        !! POST /api/v1/checks/claim {"class":"..."}: the next queued check of
+        !! that runner class (default linux) for the calling runner (200 with
+        !! {"id","repo","ref","kind","timeout"}, timeout in seconds and 0 for
+        !! none, or 204 when there is none).
         !! POST /api/v1/checks/N/result {"passed":true|false,"log":"..."}, or
         !! {"error":"timeout"|"runner","log":"..."} for a check that ended
         !! without a verdict: it is queued again, at its second timeout it
@@ -1827,7 +1829,7 @@ contains
         type(db_t), intent(in) :: db
         type(response_t), intent(inout) :: res
         type(token_identity_t) :: who
-        character(len=:), allocatable :: repo, ref, log, kind, error, state
+        character(len=:), allocatable :: repo, ref, log, kind, error, state, class
         character(len=24) :: num, limit
         integer(int64) :: id
         integer :: ios, k, seconds
@@ -1850,7 +1852,13 @@ contains
             return
         end if
         if (req%path == '/api/v1/checks/claim') then
-            call store_check_claim(db, who%token_name, id, repo, ref, found, kind, seconds)
+            call json_extract_string(req%body, 'class', class, found)
+            if (.not. found) class = 'linux'
+            if (.not. policy_class_name(class)) then
+                call fail(res, 400, 'a runner class is 1 to 32 of a-z, 0-9 and -')
+                return
+            end if
+            call store_check_claim(db, who%token_name, id, repo, ref, found, kind, seconds, class)
             if (.not. found) then
                 res%code = 204
                 res%body = ''

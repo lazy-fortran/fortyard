@@ -1207,19 +1207,20 @@ contains
         call stmt_finalize(st)
     end function store_jobs_state
 
-    subroutine store_check_add(db, repo, ref, id, stat, kind)
+    subroutine store_check_add(db, repo, ref, id, stat, kind, class)
         !! Queues a check of `ref` in `repo` for a runner: of a landing ("check",
-        !! the default) or a verification of main ("verify").
+        !! the default) or a verification of main ("verify"), on a runner of
+        !! `class` (default linux).
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: repo, ref
         integer(int64), intent(out) :: id
         integer, intent(out) :: stat
-        character(len=*), intent(in), optional :: kind
+        character(len=*), intent(in), optional :: kind, class
         type(stmt_t) :: st
 
         id = 0
-        call db_prepare(db, 'INSERT INTO checks (repo, ref, created_at, kind) VALUES (?1, ?2, '// &
-            NOW//', ?3) RETURNING id;', st, stat)
+        call db_prepare(db, 'INSERT INTO checks (repo, ref, created_at, kind, class) VALUES (?1,'// &
+            ' ?2, '//NOW//', ?3, ?4) RETURNING id;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, repo, stat)
         call stmt_bind_text(st, 2, ref, stat)
@@ -1227,6 +1228,11 @@ contains
             call stmt_bind_text(st, 3, kind, stat)
         else
             call stmt_bind_text(st, 3, 'check', stat)
+        end if
+        if (present(class)) then
+            call stmt_bind_text(st, 4, class, stat)
+        else
+            call stmt_bind_text(st, 4, 'linux', stat)
         end if
         stat = 1
         if (stmt_step(st) == SQLITE_ROW) then
@@ -1253,7 +1259,7 @@ contains
         end do
     end subroutine store_landing_check
 
-    subroutine store_check_claim(db, runner, id, repo, ref, found, kind, limit)
+    subroutine store_check_claim(db, runner, id, repo, ref, found, kind, limit, class)
         !! Gives `runner` the queued check that shares the runners fairly:
         !! landing checks before verifications, then the check of the
         !! repository that holds the fewest running checks, then the oldest.
@@ -1264,8 +1270,11 @@ contains
         !! so concurrent claims never take the same check. `limit` is the
         !! check's time limit in seconds (0: none), fixed at the claim: six
         !! hours for a verification, else the repository's check_timeout.
+        !! Only checks of the runner's `class` (default linux) are given, and
+        !! affinity is to the runner that last served the repository in it.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: runner
+        character(len=*), intent(in), optional :: class
         integer(int64), intent(out) :: id
         character(len=:), allocatable, intent(out) :: repo, ref
         logical, intent(out) :: found
@@ -1282,17 +1291,25 @@ contains
         call db_prepare(db, "UPDATE checks SET state = 'running', runner = ?1, claimed_at = "// &
             NOW//", time_limit = CASE WHEN kind = 'verify' THEN 21600 ELSE coalesce((SELECT"// &
             ' 60*policy_check_timeout FROM repos WHERE name = checks.repo), 3600) END'// &
-            " WHERE id = (SELECT c.id FROM checks c WHERE c.state = 'queued' AND NOT"// &
+            " WHERE id = (SELECT c.id FROM checks c WHERE c.state = 'queued' AND c.class = ?2"// &
+            ' AND NOT'// &
             ' (c.created_at > strftime('//"'%Y-%m-%dT%H:%M:%SZ', 'now',"// &
             " '-"//AFFINITY_SECONDS//" seconds') AND EXISTS (SELECT 1 FROM checks p WHERE p.id ="// &
-            ' (SELECT q.id FROM checks q WHERE q.repo = c.repo AND q.runner IS NOT NULL ORDER BY'// &
+            ' (SELECT q.id FROM checks q WHERE q.repo = c.repo AND q.class = c.class AND'// &
+            ' q.runner IS NOT NULL ORDER BY'// &
             ' q.id DESC LIMIT 1) AND p.runner <> ?1 AND NOT EXISTS (SELECT 1 FROM checks b WHERE'// &
             " b.state = 'running' AND b.runner = p.runner)))"// &
             " ORDER BY c.kind = 'verify', (SELECT count(*) FROM checks r WHERE r.state ="// &
-            " 'running' AND r.repo = c.repo), c.id LIMIT 1) RETURNING id, repo, ref, kind,"// &
+            " 'running' AND r.repo = c.repo AND r.class = c.class), c.id LIMIT 1) RETURNING id,"// &
+            ' repo, ref, kind,'// &
             ' time_limit;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, runner, stat)
+        if (present(class)) then
+            call stmt_bind_text(st, 2, class, stat)
+        else
+            call stmt_bind_text(st, 2, 'linux', stat)
+        end if
         if (stmt_step(st) == SQLITE_ROW) then
             id = stmt_int(st, 0)
             repo = stmt_text(st, 1)

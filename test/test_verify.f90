@@ -24,7 +24,7 @@ program test_verify
         proc_wait
     use fy_server, only: server_supervise, server_set_data_dir, server_set_checks
     use fy_runner, only: runner_main
-    use fy_sqlite, only: db_t, db_close
+    use fy_sqlite, only: db_t, db_close, db_exec
     use fy_store, only: store_open, store_bootstrap, store_repo_add, store_token_create
     implicit none
 
@@ -32,20 +32,25 @@ program test_verify
     character(len=*), parameter :: git = 'git -c user.name=T -c user.email=t@example.org '
     character(len=2), parameter :: CRLF = achar(13)//achar(10)
     type(db_t) :: db
-    character(len=:), allocatable :: admin, runner, base, url, reply, gw, issue
+    character(len=:), allocatable :: admin, runner, macos, base, url, reply, gw, issue
     character(len=16) :: num
-    integer :: lfd, port, stat, sup, run, i, k
+    character(len=4096) :: cwd
+    integer :: lfd, port, stat, sup, run, mac, i, k
     logical :: exists
 
     sup = 0
     run = 0
+    mac = 0
     call proc_setenv('GIT_CONFIG_GLOBAL', '/dev/null')
     call proc_setenv('GIT_CONFIG_NOSYSTEM', '1')
     call execute_command_line('rm -rf '//data//' '//work//' && mkdir -p '//data, exitstat=stat)
     call store_open(data//'/fortyard.db', db, stat)
     call store_bootstrap(db, admin, stat)
     call store_token_create(db, 1_int64, 'runner-1', 'runner', runner, stat)
+    call store_token_create(db, 1_int64, 'runner-2', 'runner', macos, stat)
     call store_repo_add(db, 'demo', '', stat, mode='primary')
+    ! Main is verified on two runner classes, landings are checked on linux.
+    call db_exec(db, "UPDATE repos SET policy_verify_on = 'linux,macos-arm64';", stat)
     call db_close(db)
     call server_set_data_dir(data)
     call server_set_checks('runner')
@@ -69,6 +74,15 @@ program test_verify
         call runner_main('http://'//base, runner, data, '')
         call proc_exit(0)
     end if
+    mac = proc_fork()
+    if (mac == 0) then
+        ! Each runner has a temporary directory, and so a work tree, of its own.
+        call getcwd(cwd)
+        call execute_command_line('mkdir -p '//data//'/tmp-macos', exitstat=stat)
+        call proc_setenv('TMPDIR', trim(cwd)//'/'//data//'/tmp-macos')
+        call runner_main('http://'//base, macos, data, '', 'macos-arm64')
+        call proc_exit(0)
+    end if
     url = 'http://x:'//admin//'@'//base//'/demo.git'
     gw = git//'-C '//work//' '
 
@@ -77,7 +91,8 @@ program test_verify
     call execute_command_line('git init -q -b main '//work//' && mkdir '//work//'/.fortyard'// &
         ' && printf "hello\n" > '//work//'/README && printf "#!/bin/sh\ntest -f README\n" > '// &
         work//'/.fortyard/check && printf "#!/bin/sh\necho full suite\ntest -f README && '// &
-        'test ! -f BROKEN\n" > '//work//'/.fortyard/verify && chmod +x '//work// &
+        'test ! -f BROKEN && { test \"\$FORTYARD_RUNNER_CLASS\" != macos-arm64 || '// &
+        'test ! -f MACBROKEN; }\n" > '//work//'/.fortyard/verify && chmod +x '//work// &
         '/.fortyard/check '//work//'/.fortyard/verify && '//gw//'add -A && '//gw// &
         'commit -q -m First && '//gw//'push -q '//url//' HEAD:first', exitstat=stat)
     call check(stat == 0, 'a first branch is pushed')
@@ -90,7 +105,7 @@ program test_verify
     call land('third', 'printf "x\n" > BROKEN', 'Break the full suite')
     call land('fourth', 'printf "4\n" > four', 'Fourth')
     reply = ''
-    do i = 1, 600
+    do i = 1, 1800
         reply = get('/api/v1/repos/demo/issues')
         if (index(reply, 'Verification fails since') > 0) exit
         call proc_sleep_ms(100)
@@ -113,7 +128,7 @@ program test_verify
 
     ! A fix lands; main passes again and the issue is closed.
     call land('fix', 'git rm -q BROKEN', 'Remove BROKEN')
-    do i = 1, 600
+    do i = 1, 1800
         reply = get('/api/v1/repos/demo/issues/'//issue)
         if (index(reply, '"state":"closed"') > 0) exit
         call proc_sleep_ms(100)
@@ -124,8 +139,29 @@ program test_verify
     call check(index(reply, '"kind":"verify"') > 0 .and. index(reply, '"state":"passed"') > 0, &
         'verifications are jobs: '//reply)
 
+    ! A commit that fails on one runner class only fails the verification,
+    ! and the report names that class.
+    call land('mac', 'printf "m\n" > MACBROKEN', 'Break macOS')
+    do i = 1, 1800
+        reply = get('/api/v1/repos/demo/issues')
+        if (index(reply, 'Break macOS') > 0) exit
+        call proc_sleep_ms(100)
+    end do
+    call check(index(reply, 'Break macOS (#7)') > 0, 'a failure on macos-arm64 is reported: '//reply)
+    k = index(reply, '"number":') + 9
+    issue = ''
+    do while (index('0123456789', reply(k:k)) > 0)
+        issue = issue//reply(k:k)
+        k = k + 1
+    end do
+    reply = get('/api/v1/repos/demo/issues/'//issue)
+    call check(index(reply, 'On the runner class macos-arm64') > 0, &
+        'the report names the runner class that failed: '//reply)
+
     call proc_kill(run, SIGTERM)
     call proc_wait(run, stat)
+    call proc_kill(mac, SIGTERM)
+    call proc_wait(mac, stat)
     call proc_kill(sup, SIGTERM)
     call proc_wait(sup, stat)
     print '(a)', 'verify: all checks passed'
@@ -147,7 +183,7 @@ contains
     subroutine wait_landing_of(branch)
         character(len=*), intent(in) :: branch
         integer :: k
-        do k = 1, 600
+        do k = 1, 1800
             reply = get('/api/v1/repos/demo/landings')
             if (index(reply, '"branch":"'//branch//'","account":"admin","state":"landed"') > 0) return
             call proc_sleep_ms(100)
@@ -161,7 +197,7 @@ contains
         integer :: k
         character(len=16) :: n
         write (n, '(i0)') number
-        do k = 1, 600
+        do k = 1, 1800
             reply = get('/api/v1/jobs/'//trim(n))
             ! The job's own state, not one of its checks'.
             if (index(reply, '"state":"'//state//'","queued"') > 0) return
@@ -174,7 +210,7 @@ contains
         !! Until `count` verifications passed.
         integer, intent(in) :: count
         integer :: k, seen, at
-        do k = 1, 600
+        do k = 1, 1800
             reply = get('/api/v1/jobs')
             seen = 0
             at = 1
@@ -229,6 +265,7 @@ contains
         if (.not. ok) then
             write (*, '(a)') 'FAIL: '//what
             if (run > 0) call proc_kill(run, SIGTERM)
+            if (mac > 0) call proc_kill(mac, SIGTERM)
             if (sup > 0) call proc_kill(sup, SIGTERM)
             error stop 1
         end if

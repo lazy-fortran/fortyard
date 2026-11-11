@@ -94,11 +94,17 @@ program test_policy
     call check(stat == 0 .and. index(out, '"tests":"affected","review":"after"') > 0 .and. &
         index(out, '"batch":2') > 0, 'settings are set and the others kept: '//out)
     call run(in//fy//' repo policy demo check_timeout=25')
-    call check(stat == 0 .and. index(out, '"unreviewed_limit":0,"check_timeout":25}') > 0, &
+    call check(stat == 0 .and. index(out, '"unreviewed_limit":0,"check_timeout":25,') > 0, &
         'the time limit of a check is set in minutes: '//out)
     call run(in//fy//' repo policy demo check_timeout=10081')
     call check(stat /= 0 .and. index(out, 'check_timeout is 0') > 0, &
         'a time limit over a week is refused: '//out)
+    call run(in//fy//' repo policy demo verify_on=linux,macos-arm64')
+    call check(stat == 0 .and. index(out, '"verify_on":"linux,macos-arm64"}') > 0, &
+        'main is verified on the runner classes set: '//out)
+    call run(in//fy//' repo policy demo verify_on=MacOS')
+    call check(stat /= 0 .and. index(out, 'verify_on is runner classes') > 0, &
+        'a class with capitals is refused: '//out)
     call run(in//fy//' repo policy demo tests=some')
     call check(stat /= 0 .and. index(out, 'tests is full, affected or none') > 0, &
         'a value that is none of the choices is refused: '//out)
@@ -290,6 +296,10 @@ contains
         call check(len(error) > 0, 'a negative time limit is refused')
         call policy_set(p, 'check_timeout', '0', error)
         call check(len(error) == 0 .and. p%check_timeout == 0, 'check_timeout=0 is no limit')
+        call policy_set(p, 'verify_on', 'linux,,macos-arm64', error)
+        call check(len(error) > 0, 'an empty runner class is refused')
+        call policy_set(p, 'verify_on', 'a,b,c,d,e,f,g,h,i', error)
+        call check(len(error) > 0, 'more than eight runner classes are refused')
         call policy_set(p, 'bisect', 'maybe', error)
         call check(len(error) > 0, 'bisect=maybe is refused')
         call policy_set(p, 'review', 'never', error)
@@ -322,7 +332,8 @@ contains
         call policy_put(db, 'unit', p, found)
         call policy_get(db, 'unit', p)
         call check(found .and. policy_json('unit', p) == '{"name":"unit","tests":"affected",'// &
-            '"review":"after","bisect":"off","batch":4,"unreviewed_limit":3,"check_timeout":90}', &
+            '"review":"after","bisect":"off","batch":4,"unreviewed_limit":3,"check_timeout":90,'// &
+            '"verify_on":"linux"}', &
             'a policy is stored: '//policy_json('unit', p))
         call policy_get(db, 'demo', p)
         call check(p%tests == 'full' .and. p%batch == 8, 'for its repository only')

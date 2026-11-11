@@ -29,13 +29,13 @@ module fy_events
     end type pollfd_t
 
     interface
-        function c_inotify_init1(flags) bind(C, name='inotify_init1') result(fd)
+        function c_inotify_init1(flags) bind(C, name='fy_inotify_init1') result(fd)
             import :: c_int
             integer(c_int), value :: flags
             integer(c_int) :: fd
         end function c_inotify_init1
 
-        function c_inotify_add_watch(fd, path, mask) bind(C, name='inotify_add_watch') result(wd)
+        function c_inotify_add_watch(fd, path, mask) bind(C, name='fy_inotify_add_watch') result(wd)
             import :: c_int, c_char
             integer(c_int), value :: fd, mask
             character(kind=c_char), intent(in) :: path(*)

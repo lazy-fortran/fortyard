@@ -122,6 +122,13 @@ contains
         call migration_add(list, 'landings-check-id', &
             'ALTER TABLE landings ADD COLUMN check_id INTEGER;')
 
+        ! Runner classes: a check runs only on a runner of its class (a runner
+        ! that names none is linux), and a repository's verifications of main
+        ! run once on each class of its policy verify_on.
+        call migration_add(list, 'runner-classes', &
+            "ALTER TABLE checks ADD COLUMN class TEXT NOT NULL DEFAULT 'linux';"// &
+            "ALTER TABLE repos ADD COLUMN policy_verify_on TEXT NOT NULL DEFAULT 'linux';")
+
     end subroutine migrations_registry
 
 end module fy_migrations

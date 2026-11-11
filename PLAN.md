@@ -729,6 +729,13 @@ the others are new.
       work tree with its build directory per repository, restart on a new
       server release; `scripts/install-runner.sh`). Production's landing
       checks run on faepkub4 since 2026-11-10, not on the server's host.
+      Runner classes: a runner takes only checks of its class (`fy runner
+      --class`, default linux); landing checks run on linux, and the
+      verification of main runs once on each class of the policy `verify_on`.
+      macOS arm64 runners (`scripts/install-mac-runners.sh`) build fy from
+      source at the server's commit, run as launchd daemons, and run each
+      check in the sandbox of sandbox-runtime (srt) under a memory limit their
+      check watcher enforces.
 - [x] S3 Batched merge queue that blames a change only when the failure
       reproduces with that change alone (M8).
 - [ ] S4 Continuous pool: candidates by key change, staleness and audit

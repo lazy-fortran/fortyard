@@ -28,7 +28,6 @@ module fy_proc
         proc_wait_any
 
     integer, parameter :: SIGKILL = 9, SIGTERM = 15
-    integer(c_int), parameter :: PR_SET_PDEATHSIG = 1
 
     type, bind(C) :: timespec_t
         integer(c_long) :: sec = 0
@@ -70,13 +69,12 @@ module fy_proc
             integer(c_int) :: pid
         end function c_getppid
 
-        ! prctl is variadic; integer arguments pass identically on x86-64 and aarch64 Linux.
-        function c_prctl(option, arg2, arg3, arg4, arg5) bind(C, name='prctl') result(rc)
-            import :: c_int, c_long
-            integer(c_int), value :: option
-            integer(c_long), value :: arg2, arg3, arg4, arg5
+        ! Linux only (fy_platform.c); elsewhere it fails.
+        function c_set_pdeathsig(sig) bind(C, name='fy_set_pdeathsig') result(rc)
+            import :: c_int
+            integer(c_int), value :: sig
             integer(c_int) :: rc
-        end function c_prctl
+        end function c_set_pdeathsig
 
         function c_pipe(fds) bind(C, name='pipe') result(rc)
             import :: c_int
@@ -233,8 +231,7 @@ contains
         integer, intent(in) :: parent
         logical :: ok
 
-        ok = c_prctl(PR_SET_PDEATHSIG, int(SIGTERM, c_long), 0_c_long, 0_c_long, &
-            0_c_long) == 0 .and. int(c_getppid()) == parent
+        ok = c_set_pdeathsig(int(SIGTERM, c_int)) == 0 .and. int(c_getppid()) == parent
     end function proc_die_with_parent
 
     subroutine proc_sleep_ms(ms)

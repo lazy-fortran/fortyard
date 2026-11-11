@@ -27,6 +27,7 @@ module fy_runner
     use fy_proc, only: &
         proc_readlink, &
         proc_run, &
+        proc_setenv, &
         proc_sleep_ms
     implicit none
     private
@@ -36,18 +37,24 @@ module fy_runner
 
 contains
 
-    subroutine runner_main(server, token, data_dir, follow)
-        !! Takes checks until the release that `follow` points to changes (then
-        !! returns, so that the runner restarts on the new release).
+    subroutine runner_main(server, token, data_dir, follow, class)
+        !! Takes checks of the runner class `class` until the release that
+        !! `follow` points to changes (then returns, so that the runner
+        !! restarts on the new release).
         character(len=*), intent(in) :: server, token, data_dir, follow
-        character(len=:), allocatable :: body, release
+        character(len=*), intent(in), optional :: class
+        character(len=:), allocatable :: body, release, cls
         integer :: code, stat, fd
         logical :: changed, remote
 
+        cls = 'linux'
+        if (present(class)) cls = class
+        ! A check may ask which class of runner it runs on.
+        call proc_setenv('FORTYARD_RUNNER_CLASS', cls)
         inquire (file=data_dir//'/repos/.', exist=remote)
         remote = .not. remote
         if (remote) then
-            call remote_main(server, token, data_dir)
+            call remote_main(server, token, data_dir, cls)
             return
         end if
         call release_checks(server, token)
@@ -63,8 +70,8 @@ contains
             if (len(follow) > 0) then
                 if (proc_readlink(follow) /= release) return
             end if
-            call client_request(server, 'POST', '/api/v1/checks/claim', token, '{}', code, body, &
-                stat)
+            call client_request(server, 'POST', '/api/v1/checks/claim', token, &
+                '{"class":"'//cls//'"}', code, body, stat)
             if (stat == 0 .and. code == 200) then
                 call run_one(server, token, data_dir, body)
                 cycle
@@ -79,11 +86,11 @@ contains
         end do
     end subroutine runner_main
 
-    subroutine remote_main(server, token, data_dir)
+    subroutine remote_main(server, token, data_dir, class)
         !! The remote runner's loop; data_dir holds its mirrors and the
         !! credentials file git reads (mode 600, so the token is never on a
         !! command line).
-        character(len=*), intent(in) :: server, token, data_dir
+        character(len=*), intent(in) :: server, token, data_dir, class
         character(len=:), allocatable :: body, out, commit, host
         integer :: code, stat, u, ios, s, e
         integer(int64) :: now, rate, last_cleanup
@@ -126,8 +133,8 @@ contains
                     return
                 end if
             end if
-            call client_request(server, 'POST', '/api/v1/checks/claim', token, '{}', code, &
-                body, stat)
+            call client_request(server, 'POST', '/api/v1/checks/claim', token, &
+                '{"class":"'//class//'"}', code, body, stat)
             if (stat == 0 .and. code == 200) then
                 call run_one(server, token, data_dir, body, remote=.true.)
                 cycle
