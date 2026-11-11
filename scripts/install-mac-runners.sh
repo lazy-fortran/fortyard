@@ -23,9 +23,13 @@ export PATH="$uhome/.local/bin:/opt/homebrew/bin:$PATH"
 command -v fo > /dev/null || { echo "install-mac-runners: fo is missing" >&2; exit 1; }
 [ "$(srt --version 2> /dev/null || true)" = "$srt_version" ] ||
     npm install -g --silent "@anthropic-ai/sandbox-runtime@$srt_version"
-mkdir -p "$shared/bin" "$shared/cache"
+mkdir -p "$shared/bin" "$shared/cache" "$shared/apple"
 cp "$here/scripts/mac-runner.sh" "$shared/bin/mac-runner.sh"
 chmod 755 "$shared/bin/mac-runner.sh"
+# Local network privacy lets a launchd daemon reach hosts of its own subnet
+# (the forge, for the Macs at TU Graz) only through Apple's binaries: other
+# ones, like Homebrew's git, fail with EHOSTUNREACH. fy calls git and curl.
+ln -sf /usr/bin/git /usr/bin/curl "$shared/apple/"
 i=1
 while [ "$i" -le "$count" ]; do
     home=$shared/runner-$i
@@ -42,8 +46,8 @@ while [ "$i" -le "$count" ]; do
   },
   "filesystem": {
     "denyRead": ["$uhome", "$home/token", "$home/git-credentials", "$home/data/credentials"],
-    "allowRead": ["$home", "$shared/cache", "$shared/releases", "$uhome/.local/bin",
-      "$uhome/.local/lib"],
+    "allowRead": ["$home", "$shared/apple", "$shared/cache", "$shared/releases",
+      "$uhome/.local/bin", "$uhome/.local/lib"],
     "allowWrite": ["$home/tmp", "$home/home", "$shared/cache"],
     "denyWrite": []
   }
@@ -61,7 +65,7 @@ JSON
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key><string>$uhome</string>
-    <key>PATH</key><string>$uhome/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PATH</key><string>$shared/apple:$uhome/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>LANG</key><string>en_US.UTF-8</string>
     <key>FY_TARGET</key><string>$target</string>
     <key>FY_RUNNER</key><string>$home</string>
