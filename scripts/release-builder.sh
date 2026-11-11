@@ -162,7 +162,10 @@ while :; do
         if [ -n "$head" ] && ! printf '%s\n' "$list" | grep -q " $head ready " &&
             [ ! -e "$home/failed-$head" ]; then
             day=$(date -u +%Y.%m.%d)
-            n=$(printf '%s\n' "$list" | grep -c "^$day\." || true)
+            # The list holds only the newest releases, so the next number follows
+            # the highest of the day instead of counting them.
+            n=$(printf '%s\n' "$list" | sed -n "s/^$day\.\([0-9][0-9]*\) .*/\1/p" | sort -n | tail -1)
+            n=$((${n:--1} + 1))
             build "$head" "$day.$n" || : > "$home/failed-$head"
             [ "$restart" = 1 ] && exec "$0"
         fi
