@@ -11,7 +11,7 @@ module fy_issue
     use fx_json_build, only: json_escape_string
     use fx_json_parse, only: json_extract_string
     use fy_change, only: change_next_number
-    use fy_sqlite, only: db_t, stmt_t, db_prepare, stmt_bind_text, stmt_bind_int, stmt_step, &
+    use fy_sqlite, only: db_t, stmt_t, db_prepare, db_exec, stmt_bind_text, stmt_bind_int, stmt_step, &
         stmt_text, stmt_int, stmt_finalize, SQLITE_OK, SQLITE_ROW, SQLITE_DONE
     implicit none
     private
@@ -121,23 +121,13 @@ contains
         subroutine create(title, text)
             character(len=*), intent(in) :: title, text
             type(stmt_t) :: st
-            integer :: stat, n
+            integer :: n
 
-            n = change_next_number(db, repo, git_dir)
-            call db_prepare(db, 'INSERT INTO issues (repo, number, title, body, author,'// &
-                ' created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, '//NOW//', '//NOW//');', &
-                st, stat)
-            if (stat /= SQLITE_OK) then
+            n = issue_open(db, repo, git_dir, title, text, account)
+            if (n == 0) then
                 call refuse(500, 'issue not stored')
                 return
             end if
-            call stmt_bind_text(st, 1, repo, stat)
-            call stmt_bind_int(st, 2, int(n, int64), stat)
-            call stmt_bind_text(st, 3, title, stat)
-            call stmt_bind_text(st, 4, text, stat)
-            call stmt_bind_text(st, 5, account, stat)
-            stat = stmt_step(st)
-            call stmt_finalize(st)
             code = 201
             answer = '{"issue":'//itoa(n)//'}'
         end subroutine create
@@ -192,14 +182,15 @@ contains
         type(stmt_t) :: st
         integer :: stat
 
-        number = change_next_number(db, repo, git_dir)
+        number = 0
         call db_prepare(db, 'INSERT INTO issues (repo, number, title, body, author,'// &
             ' created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, '//NOW//', '//NOW//');', &
             st, stat)
-        if (stat /= SQLITE_OK) then
-            number = 0
-            return
-        end if
+        if (stat /= SQLITE_OK) return
+        ! Number and row in one write transaction: no other worker reads the
+        ! same number in between.
+        call db_exec(db, 'BEGIN IMMEDIATE;', stat)
+        number = change_next_number(db, repo, git_dir)
         call stmt_bind_text(st, 1, repo, stat)
         call stmt_bind_int(st, 2, int(number, int64), stat)
         call stmt_bind_text(st, 3, title, stat)
@@ -207,6 +198,11 @@ contains
         call stmt_bind_text(st, 5, account, stat)
         if (stmt_step(st) /= SQLITE_DONE) number = 0
         call stmt_finalize(st)
+        if (number > 0) then
+            call db_exec(db, 'COMMIT;', stat)
+        else
+            call db_exec(db, 'ROLLBACK;', stat)
+        end if
     end function issue_open
 
     subroutine issue_comment(db, repo, number, account, text)

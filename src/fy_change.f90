@@ -10,8 +10,8 @@ module fy_change
     use fx_json_parse, only: json_extract_string
     use fy_events, only: events_notify
     use fy_proc, only: proc_run
-    use fy_sqlite, only: db_t, stmt_t, db_prepare, stmt_bind_text, stmt_bind_int, stmt_step, &
-        stmt_text, stmt_int, stmt_finalize, SQLITE_OK, SQLITE_ROW
+    use fy_sqlite, only: db_t, stmt_t, db_prepare, db_exec, stmt_bind_text, &
+        stmt_bind_int, stmt_step, stmt_text, stmt_int, stmt_finalize, SQLITE_OK, SQLITE_ROW
     implicit none
     private
 
@@ -134,6 +134,9 @@ contains
             ' description, author, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '// &
             NOW//', '//NOW//') RETURNING id;', st, stat)
         if (stat /= SQLITE_OK) return
+        ! Number and row in one write transaction: no other worker reads the
+        ! same number in between.
+        call db_exec(db, 'BEGIN IMMEDIATE;', stat)
         c%number = change_next_number(db, repo, git_dir)
         call stmt_bind_text(st, 1, repo, stat)
         call stmt_bind_int(st, 2, int(c%number, int64), stat)
@@ -147,6 +150,11 @@ contains
             ok = .true.
         end if
         call stmt_finalize(st)
+        if (ok) then
+            call db_exec(db, 'COMMIT;', stat)
+        else
+            call db_exec(db, 'ROLLBACK;', stat)
+        end if
     end subroutine open_change
 
     subroutine add_version(db, git_dir, c, tip, base, account)
