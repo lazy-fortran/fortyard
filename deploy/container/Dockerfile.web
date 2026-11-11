@@ -15,7 +15,7 @@ RUN pacman -Syu --noconfirm --needed git ccache emscripten nodejs-lts-jod \
 RUN curl -fsSL https://micro.mamba.pm/api/micromamba/linux-64/latest \
         | tar -xj -C /usr/local bin/micromamba \
     && micromamba create -y -q -p /opt/lfenv -c conda-forge \
-        llvmdev=11 zlib zstd zstd-static re2c=3.1 bison=3.4 cmake=3.29.1 ninja python=3.12 toml \
+        llvmdev=11 lld=11 zlib zstd zstd-static re2c=3.1 bison=3.4 cmake=3.29.1 ninja python=3.12 toml \
     && micromamba clean -a -y -q
 ENV EMSDK_PATH=/opt/emsdk
 RUN mkdir -p /opt/emsdk/upstream && ln -s /usr/lib/emscripten /opt/emsdk/upstream/emscripten

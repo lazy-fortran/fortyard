@@ -86,7 +86,7 @@ INFO
                 mv "$ctx/buildx-builder.sh" "$ctx/scripts/" && chmod 755 "$ctx/scripts/buildx-builder.sh"
                 mv "$ctx/buildkitd.toml" "$ctx/deploy/container/"
                 builder=$("$ctx/scripts/buildx-builder.sh")
-                docker buildx build --builder "$builder" --load --quiet -t "$web_image" \
+                docker buildx build --builder "$builder" --load --progress plain -t "$web_image" \
                     --build-arg LFORTRAN_REV="$rev" --build-arg JOBS=8 \
                     -f "$ctx/Dockerfile" "$ctx" >"$out.image.log" 2>&1 || {
                     tail -30 "$out.image.log" >&2
