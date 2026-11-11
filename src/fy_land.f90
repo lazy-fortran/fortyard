@@ -90,6 +90,9 @@ contains
         !! A pre-receive hook in the bare repository `repo`: pushes may create and
         !! update any branch except `main`, which only landing changes, and bring
         !! no file over the size limit that .fortyard/allow-large does not allow.
+        !! refs/fortyard/ holds what the server recorded and what it checks and
+        !! lands, so no push moves it; tags and other refs move only for a push
+        !! with the admin scope (FY_PUSH_ADMIN, set by the server).
         character(len=*), intent(in) :: repo
         integer, intent(out) :: stat
         character(len=:), allocatable :: out
@@ -111,6 +114,17 @@ contains
             '        echo "main changes only by landing: push a branch, then fy land" >&2', &
             '        exit 1', &
             '    fi', &
+            '    case "$ref" in', &
+            '    refs/fortyard/*)', &
+            '        echo "$ref is kept by fortyard and takes no push" >&2', &
+            '        exit 1 ;;', &
+            '    refs/heads/*) ;;', &
+            '    *)', &
+            '        if [ -z "$FY_PUSH_ADMIN" ]; then', &
+            '            echo "pushing $ref needs the admin scope; the write scope pushes branches" >&2', &
+            '            exit 1', &
+            '        fi ;;', &
+            '    esac', &
             '    # A deleted ref brings nothing.', &
             '    case "$new" in *[!0]*) ;; *) continue ;; esac', &
             '    out=$(git rev-list "$new" --not --all </dev/null | large "$new")', &

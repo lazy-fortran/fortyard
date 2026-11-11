@@ -1008,8 +1008,8 @@ contains
             character(len=24) :: num
             logical :: ok
 
-            if (index(' '//who%scopes//' ', ' admin ') == 0) then
-                call fail(res, 403, 'landing needs the admin scope')
+            if (.not. has_scope(who, 'land')) then
+                call fail(res, 403, 'landing needs the land or admin scope')
                 return
             end if
             call json_extract_string(req%body, 'branch', branch, ok)
@@ -1064,8 +1064,7 @@ contains
                 call fail(res, 404, 'no such repository')
                 return
             end if
-            if (req%method == 'POST' .and. index(' '//who%scopes//' ', ' admin ') == 0 .and. &
-                index(' '//who%scopes//' ', ' write ') == 0) then
+            if (req%method == 'POST' .and. .not. has_scope(who, 'write')) then
                 call fail(res, 403, 'writing issues needs the admin or write scope')
                 return
             end if
@@ -1081,20 +1080,23 @@ contains
             character(len=*), intent(in) :: target, sub
             character(len=:), allocatable :: answer, ctype, branch
             integer :: code
+            logical :: is_land
 
             inquire (file=repo_path(target)//'/HEAD', exist=exists)
             if (.not. repo_name_ok(target) .or. .not. exists) then
                 call fail(res, 404, 'no such repository')
                 return
             end if
-            if (req%method == 'POST' .and. index(' '//who%scopes//' ', ' admin ') == 0 .and. &
-                index(' '//who%scopes//' ', ' write ') == 0) then
+            ! Landing is the land scope's and is checked in change_api.
+            is_land = .false.
+            if (len(sub) > 5) is_land = sub(len(sub) - 4:) == '/land'
+            if (req%method == 'POST' .and. .not. is_land .and. .not. has_scope(who, 'write')) then
                 call fail(res, 403, 'changing a change needs the admin or write scope')
                 return
             end if
             call change_api(db, req%method, target, repo_path(target), sub, req%query, req%body, &
                 who%account, index(' '//who%scopes//' ', ' admin ') > 0, code, answer, ctype, &
-                branch)
+                branch, has_scope(who, 'land'))
             if (len(branch) > 0) then
                 call change_by_branch(db, target, branch, ch, has_change)
                 if (.not. queued(target, branch, has_change, number)) return
@@ -1118,7 +1120,8 @@ contains
 
             change = 0
             if (has_change) change = ch%id
-            call policy_queue(db, target, branch, who%account, change, number, refusal, stat)
+            call policy_queue(db, target, branch, who%account, change, number, refusal, stat, &
+                who%session)
             queued = stat == 0 .and. len(refusal) == 0
             if (len(refusal) > 0) then
                 call fail(res, 409, refusal)
@@ -1178,7 +1181,8 @@ contains
                     json_escape_string(ls(k)%branch)//'","account":"'// &
                     json_escape_string(ls(k)%account)//'","state":"'//ls(k)%state// &
                     '","created":"'//ls(k)%created//'","finished":"'//ls(k)%finished// &
-                    '","commit":"'//ls(k)%commit//'","log":"'//json_escape_string(ls(k)%log)//'"}'
+                    '","commit":"'//ls(k)%commit//'","log":"'//json_escape_string(ls(k)%log)// &
+                    '","session":'//text_or_null(ls(k)%session)//'}'
             end do
             res%body = res%body//']}'
         end subroutine list_landings
@@ -1476,7 +1480,8 @@ contains
     subroutine git_route(cfd, req, rest, db, repo, write)
         !! Clone, fetch and push over HTTP. Git sends the access token as the
         !! Basic password (any user name) or as a bearer token. Reading needs a
-        !! valid token; pushing needs the admin scope and a primary repository.
+        !! valid token; pushing needs the write or admin scope and a primary
+        !! repository.
         integer, intent(in) :: cfd
         type(http_request_t), intent(in) :: req
         character(len=*), intent(in) :: rest, repo
@@ -1508,16 +1513,17 @@ contains
             end if
             if (len(mode) == 0) then
                 status = 404
-            else if (write .and. index(' '//who%scopes//' ', ' admin ') == 0) then
+            else if (write .and. .not. has_scope(who, 'write')) then
                 status = 403
             else if (write .and. mode /= 'primary') then
                 ! A mirror follows its upstream; pushes go there.
                 status = 409
             else
-                call git_http_serve(cfd, req, rest, repos_dir, repo, who%account, status)
+                call git_http_serve(cfd, req, rest, repos_dir, repo, who%account, status, &
+                    admin=has_scope(who, 'admin'))
                 ! A push opens changes for new branches and versions for moved ones.
                 if (write .and. status == 0 .and. index(req%path, '/git-receive-pack') > 0) &
-                    call change_sync(db, repo, repo_path(repo), who%account)
+                    call change_sync(db, repo, repo_path(repo), who%account, who%session)
             end if
             if (status /= 0) call http_send_response(cfd, status, 'text/plain; charset=utf-8', &
                 git_error(status)//new_line('a'))
@@ -1531,7 +1537,7 @@ contains
         integer, intent(in) :: status
         character(len=:), allocatable :: s
         select case (status)
-        case (403); s = 'Pushing needs the admin scope.'
+        case (403); s = 'Pushing needs the write or admin scope.'
         case (404); s = 'No such repository.'
         case (409); s = 'This repository mirrors its upstream; push there.'
         case (413); s = 'The push is too large.'
@@ -1597,6 +1603,7 @@ contains
             if (.not. authenticated(req, db, who, res)) return
             res%body = '{"account":"'//json_escape_string(who%account)// &
                 '","token":"'//json_escape_string(who%token_name)// &
+                '","session":"'//json_escape_string(who%session)// &
                 '","scopes":"'//json_escape_string(who%scopes)//'"}'
         case ('/healthz')
             if (.not. method_is(req, 'GET', res)) return
@@ -1826,7 +1833,8 @@ contains
             s = '{"id":'//trim(num)//',"kind":"'//j%kind//'","repo":"'//j%repo//'","branch":"'// &
                 json_escape_string(j%branch)//'","account":"'//json_escape_string(j%account)// &
                 '","state":"'//j%state//'","queued":"'//j%created//'","started":"'// &
-                j%started//'","finished":"'//j%finished//'","commit":"'//j%commit//'"'
+                j%started//'","finished":"'//j%finished//'","commit":"'//j%commit// &
+                '","session":'//text_or_null(j%session)
             if (with_log) s = s//',"log":"'//json_escape_string(j%log)//'"'
             s = s//'}'
         end function job_json
@@ -1981,10 +1989,31 @@ contains
         if (.not. authenticated) call fail(res, 401, 'missing or invalid token')
     end function authenticated
 
+    logical function has_scope(who, scope)
+        !! Whether the token carries `scope`; admin implies every scope.
+        type(token_identity_t), intent(in) :: who
+        character(len=*), intent(in) :: scope
+        has_scope = index(' '//who%scopes//' ', ' '//scope//' ') > 0 .or. &
+            index(' '//who%scopes//' ', ' admin ') > 0
+    end function has_scope
+
+    function text_or_null(s) result(json)
+        !! A JSON string, or null for a member that was not recorded.
+        character(len=*), intent(in) :: s
+        character(len=:), allocatable :: json
+        if (len(s) == 0) then
+            json = 'null'
+        else
+            json = '"'//json_escape_string(s)//'"'
+        end if
+    end function text_or_null
+
     subroutine create_token(req, db, who, res)
         !! A token can mint tokens for its own account with at most its scopes:
-        !! all of them, or the space-separated subset named in "scopes", so a
-        !! runner on another host carries only the runner scope.
+        !! all of them, or the subset named in "scopes" (separated by spaces or
+        !! commas), so a runner on another host carries only the runner scope.
+        !! A token that writes or lands without admin mints none: its name is
+        !! the session the lists show, which a session must not multiply.
         type(http_request_t), intent(in) :: req
         type(db_t), intent(in) :: db
         type(token_identity_t), intent(in) :: who
@@ -1993,6 +2022,12 @@ contains
         logical :: found
         integer :: stat, at, space
 
+        if (.not. has_scope(who, 'admin') .and. (has_scope(who, 'write') .or. &
+            has_scope(who, 'land'))) then
+            call fail(res, 403, 'a token with the write or land scope creates no tokens;'// &
+                ' that needs the admin scope')
+            return
+        end if
         call json_extract_string(req%body, 'name', name, found)
         if (.not. found .or. len(name) == 0 .or. len(name) > 100) then
             call fail(res, 400, 'body must be {"name":"..."}')
@@ -2002,9 +2037,11 @@ contains
         if (.not. found) then
             scopes = who%scopes
         else
-            scopes = trim(adjustl(scopes))
-            if (len(scopes) == 0 .or. len(scopes) > 200) then
-                call fail(res, 400, '"scopes" must name at least one scope')
+            if (len(scopes) > 200) scopes = ''
+            scopes = scope_words(scopes)
+            if (len(scopes) == 0) then
+                call fail(res, 400, '"scopes" must name at least one scope, in lower-case'// &
+                    ' letters, digits and :_-, separated by spaces or commas')
                 return
             end if
             at = 1
@@ -2017,7 +2054,6 @@ contains
                     word = scopes(at:at + space - 2)
                     at = at + space
                 end if
-                if (len(word) == 0) cycle
                 ! admin permits everything, so it may grant any narrower scope.
                 if (index(' '//who%scopes//' ', ' '//word//' ') == 0 .and. &
                     index(' '//who%scopes//' ', ' admin ') == 0) then
@@ -2037,23 +2073,60 @@ contains
             '","scopes":"'//json_escape_string(scopes)//'"}'
     end subroutine create_token
 
+    pure function scope_words(text) result(list)
+        !! The scopes named in `text`, separated by single spaces as they are
+        !! stored and matched; empty when `text` names none or holds a
+        !! character no scope has.
+        character(len=*), intent(in) :: text
+        character(len=:), allocatable :: list
+        integer :: i
+        logical :: gap
+
+        list = ''
+        gap = .false.
+        do i = 1, len(text)
+            if (text(i:i) == ' ' .or. text(i:i) == ',') then
+                gap = len(list) > 0
+            else if (verify(text(i:i), 'abcdefghijklmnopqrstuvwxyz0123456789:_-') /= 0) then
+                list = ''
+                return
+            else
+                if (gap) list = list//' '
+                gap = .false.
+                list = list//text(i:i)
+            end if
+        end do
+    end function scope_words
+
+    pure logical function own_token(who, t)
+        !! Whether `t` is the caller's token or a browser session opened with it.
+        type(token_identity_t), intent(in) :: who
+        type(token_info_t), intent(in) :: t
+        own_token = t%id == who%origin_id .or. t%parent == who%origin_id
+    end function own_token
+
     subroutine list_tokens(db, who, res)
+        !! The tokens of the account for an admin token; any other token sees
+        !! itself and its browser sessions.
         type(db_t), intent(in) :: db
         type(token_identity_t), intent(in) :: who
         type(response_t), intent(inout) :: res
         type(token_info_t), allocatable :: tokens(:)
         character(len=24) :: num
         integer :: i, stat
+        logical :: all
 
         call store_token_list(db, who%account_id, tokens, stat)
         if (stat /= 0) then
             call fail(res, 500, 'tokens not listed')
             return
         end if
+        all = has_scope(who, 'admin')
         res%body = '{"tokens":['
         do i = 1, size(tokens)
+            if (.not. all .and. .not. own_token(who, tokens(i))) cycle
             write (num, '(i0)') tokens(i)%id
-            if (i > 1) res%body = res%body//','
+            if (res%body(len(res%body):) /= '[') res%body = res%body//','
             res%body = res%body//'{"id":'//trim(num)// &
                 ',"name":"'//json_escape_string(tokens(i)%name)// &
                 '","scopes":"'//json_escape_string(tokens(i)%scopes)// &
@@ -2068,13 +2141,29 @@ contains
     end subroutine list_tokens
 
     subroutine revoke_token(db, who, id, res)
+        !! An admin token revokes any token of the account; any other token
+        !! only itself and its browser sessions, so a narrow token cannot lock
+        !! the administrator out.
         type(db_t), intent(in) :: db
         type(token_identity_t), intent(in) :: who
         integer(int64), intent(in) :: id
         type(response_t), intent(inout) :: res
+        type(token_info_t), allocatable :: tokens(:)
         character(len=24) :: num
         logical :: found
+        integer :: i, stat
 
+        if (.not. has_scope(who, 'admin')) then
+            call store_token_list(db, who%account_id, tokens, stat)
+            found = .false.
+            do i = 1, size(tokens)
+                if (tokens(i)%id == id) found = own_token(who, tokens(i))
+            end do
+            if (.not. found) then
+                call fail(res, 403, 'revoking another token needs the admin scope')
+                return
+            end if
+        end if
         call store_token_revoke(db, who%account_id, id, found)
         if (.not. found) then
             call fail(res, 404, 'no such token')
@@ -2088,7 +2177,8 @@ contains
 
     subroutine open_session(req, db, res)
         !! Exchanges a token for a browser session in an HttpOnly cookie, so
-        !! scripts on the page never hold a credential.
+        !! scripts on the page never hold a credential. The session acts under
+        !! the name of that token and ends with it: it is no token of its own.
         type(http_request_t), intent(in) :: req
         type(db_t), intent(in) :: db
         type(response_t), intent(inout) :: res
@@ -2109,7 +2199,7 @@ contains
             return
         end if
         call store_token_create(db, who%account_id, SESSION_NAME, who%scopes, session, &
-            stat, days=SESSION_DAYS)
+            stat, days=SESSION_DAYS, parent=who%origin_id)
         if (stat /= 0) then
             call fail(res, 500, 'session not created')
             return

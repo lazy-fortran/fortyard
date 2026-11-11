@@ -53,6 +53,8 @@ module fy_change
         integer :: number = 0
         character(len=:), allocatable :: repo, key, branch, title, description, author, state, &
             created, updated, commit, review, flag_reason, reviewed_head
+        !! The token that pushed the newest version; empty when not recorded.
+        character(len=:), allocatable :: session
         integer :: versions = 0
         logical :: flagged = .false.
     end type change_t
@@ -63,23 +65,29 @@ module fy_change
         " description, author, state, created_at, updated_at, coalesce(commit_id, ''),"// &
         ' (SELECT count(*) FROM change_versions v WHERE v.change = changes.id),'// &
         " coalesce(review_state, ''), flagged, coalesce(flag_reason, ''),"// &
-        " coalesce(reviewed_head, '')"
+        " coalesce(reviewed_head, ''), coalesce((SELECT v.session FROM change_versions v"// &
+        " WHERE v.change = changes.id ORDER BY v.version DESC LIMIT 1), '')"
     !! The head of the newest version of a row of changes.
     character(len=*), parameter :: NEWEST = '(SELECT v.head FROM change_versions v'// &
         ' WHERE v.change = changes.id ORDER BY v.version DESC LIMIT 1)'
 
 contains
 
-    subroutine change_sync(db, repo, git_dir, account)
-        !! After a push to `repo`: opens a change for each new branch and adds a
-        !! version to the change of each branch that moved.
+    subroutine change_sync(db, repo, git_dir, account, session)
+        !! After a push to `repo` by the token named `session`: opens a change
+        !! for each new branch and adds a version to the change of each branch
+        !! that moved.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: repo, git_dir, account
+        character(len=*), intent(in), optional :: session
         character(len=:), allocatable :: refs, line, branch, tip, key, main, base
         type(change_t) :: c
+        character(len=:), allocatable :: pushed_by
         logical :: found, has_main
         integer :: at, eol, sp, status
 
+        pushed_by = ''
+        if (present(session)) pushed_by = session
         call git(git_dir, [character(len=256) :: 'for-each-ref', '--format=%(refname:short) %(objectname)', &
             'refs/heads'], refs, status)
         if (status /= 0) return
@@ -125,7 +133,7 @@ contains
                 call exec_bind(db, 'UPDATE changes SET branch = ?2, updated_at = '//NOW// &
                     ' WHERE id = ?1;', c%id, branch)
             end if
-            call add_version(db, repo, git_dir, c, tip, base, account)
+            call add_version(db, repo, git_dir, c, tip, base, account, pushed_by)
         end do
     end subroutine change_sync
 
@@ -190,9 +198,9 @@ contains
         end if
     end subroutine open_change
 
-    subroutine add_version(db, repo, git_dir, c, tip, base, account)
+    subroutine add_version(db, repo, git_dir, c, tip, base, account, session)
         type(db_t), intent(in) :: db
-        character(len=*), intent(in) :: repo, git_dir, tip, base, account
+        character(len=*), intent(in) :: repo, git_dir, tip, base, account, session
         type(change_t), intent(in) :: c
         type(stmt_t) :: st
         character(len=:), allocatable :: out
@@ -207,13 +215,14 @@ contains
         if (stmt_step(st) == SQLITE_ROW) version = int(stmt_int(st, 0)) + 1
         call stmt_finalize(st)
         call db_prepare(db, 'INSERT INTO change_versions (change, version, head, base, pusher,'// &
-            ' created_at) VALUES (?1, ?2, ?3, ?4, ?5, '//NOW//');', st, stat)
+            ' created_at, session) VALUES (?1, ?2, ?3, ?4, ?5, '//NOW//", nullif(?6, ''));", st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, c%id, stat)
         call stmt_bind_int(st, 2, int(version, int64), stat)
         call stmt_bind_text(st, 3, tip, stat)
         call stmt_bind_text(st, 4, base, stat)
         call stmt_bind_text(st, 5, account, stat)
+        call stmt_bind_text(st, 6, session, stat)
         stat = stmt_step(st)
         call stmt_finalize(st)
         write (num, '(i0)') c%number
@@ -486,20 +495,24 @@ contains
     end function change_message
 
     subroutine change_api(db, method, repo, git_dir, rest, query, body, account, admin, code, &
-            answer, ctype, land_branch)
+            answer, ctype, land_branch, land)
         !! /api/v1/repos/REPO/changes[/N[/diff|/comments|/land]]; `rest` is the
         !! part after "changes". `land_branch` is set to the change's branch
         !! when the caller is to queue its landing.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: method, repo, git_dir, rest, query, body, account
         logical, intent(in) :: admin
+        !! Whether the caller may queue landings; as `admin` when absent.
+        logical, intent(in), optional :: land
         integer, intent(out) :: code
         character(len=:), allocatable, intent(out) :: answer, ctype, land_branch
         type(change_t) :: c
         character(len=:), allocatable :: sub, value
         integer :: number, slash, ios
-        logical :: found
+        logical :: found, may_land
 
+        may_land = admin
+        if (present(land)) may_land = land
         code = 200
         ctype = 'application/json'
         land_branch = ''
@@ -579,8 +592,8 @@ contains
                 call refuse(405, 'POST')
                 return
             end if
-            if (.not. admin) then
-                call refuse(403, 'landing needs the admin scope')
+            if (.not. may_land) then
+                call refuse(403, 'landing needs the land or admin scope')
                 return
             end if
             if (c%state /= 'open') then
@@ -726,7 +739,8 @@ contains
         json = '{"number":'//itoa(c%number)//',"title":"'//json_escape_string(c%title)// &
             '","state":"'//c%state//'","branch":"'//json_escape_string(c%branch)// &
             '","author":"'//json_escape_string(c%author)//'","versions":'//itoa(c%versions)// &
-            ',"created":"'//c%created//'","updated":"'//c%updated//'","commit":"'//c%commit//'"'
+            ',"created":"'//c%created//'","updated":"'//c%updated//'","commit":"'//c%commit// &
+            '","session":'//text_or_null(c%session)
         if (index(c%key, 'branch:') /= 1) json = json//',"change_id":"'// &
             json_escape_string(c%key)//'"'
         json = json//',"review":"'//c%review//'","flagged":'//merge('true ', 'false', c%flagged)
@@ -744,8 +758,8 @@ contains
         json = summary_json(c)
         json = json(1:len(json) - 1)//',"description":"'//json_escape_string(c%description)// &
             '","versions_list":['
-        call db_prepare(db, 'SELECT version, head, base, coalesce(pusher, ''''), created_at'// &
-            ' FROM change_versions WHERE change = ?1 ORDER BY version;', st, stat)
+        call db_prepare(db, 'SELECT version, head, base, coalesce(pusher, ''''), created_at,'// &
+            ' coalesce(session, '''') FROM change_versions WHERE change = ?1 ORDER BY version;', st, stat)
         n = 0
         if (stat == SQLITE_OK) then
             call stmt_bind_int(st, 1, c%id, stat)
@@ -753,7 +767,8 @@ contains
                 if (n > 0) json = json//','
                 json = json//'{"version":'//itoa(int(stmt_int(st, 0)))//',"head":"'// &
                     stmt_text(st, 1)//'","base":"'//stmt_text(st, 2)//'","pusher":"'// &
-                    json_escape_string(stmt_text(st, 3))//'","created":"'//stmt_text(st, 4)//'"}'
+                    json_escape_string(stmt_text(st, 3))//'","created":"'//stmt_text(st, 4)// &
+                    '","session":'//text_or_null(stmt_text(st, 5))//'}'
                 n = n + 1
             end do
             call stmt_finalize(st)
@@ -773,15 +788,16 @@ contains
             call stmt_finalize(st)
         end if
         json = json//'],"landings":['
-        call db_prepare(db, "SELECT id, state, coalesce(commit_id, '') FROM landings"// &
-            ' WHERE change = ?1 ORDER BY id;', st, stat)
+        call db_prepare(db, "SELECT id, state, coalesce(commit_id, ''), coalesce(session, '')"// &
+            ' FROM landings WHERE change = ?1 ORDER BY id;', st, stat)
         n = 0
         if (stat == SQLITE_OK) then
             call stmt_bind_int(st, 1, c%id, stat)
             do while (stmt_step(st) == SQLITE_ROW)
                 if (n > 0) json = json//','
                 json = json//'{"landing":'//itoa(int(stmt_int(st, 0)))//',"state":"'// &
-                    stmt_text(st, 1)//'","commit":"'//stmt_text(st, 2)//'"}'
+                    stmt_text(st, 1)//'","commit":"'//stmt_text(st, 2)//'","session":'// &
+                    text_or_null(stmt_text(st, 3))//'}'
                 n = n + 1
             end do
             call stmt_finalize(st)
@@ -913,7 +929,19 @@ contains
         c%flagged = stmt_int(st, 14) /= 0
         c%flag_reason = stmt_text(st, 15)
         c%reviewed_head = stmt_text(st, 16)
+        c%session = stmt_text(st, 17)
     end subroutine read_row
+
+    function text_or_null(s) result(json)
+        !! A JSON string, or null for a member that was not recorded.
+        character(len=*), intent(in) :: s
+        character(len=:), allocatable :: json
+        if (len(s) == 0) then
+            json = 'null'
+        else
+            json = '"'//json_escape_string(s)//'"'
+        end if
+    end function text_or_null
 
     subroutine exec_bind(db, sql, id, text)
         type(db_t), intent(in) :: db

@@ -534,17 +534,25 @@ contains
         call text("Access tokens", size=TITLE, style=UI_HEADING, id="title")
         call text("Tokens let the command line (fy login) and other programs act as you, "// &
             "with your scopes.", size=BODY, tone=UI_TONE_MUTED, width=UI_FILL, id="intro")
-        call row_begin(GAP, id="createform", height=ROW_H)
-        if (text_input("newname", new_name, placeholder="Token name, e.g. laptop", &
-            submitted=submitted, width=UI_FILL, size=BODY)) continue
-        if (button("create", "Create token", height=ROW_H, size=BODY) .or. submitted) then
-            if (len_trim(new_name) > 0) then
-                call fetch_start(action_req, 'POST', '/api/v1/tokens', &
-                    '{"name":"'//json_escape_string(trim(new_name))//'"}')
-                action = 'create'
+        ! The server refuses a token that writes or lands without admin: its
+        ! name is its session.
+        if (index(scopes, 'admin') == 0 .and. (index(' '//scopes//' ', ' write ') > 0 .or. &
+            index(' '//scopes//' ', ' land ') > 0)) then
+            call text("This session creates no tokens. That needs the admin scope.", size=BODY, &
+                tone=UI_TONE_MUTED, width=UI_FILL, id="nocreate")
+        else
+            call row_begin(GAP, id="createform", height=ROW_H)
+            if (text_input("newname", new_name, placeholder="Token name, e.g. laptop", &
+                submitted=submitted, width=UI_FILL, size=BODY)) continue
+            if (button("create", "Create token", height=ROW_H, size=BODY) .or. submitted) then
+                if (len_trim(new_name) > 0) then
+                    call fetch_start(action_req, 'POST', '/api/v1/tokens', &
+                        '{"name":"'//json_escape_string(trim(new_name))//'"}')
+                    action = 'create'
+                end if
             end if
+            call row_end()
         end if
-        call row_end()
         if (len(new_token) > 0) then
             call column_begin(GAP, id="card-newtoken")
             call text("Copy your new token now. It is shown only once.", size=BODY, &

@@ -125,7 +125,11 @@ contains
             '                      check and store a login; the token comes from F or', &
             '                      standard input', &
             '  whoami              show the account of the stored token', &
-            '  token create NAME   create a token with the scopes of the current one', &
+            '  token create NAME [--scopes S,...]', &
+            '                      create a token with the scopes of the current one, or', &
+            '                      with those of them named: write pushes and comments,', &
+            '                      land queues landings, admin implies both; a token with', &
+            '                      write or land and without admin creates none', &
         ! repositories
             '  repo add NAME URL   mirror a repository (https or ssh URL; admin only)', &
             '  repo create NAME    create an empty repository that takes pushes (admin)', &
@@ -395,17 +399,47 @@ contains
 
     subroutine cmd_token()
         type(config_t) :: cfg
-        character(len=:), allocatable :: body
-        integer :: code, stat
+        character(len=:), allocatable :: body, scopes, payload, name, word
+        integer :: code, stat, i
+        logical :: bad, scoped
 
-        if (arg(2) /= 'create' .or. len(arg(3)) == 0) then
-            write (error_unit, '(a)') 'fy: usage: fy token create NAME'
+        ! Every argument is checked: a mistyped option must not fall back to
+        ! the scopes of the current token, which is admin for the person.
+        name = ''
+        scopes = ''
+        scoped = .false.
+        bad = arg(2) /= 'create'
+        i = 3
+        do while (i <= command_argument_count() .and. .not. bad)
+            word = arg(i)
+            if (word == '--scopes') then
+                i = i + 1
+                scopes = arg(i)
+                scoped = .true.
+            else if (index(word, '--scopes=') == 1) then
+                scopes = word(10:)
+                scoped = .true.
+            else if (index(word, '-') == 1 .or. len(name) > 0) then
+                bad = .true.
+            else
+                name = word
+            end if
+            i = i + 1
+        end do
+        if (bad .or. len(name) == 0) then
+            write (error_unit, '(a)') 'fy: usage: fy token create NAME [--scopes S,...]'
             call quit(2)
         end if
+        if (scoped .and. len_trim(scopes) == 0) then
+            write (error_unit, '(a)') 'fy: --scopes needs a list such as write,land'
+            call quit(2)
+        end if
+        payload = '{"name":"'//json_escape_string(name)//'"'
+        if (scoped) payload = payload//',"scopes":"'//json_escape_string(scopes)//'"'
         call config_load(cfg)
         call require_login(cfg)
         call client_request(cfg%server, 'POST', '/api/v1/tokens', cfg%token, &
-            '{"name":"'//json_escape_string(arg(3))//'"}', code, body, stat)
+            payload//'}', code, body, stat)
         call report(code, body, stat)
     end subroutine cmd_token
 

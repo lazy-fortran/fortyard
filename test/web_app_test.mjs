@@ -322,6 +322,23 @@ try {
   await until(`!!document.querySelector('[data-id$="/token"]')`, 'signed out');
   const after = await fetch(url + 'api/v1/whoami', { headers: { Cookie: `fy_session=${session.value}` } });
   check(after.status === 401, 'signing out ends the session on the server');
+
+  // A session that writes without admin: no token form, and only its own token.
+  const made = await (await fetch(url + 'api/v1/tokens', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${admin}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'agent-1', scopes: 'write' }),
+  })).json();
+  await click('[data-id$="/token"]');
+  await send('Input.insertText', { text: made.token });
+  await click('[data-id$="/signin"]');
+  await until(hasText('admin'), 'signed in with a write token');
+  await load('/tokens');
+  await until(hasText('This session creates no tokens. That needs the admin scope.'), 'the note');
+  check(!(await evaluate(`!!document.querySelector('[data-id$="/newname"]')`)),
+    'a session with write and without admin is offered no token form');
+  await until(hasText('agent-1'), 'its token');
+  check(!(await evaluate(hasText('bootstrap'))), 'such a session lists only its own token');
 } catch (e) {
   check(false, e.message);
 } finally {

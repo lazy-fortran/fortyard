@@ -357,12 +357,14 @@ contains
         end if
     end function policy_refusal
 
-    subroutine policy_queue(db, repo, branch, account, change, id, refusal, stat)
+    subroutine policy_queue(db, repo, branch, account, change, id, refusal, stat, session)
         !! Queues the landing `id` of `branch`, of the change with the id
         !! `change` (0: none), when the policy of `repo` lets it; else `refusal`
-        !! says why not. `stat` is not 0 when the store fails.
+        !! says why not. `stat` is not 0 when the store fails. `session` is the
+        !! name of the token that asks.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: repo, branch, account
+        character(len=*), intent(in), optional :: session
         integer(int64), intent(in) :: change
         integer(int64), intent(out) :: id
         character(len=:), allocatable, intent(out) :: refusal
@@ -376,7 +378,8 @@ contains
         call db_exec(db, 'BEGIN IMMEDIATE;', stat)
         if (stat /= SQLITE_OK) return
         refusal = policy_refusal(db, repo, change, .true.)
-        if (len(refusal) == 0) call store_landing_add(db, repo, branch, account, id, stat, change)
+        if (len(refusal) == 0) call store_landing_add(db, repo, branch, account, id, stat, change, &
+            session)
         if (len(refusal) == 0 .and. stat == SQLITE_OK) then
             call db_exec(db, 'COMMIT;', stat)
         else

@@ -88,11 +88,18 @@ module fy_store
         integer(int64) :: token_id = 0
         character(len=:), allocatable :: account
         character(len=:), allocatable :: token_name
+        !! The name lists show for what this token does: its own, or that of the
+        !! token a browser session was opened with.
+        character(len=:), allocatable :: session
+        !! The token itself, or the one its browser session was opened with.
+        integer(int64) :: origin_id = 0
         character(len=:), allocatable :: scopes
     end type token_identity_t
 
     type :: token_info_t
         integer(int64) :: id = 0
+        !! The token a browser session was opened with; 0 for any other token.
+        integer(int64) :: parent = 0
         character(len=:), allocatable :: name, scopes, created_at, expires_at
         logical :: revoked = .false., expired = .false.
     end type token_info_t
@@ -122,6 +129,8 @@ module fy_store
         integer(int64) :: change = 0
         !! "landing", or "verify" for a verification of main (fy_verify).
         character(len=:), allocatable :: kind
+        !! The name of the token that queued it; empty when not recorded.
+        character(len=:), allocatable :: session
     end type landing_t
 
     character(len=*), parameter :: NOW = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
@@ -545,29 +554,43 @@ contains
         call stmt_finalize(st)
     end subroutine store_account_find
 
-    subroutine store_token_create(db, account_id, name, scopes, token, stat, days)
-        !! A token that expires after `days`, or never when absent.
+    subroutine store_token_create(db, account_id, name, scopes, token, stat, days, parent)
+        !! A token that expires after `days`, or never when absent. A browser
+        !! session names as `parent` the token it was opened with and is valid
+        !! only as long as that one.
         type(db_t), intent(in) :: db
         integer(int64), intent(in) :: account_id
         character(len=*), intent(in) :: name, scopes
         character(len=:), allocatable, intent(out) :: token
         integer, intent(out) :: stat
         integer, intent(in), optional :: days
+        integer(int64), intent(in), optional :: parent
         type(stmt_t) :: st
         integer(int64) :: lifetime
+        character(len=:), allocatable :: column, value
 
         lifetime = -1
         if (present(days)) lifetime = days
+        ! Named only for a session, so a token can be made before the named
+        ! migrations ran.
+        column = ''
+        value = ''
+        if (present(parent)) then
+            column = ', parent'
+            value = ', ?6'
+        end if
         token = random_token()
         call db_prepare(db, 'INSERT INTO tokens (account_id, name, hash, scopes, created_at,'// &
-            ' expires_at) VALUES (?1, ?2, ?3, ?4, '//NOW//', CASE WHEN ?5 < 0 THEN NULL'// &
-            " ELSE strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '+' || ?5 || ' days') END);", st, stat)
+            ' expires_at'//column//') VALUES (?1, ?2, ?3, ?4, '//NOW//', CASE WHEN ?5 < 0 THEN NULL'// &
+            " ELSE strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '+' || ?5 || ' days') END"// &
+            value//');', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, account_id, stat)
         call stmt_bind_text(st, 2, name, stat)
         call stmt_bind_text(st, 3, sha256_string(token), stat)
         call stmt_bind_text(st, 4, scopes, stat)
         call stmt_bind_int(st, 5, lifetime, stat)
+        if (present(parent)) call stmt_bind_int(st, 6, parent, stat)
         stat = SQLITE_OK
         if (stmt_step(st) /= SQLITE_DONE) stat = 1
         call stmt_finalize(st)
@@ -584,11 +607,16 @@ contains
         who%account = ''
         who%token_name = ''
         who%scopes = ''
+        who%session = ''
         if (len(token) < 8 .or. len(token) > 128) return
-        call db_prepare(db, 'SELECT a.id, a.name, t.name, t.scopes, t.id FROM tokens t'// &
-            ' JOIN accounts a ON a.id = t.account_id'// &
+        call db_prepare(db, 'SELECT a.id, a.name, t.name, t.scopes, t.id,'// &
+            ' coalesce(p.name, t.name), coalesce(t.parent, t.id) FROM tokens t'// &
+            ' JOIN accounts a ON a.id = t.account_id LEFT JOIN tokens p ON p.id = t.parent'// &
             ' WHERE t.hash = ?1 AND t.revoked = 0 AND a.active = 1'// &
-            ' AND (t.expires_at IS NULL OR t.expires_at > '//NOW//');', st, stat)
+            ' AND (t.expires_at IS NULL OR t.expires_at > '//NOW//')'// &
+        ! A browser session ends with the token it was opened with.
+            ' AND (t.parent IS NULL OR (p.revoked = 0 AND'// &
+            ' (p.expires_at IS NULL OR p.expires_at > '//NOW//')));', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, sha256_string(token), stat)
         if (stmt_step(st) == SQLITE_ROW) then
@@ -598,6 +626,8 @@ contains
             who%token_name = stmt_text(st, 2)
             who%scopes = stmt_text(st, 3)
             who%token_id = stmt_int(st, 4)
+            who%session = stmt_text(st, 5)
+            who%origin_id = stmt_int(st, 6)
         end if
         call stmt_finalize(st)
     end subroutine store_token_lookup
@@ -613,7 +643,8 @@ contains
 
         allocate (tokens(0))
         call db_prepare(db, 'SELECT id, name, scopes, created_at, coalesce(expires_at, ''''),'// &
-            ' revoked, coalesce(expires_at <= '//NOW//', 0) FROM tokens WHERE account_id = ?1'// &
+            ' revoked, coalesce(expires_at <= '//NOW//', 0), coalesce(parent, 0)'// &
+            ' FROM tokens WHERE account_id = ?1'// &
             ' ORDER BY id DESC;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, account_id, stat)
@@ -625,6 +656,7 @@ contains
             t%expires_at = stmt_text(st, 4)
             t%revoked = stmt_int(st, 5) /= 0
             t%expired = stmt_int(st, 6) /= 0
+            t%parent = stmt_int(st, 7)
             tokens = [tokens, t]
         end do
         call stmt_finalize(st)
@@ -744,18 +776,21 @@ contains
         call stmt_finalize(st)
     end subroutine store_repo_set_number
 
-    subroutine store_landing_add(db, repo, branch, account, id, stat, change)
-        !! Queues the landing of `branch` on `main` of `repo`, of `change` if given.
+    subroutine store_landing_add(db, repo, branch, account, id, stat, change, session)
+        !! Queues the landing of `branch` on `main` of `repo`, of `change` if given,
+        !! by the token named `session`.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: repo, branch, account
         integer(int64), intent(in), optional :: change
+        character(len=*), intent(in), optional :: session
         integer(int64), intent(out) :: id
         integer, intent(out) :: stat
         type(stmt_t) :: st
 
         id = 0
-        call db_prepare(db, 'INSERT INTO landings (repo, branch, account, created_at, change)'// &
-            ' VALUES (?1, ?2, ?3, '//NOW//', nullif(?4, 0)) RETURNING id;', st, stat)
+        call db_prepare(db, 'INSERT INTO landings (repo, branch, account, created_at, change,'// &
+            ' session) VALUES (?1, ?2, ?3, '//NOW//", nullif(?4, 0), nullif(?5, '')) RETURNING id;", &
+            st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, repo, stat)
         call stmt_bind_text(st, 2, branch, stat)
@@ -764,6 +799,11 @@ contains
             call stmt_bind_int(st, 4, change, stat)
         else
             call stmt_bind_int(st, 4, 0_int64, stat)
+        end if
+        if (present(session)) then
+            call stmt_bind_text(st, 5, session, stat)
+        else
+            call stmt_bind_text(st, 5, '', stat)
         end if
         stat = 1
         if (stmt_step(st) == SQLITE_ROW) then
@@ -880,8 +920,8 @@ contains
 
         allocate (ls(0))
         call db_prepare(db, "SELECT id, branch, account, state, created_at,"// &
-            " coalesce(finished_at, ''), coalesce(commit_id, ''), coalesce(log, '')"// &
-            ' FROM landings WHERE repo = ?1 ORDER BY id DESC LIMIT 50;', st, stat)
+            " coalesce(finished_at, ''), coalesce(commit_id, ''), coalesce(log, ''),"// &
+            " coalesce(session, '') FROM landings WHERE repo = ?1 ORDER BY id DESC LIMIT 50;", st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, repo, stat)
         do while (stmt_step(st) == SQLITE_ROW)
@@ -894,6 +934,7 @@ contains
             l%finished = stmt_text(st, 5)
             l%commit = stmt_text(st, 6)
             l%log = stmt_text(st, 7)
+            l%session = stmt_text(st, 8)
             ls = [ls, l]
         end do
         call stmt_finalize(st)
@@ -911,7 +952,8 @@ contains
         type(landing_t) :: l
         character(len=*), parameter :: COLS = "SELECT id, repo, branch, account, state,"// &
             " created_at, coalesce(started_at, ''), coalesce(finished_at, ''),"// &
-            " coalesce(commit_id, ''), kind FROM landings WHERE (?1 = '' OR repo = ?1)"
+            " coalesce(commit_id, ''), kind, coalesce(session, '') FROM landings"// &
+            " WHERE (?1 = '' OR repo = ?1)"
         integer :: pass
 
         allocate (ls(0))
@@ -936,6 +978,7 @@ contains
                 l%finished = stmt_text(st, 7)
                 l%commit = stmt_text(st, 8)
                 l%kind = stmt_text(st, 9)
+                l%session = stmt_text(st, 10)
                 l%log = ''
                 ls = [ls, l]
             end do
@@ -956,7 +999,7 @@ contains
         found = .false.
         call db_prepare(db, "SELECT id, repo, branch, account, state, created_at,"// &
             " coalesce(started_at, ''), coalesce(finished_at, ''), coalesce(commit_id, ''),"// &
-            " coalesce(log, ''), kind FROM landings WHERE id = ?1;", st, stat)
+            " coalesce(log, ''), kind, coalesce(session, '') FROM landings WHERE id = ?1;", st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, id, stat)
         if (stmt_step(st) == SQLITE_ROW) then
@@ -971,6 +1014,7 @@ contains
             l%commit = stmt_text(st, 8)
             l%log = stmt_text(st, 9)
             l%kind = stmt_text(st, 10)
+            l%session = stmt_text(st, 11)
             found = .true.
         end if
         call stmt_finalize(st)

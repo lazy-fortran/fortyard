@@ -73,6 +73,17 @@ contains
         call migration_add(list, 'named-migrations', &
             'SELECT 1;')
 
+        ! The session, the name of the token, that pushed a version or queued a
+        ! landing (doc/parallel-development.md); NULL where it was not recorded.
+        call migration_add(list, 'versions-landings-session', &
+            'ALTER TABLE change_versions ADD COLUMN session TEXT;'// &
+            'ALTER TABLE landings ADD COLUMN session TEXT;')
+
+        ! The token a browser session was opened with: the session carries that
+        ! token's name into the lists and ends with it. NULL for every other token.
+        call migration_add(list, 'tokens-parent', &
+            'ALTER TABLE tokens ADD COLUMN parent INTEGER;')
+
     end subroutine migrations_registry
 
 end module fy_migrations

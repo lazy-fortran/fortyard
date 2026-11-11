@@ -64,18 +64,21 @@ contains
         end do
     end function git_http_route
 
-    subroutine git_http_serve(fd, req, rest, root, repo, user, status)
+    subroutine git_http_serve(fd, req, rest, root, repo, user, status, admin)
         !! Runs `git http-backend` for `req` on repository root/REPO.git and
         !! relays its answer. `rest` holds body bytes already read with the head.
         !! `status` is 0, or an HTTP error code when nothing was sent yet.
+        !! `admin` tells the repository's hooks that the push may move refs other
+        !! than branches.
         integer, intent(in) :: fd
         type(http_request_t), intent(in) :: req
         character(len=*), intent(in) :: rest, root, repo, user
         integer, intent(out) :: status
+        logical, intent(in), optional :: admin
         character(len=:), allocatable :: backend, git
         ! Fixed-length locals: gfortran overflows a typed array constructor
         ! around a deferred-length string.
-        character(len=1024) :: env(14), argv(1)
+        character(len=1024) :: env(15), argv(1)
         character(len=16) :: num
         integer :: pid, to_child, from_child, stat, code, ne
 
@@ -97,6 +100,9 @@ contains
         call add('CONTENT_TYPE='//req%content_type)
         call add('REMOTE_USER='//user)
         call add('REMOTE_ADDR=127.0.0.1')
+        if (present(admin)) then
+            if (admin) call add('FY_PUSH_ADMIN=1')
+        end if
         call add('PATH=/usr/local/bin:/usr/bin:/bin')
         call add('GIT_CONFIG_NOSYSTEM=1')
         call add('HOME=/nonexistent')
