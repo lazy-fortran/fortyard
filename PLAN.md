@@ -12,13 +12,8 @@ What is started or decided and not finished, each with its issue:
 - #60 Enable the review agent in production (server configuration).
 - #61 Shared build cache: finish and land fo's client.
 - #62 Eventual correctness per test case.
-- #63 Two changes or issues created at the same moment can get the same
-  number.
-- #64 Web image build time after an LFortran pin change is unmeasured.
 - The LFortran fork's upstream pull requests: issue #27 of the repository
   `lfortran` on this instance.
-- Changes #45 (test that a new release takes over without refusing
-  requests) and #47 (remote runner over HTTPS) are open and undecided.
 
 ## Development instance
 
@@ -139,7 +134,8 @@ In order:
 - [x] Push of `main` to the repository's upstream after each landing.
 - [x] The edge timer follows the instance's own `main`; fortyard is primary on
       its development instance and GitHub is its mirror.
-- [ ] Tags to the upstream.
+- [x] Tags to the upstream: the mirror process pushes them within a mirror
+      interval; a moved tag is refused, never forced.
 - [x] `fy` covers the daily work: `fy land` pushes, lands and follows a
       branch; `fy jobs`, `fy job`, `fy landings` print tables and logs;
       `fy login` stores a proxy; `fy git-credential` serves plain git.
