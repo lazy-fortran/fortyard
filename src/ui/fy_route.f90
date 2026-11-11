@@ -60,13 +60,15 @@ contains
 
         r%repo = ''
         r%path = ''
-        qpos = index(location, '?')
+        ! A link to a place in a page (#L812) names the same page.
+        p = location
+        qpos = index(p, '#')
+        if (qpos > 0) p = p(1:qpos - 1)
+        qpos = index(p, '?')
+        q = ''
         if (qpos > 0) then
-            p = location(1:qpos - 1)
-            q = location(qpos + 1:)
-        else
-            p = location
-            q = ''
+            q = p(qpos + 1:)
+            p = p(1:qpos - 1)
         end if
         r%query = q
         r%plain = index('&'//q//'&', '&plain=1&') > 0
@@ -98,6 +100,15 @@ contains
             case ('tokens')
                 r%kind = R_TOKENS
             end select
+        end if
+        ! A job, /jobs/ID.
+        if (first == 'jobs' .and. qpos > 0) then
+            rest = p(qpos + 2:)
+            ! A number as the server writes it: /jobs/02 is no address of job 2.
+            if (len(rest) > 0 .and. verify(rest, '0123456789') == 0 .and. index(rest, '0') /= 1) then
+                r%kind = R_JOB
+                r%path = rest
+            end if
         end if
         if (is_reserved(first)) return
 
@@ -182,7 +193,8 @@ contains
     end function unbased
 
     function route_href(kind, repo, path, plain) result(href)
-        !! The location of a page of repository `repo`. (rendered, with the base).
+        !! The location of a page of repository `repo`, or of job `path` (rendered,
+        !! with the base).
         integer, intent(in) :: kind
         character(len=*), intent(in) :: repo
         character(len=*), intent(in), optional :: path
@@ -210,6 +222,8 @@ contains
             href = href//'/-/issues/'//sub
         case (R_ISSUES)
             href = href//'/-/issues'
+        case (R_JOB)
+            href = '/jobs/'//sub
         case (R_TREE)
             if (len(sub) > 0) href = href//'/-/tree/'//sub
         end select

@@ -12,6 +12,7 @@ program fy
         FY_VERSION
     use fy_cli, only: &
         cli_field, &
+        cli_job, &
         cli_stats, &
         cli_table, &
         cli_tail
@@ -189,11 +190,13 @@ contains
             '  issue close N, issue reopen N', &
         ! landings, jobs and verification
             '  landings [REPO]     recent landings of a repository', &
-            '  jobs [REPO]         running, waiting and recent jobs (landings and', &
-            '                      verifications of main)', &
+            '  jobs [REPO] [--kind landing|test|verify] [--state STATE]', &
+            '                      running, waiting and recent jobs (landings and', &
+            '                      verifications of main), each with its change', &
             '  verify [REPO] [--no-wait]', &
             '                      verify main''s newest commit with the full suite', &
-            '  job ID [--wait]     a job''s state and log; --wait follows it', &
+            '  job ID [--wait]     a job''s state, change, checks and log; --wait', &
+            '                      follows it', &
             '  stats [REPO] [--days N]', &
             '                      queue numbers of the last 1, 7 or 30 days (7 unless N', &
             '                      says so) of a repository or of all: time from fy land', &
@@ -724,16 +727,21 @@ contains
     end subroutine cmd_landings
 
     subroutine cmd_jobs()
-        !! fy jobs [REPO]: running, waiting and recent jobs, under a line naming
-        !! the repositories that hold runners and how many.
+        !! fy jobs [REPO] [--kind KIND] [--state STATE]: running, waiting and
+        !! recent jobs, under a line naming the repositories that hold runners and
+        !! how many.
         type(config_t) :: cfg
-        character(len=:), allocatable :: body, path, held, rest, name
+        character(len=:), allocatable :: body, path, held, rest, name, kind, only
         integer :: code, stat, s, e
 
+        kind = option('--kind', '')
+        only = option('--state', '')
+        ! Words, so that neither can add a parameter to the query.
+        if (verify(kind//only, 'abcdefghijklmnopqrstuvwxyz') /= 0) &
+            error stop 'fy: --kind and --state take one word'
         call config_load(cfg)
         call require_login(cfg)
-        path = '/api/v1/jobs'
-        if (len(positional(1)) > 0) path = path//'?repo='//positional(1)
+        path = '/api/v1/jobs?repo='//positional(1)//'&kind='//kind//'&state='//only
         call client_request(cfg%server, 'GET', path, cfg%token, '', code, body, stat)
         if (stat /= 0 .or. code /= 200 .or. flag('--json')) then
             call report(code, body, stat)
@@ -758,7 +766,8 @@ contains
         end do
         if (len(held) > 0) write (output_unit, '(a)') 'runners held: '//held
         write (output_unit, '(a)', advance='no') cli_table(body, 'jobs', &
-            [character(len=8) :: 'id', 'kind', 'repo', 'state', 'started', 'branch'])
+            [character(len=8) :: 'id', 'kind', 'repo', 'state', 'started', 'branch', 'change', &
+            'runner', 'title'])
     end subroutine cmd_jobs
 
     subroutine cmd_job()
@@ -786,7 +795,7 @@ contains
         end if
         write (output_unit, '(a)') 'job '//id//': '//cli_field(body, 'kind')//' of '// &
             cli_field(body, 'repo')//' '//cli_field(body, 'branch')//', '// &
-            cli_field(body, 'state'), cli_field(body, 'log')
+            cli_field(body, 'state'), cli_job(body)//cli_field(body, 'log')
     end subroutine cmd_job
 
     subroutine cmd_push()

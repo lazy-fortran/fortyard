@@ -20,11 +20,14 @@ module fy_cli
         json_parser_init, &
         json_parser_next, &
         json_parser_t
+    use fy_time, only: &
+        duration
     implicit none
     private
 
     public :: &
         cli_field, &
+        cli_job, &
         cli_stats, &
         cli_table, &
         cli_tail
@@ -259,6 +262,80 @@ contains
         end function itoa
 
     end function cli_stats
+
+    function cli_job(body) result(text)
+        !! What a job (the answer of GET /api/v1/jobs/ID) records beside its
+        !! state and its log, one line each: its change and which of the
+        !! change's entries the job is, the entry that followed it, its checks,
+        !! and the first line of the log that contains Error or FAIL.
+        character(len=*), intent(in) :: body
+        character(len=:), allocatable :: text
+        type(json_parser_t) :: p
+        type(json_event_t) :: ev
+        character(len=:), allocatable :: key, section, line, id, attempt, state, runner, checks
+        integer :: depth, wait, run
+
+        text = ''
+        if (len(cli_field(body, 'change')) > 0) then
+            text = 'change #'//cli_field(body, 'change')//' '//cli_field(body, 'title')
+            ! As on the page: named when the change has more than one entry.
+            if (cli_field(body, 'entries') /= '1') text = text//', entry '// &
+                cli_field(body, 'entry')//' of '//cli_field(body, 'entries')
+            text = text//new_line('a')
+        end if
+        checks = ''
+        key = ''
+        section = ''
+        depth = 0
+        call json_parser_init(p, body)
+        do
+            call json_parser_next(p, ev)
+            select case (ev%event_type)
+            case (JSON_END_OF_INPUT, JSON_ERROR)
+                exit
+            case (JSON_OBJECT_START, JSON_ARRAY_START)
+                depth = depth + 1
+                if (depth == 2) section = key
+                if (depth == 3 .and. section == 'checks') then
+                    id = ''
+                    attempt = ''
+                    state = ''
+                    runner = ''
+                    wait = -1
+                    run = -1
+                end if
+            case (JSON_OBJECT_END, JSON_ARRAY_END)
+                if (depth == 3 .and. section == 'checks') then
+                    line = 'check '//id//', attempt '//attempt//', '//state
+                    if (run >= 0) line = line//' after '//duration(run)
+                    if (wait >= 0) line = line//', waited '//duration(wait)
+                    if (len(runner) > 0) line = line//', runner '//runner
+                    checks = checks//line//new_line('a')
+                end if
+                depth = depth - 1
+                if (depth == 1) section = ''
+            case (JSON_KEY)
+                key = ev%string_val
+            case default
+                if (depth == 2 .and. section == 'next') then
+                    if (key == 'id') line = 'next entry of this change: job '//scalar(ev)
+                    if (key == 'state') text = text//line//', '//scalar(ev)//new_line('a')
+                else if (depth == 3 .and. section == 'checks') then
+                    select case (key)
+                    case ('id'); id = scalar(ev)
+                    case ('attempt'); attempt = scalar(ev)
+                    case ('state'); state = scalar(ev)
+                    case ('runner'); runner = scalar(ev)
+                    case ('wait'); if (ev%event_type == JSON_INTEGER) wait = int(ev%int64_val)
+                    case ('run'); if (ev%event_type == JSON_INTEGER) run = int(ev%int64_val)
+                    end select
+                end if
+            end select
+        end do
+        text = text//checks
+        if (len(cli_field(body, 'error_line')) > 0) text = text// &
+            'first line with Error or FAIL: '//cli_field(body, 'error_line')//new_line('a')
+    end function cli_job
 
     function cli_tail(text, lines) result(tail)
         !! The last `lines` lines of `text`.

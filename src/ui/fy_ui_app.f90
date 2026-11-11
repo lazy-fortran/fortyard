@@ -41,6 +41,13 @@ module fy_ui_app
         fetch_ready, &
         fetch_start, &
         request_t
+    use fy_job_view, only: &
+        job_view_compose, &
+        job_view_hide, &
+        job_view_missing, &
+        job_view_receive, &
+        job_view_show, &
+        job_view_title
     use fy_jobs_view, only: &
         jobs_view_compose, &
         jobs_view_hide, &
@@ -181,6 +188,7 @@ contains
         page = r%kind
         drawer_open = .false.
         message = ''
+        if (page /= R_JOB) call job_view_hide()
         if (page /= R_JOBS) call jobs_view_hide()
         if (.not. signed_in) return
         ! The row's count is asked for on entering a repository and with the
@@ -197,8 +205,10 @@ contains
             call change_view_show(r)
         case (R_CHANGES)
             call changes_view_show(r)
+        case (R_JOB)
+            call job_view_show(r%path)
         case (R_JOBS)
-            call jobs_view_show(r%repo)
+            call jobs_view_show(r)
         case (R_REPOS)
             call repo_view_list()
         case (R_TOKENS)
@@ -235,6 +245,8 @@ contains
             s = change_view_title()//' · fortyard'
         case (R_CHANGES)
             s = changes_view_title()//' · fortyard'
+        case (R_JOB)
+            s = job_view_title()//' · fortyard'
         case (R_JOBS)
             s = jobs_view_title()//' · fortyard'
         case (R_MISSING)
@@ -259,6 +271,8 @@ contains
             app_missing = change_view_missing()
         case (R_CHANGES)
             app_missing = changes_view_missing()
+        case (R_JOB)
+            app_missing = job_view_missing()
         case (R_MISSING)
             app_missing = .true.
         case default
@@ -302,6 +316,8 @@ contains
                     index(' '//scopes//' ', ' land ') > 0, page_w < 600.0)
             case (R_CHANGES)
                 call changes_view_compose()
+            case (R_JOB)
+                call job_view_compose()
             case (R_JOBS)
                 call jobs_view_compose(page_w < 600.0)
             case (R_MISSING)
@@ -436,6 +452,7 @@ contains
         integer, intent(in) :: kind
         character(len=:), allocatable :: s
         select case (kind)
+        case (R_JOB, R_JOBS); s = "Jobs"
         case (R_SERVER); s = "Server"
         case (R_TOKENS); s = "Access tokens"
         case default; s = "Repositories"
@@ -470,7 +487,7 @@ contains
             call text("", width=UI_FILL, id="hr1")
         end if
         call side_link("repos", "Repositories", at("/"), page == R_REPOS)
-        call side_link("jobs", "Jobs", at("/jobs"), page == R_JOBS)
+        call side_link("jobs", "Jobs", at("/jobs"), page == R_JOBS .or. page == R_JOB)
         call side_link("tokens", "Access tokens", at("/tokens"), page == R_TOKENS)
         call side_link("server", "Server", at("/server"), page == R_SERVER)
         call text("", width=UI_FILL, id="hr2")
@@ -741,6 +758,7 @@ contains
         call change_view_receive()
         if (change_view_counts_changed()) call repo_view_repos()
         call changes_view_receive()
+        call job_view_receive()
         call jobs_view_receive()
         call repo_view_receive()
         if (fetch_ready(tokens_req)) then

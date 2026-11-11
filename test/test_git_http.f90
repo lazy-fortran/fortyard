@@ -265,7 +265,8 @@ contains
         integer :: k
         do k = 1, 300
             reply = get('/api/v1/jobs/'//itoa(number))
-            if (index(reply, '"state":"'//state//'"') > 0) return
+            ! The job's own state, not one of its checks'.
+            if (index(reply, '"state":"'//state//'","queued"') > 0) return
             call proc_sleep_ms(100)
         end do
         call check(.false., 'landing '//itoa(number)//' '//state//': '//reply)

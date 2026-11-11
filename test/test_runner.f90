@@ -173,7 +173,8 @@ contains
         write (n, '(i0)') number
         do k = 1, 300
             reply = get('/api/v1/jobs/'//trim(n))
-            if (index(reply, '"state":"'//state//'"') > 0) return
+            ! The job's own state, not one of its checks'.
+            if (index(reply, '"state":"'//state//'","queued"') > 0) return
             call proc_sleep_ms(100)
         end do
         call check(.false., 'landing '//trim(n)//' '//state//': '//reply)

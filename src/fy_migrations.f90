@@ -104,6 +104,24 @@ contains
         call migration_add(list, 'landings-by-change', &
             'CREATE INDEX landings_by_change ON landings (change, kind, id, state);')
 
+        ! A job names its checks, looked up by reference for every row of the
+        ! jobs list; its change's entries use landings_by_change.
+        call migration_add(list, 'job-lookup-indexes', &
+            'CREATE INDEX checks_by_ref ON checks (repo, ref);')
+
+        ! The jobs list's counts and open rows, and the marker that tells its
+        ! pages of a change, read these instead of every landing with its log.
+        call migration_add(list, 'landings-state-indexes', &
+            'CREATE INDEX landings_by_state ON landings (state, repo, finished_at);'// &
+            'CREATE INDEX landings_by_started ON landings (started_at);'// &
+            'CREATE INDEX landings_by_finished ON landings (finished_at);')
+
+        ! The check that decides a landing (doc/inspection.md "Objects and how
+        ! they link"): the members of a candidate share the check of its last
+        ! member's ref. NULL for a landing checked before this column.
+        call migration_add(list, 'landings-check-id', &
+            'ALTER TABLE landings ADD COLUMN check_id INTEGER;')
+
     end subroutine migrations_registry
 
 end module fy_migrations

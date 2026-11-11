@@ -1,6 +1,8 @@
 module fy_jobs_view
     !! The jobs page: what runs and waits on the instance, in total and per
-    !! repository, with recent results and the log of a chosen job. The page
+    !! repository, and the log of what has run: each job with its change, kind,
+    !! state, duration, runner and commit, filtered through the address
+    !! (?repo=&kind=&state=). A job's own page has its log. The page
     !! stays current through the server's event stream: each event fetches the
     !! jobs again, and a timer advances the durations of running jobs.
     use fortui
@@ -15,7 +17,6 @@ module fy_jobs_view
         JSON_OBJECT_START, &
         JSON_STRING, &
         json_event_t, &
-        json_extract_string, &
         json_parser_init, &
         json_parser_next, &
         json_parser_t
@@ -27,7 +28,10 @@ module fy_jobs_view
     use fy_route, only: &
         at, &
         go, &
+        query_value, &
         route_href, &
+        route_t, &
+        url_decode, &
         url_encode
     use fy_stream, only: &
         stream_close, &
@@ -51,7 +55,9 @@ module fy_jobs_view
     type :: job_t
         integer :: id = 0
         character(len=:), allocatable :: repo, branch, account, state, queued, started, &
-            finished, commit
+            finished, commit, kind, title, runner
+        !! The number of its change, and which of the change's entries it is.
+        integer :: change = 0, entry = 0, entries = 0
     end type job_t
 
     type :: count_t
@@ -63,24 +69,39 @@ module fy_jobs_view
     character(len=*), parameter :: LABELS(4) = [character(len=13) :: 'Running', 'Waiting', &
         'Landed (24 h)', 'Failed (24 h)']
 
-    type(request_t) :: list_req, log_req
+    !! The filters of the address: the values of kind= and state=, and the
+    !! words their links show.
+    character(len=*), parameter :: KINDS(3) = [character(len=7) :: '', 'landing', 'verify']
+    character(len=*), parameter :: KIND_LABELS(3) = [character(len=13) :: 'all', 'entries', &
+        'verifications']
+    character(len=*), parameter :: STATES(6) = [character(len=7) :: '', 'queued', 'running', &
+        'landed', 'passed', 'failed']
+    character(len=*), parameter :: STATE_LABELS(6) = [character(len=7) :: 'all', 'queued', &
+        'running', 'landed', 'passed', 'failed']
+
+    type(request_t) :: list_req
     type(job_t), allocatable :: jobs(:)
     type(count_t), allocatable :: counts(:)
-    integer :: totals(4) = 0, open_id = 0, stream = 0, seen = 0
-    character(len=:), allocatable :: state, filter, open_log
+    integer :: totals(4) = 0, stream = 0, seen = 0
+    character(len=:), allocatable :: state, filter, only_kind, only_state
+    !! The server refused the filters of the address: no job matches them.
+    logical :: refused = .false.
     logical :: active = .false., loaded = .false., paused = .false.
 
 contains
 
-    subroutine jobs_view_show(repo)
-        !! Shows the jobs of `repo`, or of all repositories when it is empty.
-        character(len=*), intent(in) :: repo
+    subroutine jobs_view_show(r)
+        !! Shows the jobs the address `r` asks for: of its repository, or of
+        !! all when it names none, of its kind= and in its state=.
+        type(route_t), intent(in) :: r
         if (.not. allocated(jobs)) allocate (jobs(0), counts(0))
-        filter = repo
+        filter = r%repo
+        only_kind = url_decode(query_value(r%query, 'kind'))
+        only_state = url_decode(query_value(r%query, 'state'))
+        if (only_state == 'all') only_state = ''
         active = .true.
         paused = .false.
-        open_id = 0
-        open_log = ''
+        refused = .false.
         state = ''
         call request()
         if (stream == 0) then
@@ -98,14 +119,20 @@ contains
 
     subroutine request()
         character(len=:), allocatable :: path
-        path = '/api/v1/jobs'
-        if (len(filter) > 0) path = path//'?repo='//url_encode(filter)
+        path = '/api/v1'//address(filter, only_kind, only_state)
+        ! The page lists the jobs of every state unless its address names one.
+        if (len(only_state) == 0) then
+            if (index(path, '?') > 0) then
+                path = path//'&state=all'
+            else
+                path = path//'?state=all'
+            end if
+        end if
         call fetch_start(list_req, 'GET', path)
     end subroutine request
 
     subroutine jobs_view_receive()
-        logical :: found
-        integer :: k, n
+        integer :: n
 
         ! Each event of the stream means the jobs changed.
         if (active .and. stream /= 0) then
@@ -119,19 +146,13 @@ contains
             if (list_req%status == 200) then
                 call parse(list_req%body)
                 loaded = .true.
-                ! A running job's log grows: fetch it again with each change.
-                do k = 1, size(jobs)
-                    if (jobs(k)%id == open_id) call fetch_start(log_req, 'GET', &
-                        '/api/v1/jobs/'//ui_str(open_id))
-                end do
+                paused = .false.
+                refused = .false.
+            else if (list_req%status == 400) then
+                refused = .true.
+                paused = .false.
             else
                 paused = .true.
-            end if
-        end if
-        if (fetch_ready(log_req)) then
-            if (log_req%status == 200) then
-                call json_extract_string(log_req%body, 'log', open_log, found)
-                if (.not. found) open_log = ''
             end if
         end if
     end subroutine jobs_view_receive
@@ -150,10 +171,13 @@ contains
 
         if (.not. allocated(jobs)) allocate (jobs(0), counts(0))
         if (.not. allocated(filter)) filter = ''
+        if (.not. allocated(only_kind)) only_kind = ''
+        if (.not. allocated(only_state)) only_state = ''
         call row_begin(10.0, id="jobshead")
         call text(jobs_view_title(), size=TITLE, style=UI_HEADING, id="title")
         if (len(filter) > 0) then
-            if (link("all", "All repositories", at('/jobs'), size=BODY)) call go('/jobs')
+            if (link("all", "All repositories", at(address('', only_kind, only_state)), &
+                size=BODY)) call go(address('', only_kind, only_state))
         end if
         call text("", width=UI_FILL)
         if (paused) then
@@ -162,6 +186,12 @@ contains
             call text("Live", size=SMALL, tone=UI_TONE_POSITIVE, id="livebadge")
         end if
         call row_end()
+        if (refused) then
+            call text("Jobs", size=HEADING, style=UI_HEADING, id="heading-jobs")
+            call filters()
+            call text("No jobs match.", size=BODY, tone=UI_TONE_MUTED)
+            return
+        end if
         if (.not. loaded) then
             call text("Loading...", size=BODY, tone=UI_TONE_MUTED)
             return
@@ -182,9 +212,9 @@ contains
             call column_begin(0.0, id="card-jobrepos")
             do k = 1, size(counts)
                 call row_begin(12.0, id="row-jr"//ui_str(k))
-                if (link("repo", counts(k)%name, at('/jobs?repo='//url_encode(counts(k)%name)), &
-                    key=k, size=BODY, width=UI_FILL)) call go('/jobs?repo='// &
-                    url_encode(counts(k)%name))
+                if (link("repo", counts(k)%name, at(address(counts(k)%name, only_kind, &
+                    only_state)), key=k, size=BODY, width=UI_FILL)) &
+                    call go(address(counts(k)%name, only_kind, only_state))
                 call text(summary(counts(k)%n), size=SMALL, tone=UI_TONE_MUTED)
                 call row_end()
             end do
@@ -194,8 +224,9 @@ contains
         ! Durations of running and waiting jobs advance once a second.
         if (busy()) call ui_wake_after(1.0)
         call text("Jobs", size=HEADING, style=UI_HEADING, id="heading-jobs")
+        call filters()
         if (size(jobs) == 0) then
-            call text("No jobs yet.", size=BODY, tone=UI_TONE_MUTED)
+            call text("No jobs match.", size=BODY, tone=UI_TONE_MUTED)
             return
         end if
         call column_begin(0.0, id="card-jobs")
@@ -205,20 +236,62 @@ contains
         call column_end()
     end subroutine jobs_view_compose
 
+    subroutine filters()
+        !! The filters as links: each leads to the address with that filter.
+        integer :: k
+        character(len=:), allocatable :: href
+
+        call row_begin(8.0, id="jobfilters")
+        do k = 1, size(KINDS)
+            href = address(filter, trim(KINDS(k)), only_state)
+            if (link("kind", trim(KIND_LABELS(k)), at(href), key=k, size=SMALL, &
+                tone=merge(UI_TONE_STRONG, UI_TONE_LINK, only_kind == KINDS(k)))) call go(href)
+        end do
+        call text("·", size=SMALL, tone=UI_TONE_MUTED)
+        do k = 1, size(STATES)
+            href = address(filter, only_kind, trim(STATES(k)))
+            if (link("state", trim(STATE_LABELS(k)), at(href), key=k, size=SMALL, &
+                tone=merge(UI_TONE_STRONG, UI_TONE_LINK, only_state == STATES(k)))) call go(href)
+        end do
+        call row_end()
+    end subroutine filters
+
+    function address(repo, kind, only) result(path)
+        !! The jobs page of `repo` with the filters `kind` and `only` (a
+        !! state); an empty one is left out. The API has the same query.
+        character(len=*), intent(in) :: repo, kind, only
+        character(len=:), allocatable :: path
+
+        path = ''
+        if (len(repo) > 0) path = path//'&repo='//url_encode(repo)
+        if (len(kind) > 0) path = path//'&kind='//url_encode(kind)
+        if (len(only) > 0) path = path//'&state='//url_encode(only)
+        if (len(path) > 0) path = '?'//path(2:)
+        path = '/jobs'//path
+    end function address
+
     subroutine job_row(k, narrow)
         integer, intent(in) :: k
         logical, intent(in) :: narrow
-        character(len=:), allocatable :: what, when_text
+        character(len=:), allocatable :: what, when_text, href
 
         associate (j => jobs(k))
-            what = j%repo//' · '//j%branch
             call column_begin(4.0, id="row-j"//ui_str(j%id))
             call row_begin(10.0, id="jobline")
-            call text(j%state, size=12.0, id="badge", tone=state_tone(j%state))
-            if (link("job", what, at('/jobs?repo='//url_encode(j%repo)), key=j%id, size=BODY, &
-                style=UI_HEADING, width=UI_FILL, ellipsis=.not. narrow)) call toggle(j%id)
-            if (.not. narrow) call text("#"//ui_str(j%id), size=SMALL, style=UI_CODE, &
-                tone=UI_TONE_MUTED)
+            call text(j%state, size=12.0, id="state", style=UI_HEADING, &
+                tone=state_tone(j%state, j%entry == j%entries))
+            href = route_href(R_JOB, '', ui_str(j%id))
+            if (link("job", "job "//ui_str(j%id), href, key=j%id, size=BODY, style=UI_HEADING)) &
+                call go(href)
+            call text(kind_word(j%kind), size=SMALL, tone=UI_TONE_MUTED)
+            if (j%change > 0) then
+                ! The row leads to the change the job served.
+                href = route_href(R_CHANGE, j%repo, ui_str(j%change))
+                if (link("change", j%repo//' #'//ui_str(j%change)//' '//j%title, href, key=j%id, &
+                    size=BODY, width=UI_FILL, ellipsis=.not. narrow)) call go(href)
+            else
+                call text(j%repo//' · '//j%branch, size=BODY, width=UI_FILL, ellipsis=.not. narrow)
+            end if
             call row_end()
             select case (j%state)
             case ('running')
@@ -230,18 +303,16 @@ contains
                 if (len(j%started) > 0) when_text = when_text//' after '// &
                     duration(seconds_between(j%started, j%finished))
             end select
+            what = j%account//' · '//when_text
+            if (j%entries > 1) what = what//' · entry '//ui_str(j%entry)//' of '//ui_str(j%entries)
+            if (len(j%runner) > 0) what = what//' · runner '//j%runner
             call row_begin(8.0, id="jobmeta")
-            call text(j%account//' · '//when_text, size=SMALL, tone=UI_TONE_MUTED, width=UI_FILL)
+            call text(what, size=SMALL, tone=UI_TONE_MUTED, width=UI_FILL)
             if (len(j%commit) >= 7) then
                 if (link("commit", j%commit(1:7), route_href(R_COMMIT, j%repo, j%commit), key=j%id, &
                     size=SMALL, style=UI_CODE)) call go(route_href(R_COMMIT, j%repo, j%commit))
             end if
             call row_end()
-            if (open_id == j%id) then
-                call column_begin(0.0, id="joblog")
-                call log_lines(open_log)
-                call column_end()
-            end if
             call column_end()
         end associate
     end subroutine job_row
@@ -253,42 +324,6 @@ contains
             if (jobs(k)%state == 'running' .or. jobs(k)%state == 'queued') busy = .true.
         end do
     end function busy
-
-    subroutine toggle(id)
-        !! Opens the log of job `id`, or closes it when it is open.
-        integer, intent(in) :: id
-        if (open_id == id) then
-            open_id = 0
-            open_log = ''
-            return
-        end if
-        open_id = id
-        open_log = 'Loading...'
-        call fetch_start(log_req, 'GET', '/api/v1/jobs/'//ui_str(id))
-    end subroutine toggle
-
-    subroutine log_lines(log)
-        !! The log as code lines; progress bars of builds are left out.
-        character(len=*), intent(in) :: log
-        integer :: pos, nl, shown
-        character(len=:), allocatable :: line
-
-        pos = 1
-        shown = 0
-        do while (pos <= len(log) .and. shown < 400)
-            nl = index(log(pos:), new_line('a'))
-            if (nl == 0) then
-                line = log(pos:)
-                pos = len(log) + 1
-            else
-                line = log(pos:pos + nl - 2)
-                pos = pos + nl
-            end if
-            if (index(line, '[') > 0 .and. index(line, '%') == len(line)) cycle
-            shown = shown + 1
-            call text(line, style=UI_CODE, size=12.5, width=UI_FILL)
-        end do
-    end subroutine log_lines
 
     integer function tile(k)
         integer, intent(in) :: k
@@ -320,19 +355,34 @@ contains
             ' landed · '//ui_str(n(4))//' failed'
     end function summary
 
-    integer function state_tone(s)
+    function kind_word(k) result(s)
+        !! What a job of kind `k` is called.
+        character(len=*), intent(in) :: k
+        character(len=:), allocatable :: s
+        select case (k)
+        case ('landing'); s = 'entry'
+        case ('verify'); s = 'verification'
+        case default; s = k
+        end select
+    end function kind_word
+
+    integer function state_tone(s, newest)
+        !! Settled states are plain, work in motion has the accent, and a
+        !! failure is red while nothing newer of its change replaced it.
         character(len=*), intent(in) :: s
+        logical, intent(in) :: newest
         select case (s)
-        case ('landed'); state_tone = UI_TONE_POSITIVE
-        case ('failed'); state_tone = UI_TONE_NEGATIVE
-        case ('running'); state_tone = UI_TONE_ACCENT
+        case ('landed', 'passed'); state_tone = UI_TONE_NORMAL
+        case ('queued', 'running'); state_tone = UI_TONE_ACCENT
+        case ('failed'); state_tone = merge(UI_TONE_NEGATIVE, UI_TONE_MUTED, newest)
         case default; state_tone = UI_TONE_MUTED
         end select
     end function state_tone
 
     subroutine parse(body)
         !! {"state":..,"repos":[{name,running,queued,landed,failed}],
-        !!  "totals":{...},"jobs":[{id,kind,repo,branch,...}]}
+        !!  "totals":{...},"jobs":[{id,kind,repo,branch,...,change,title,entry,
+        !!  entries,runner,checks:[...]}]}; a job's checks are read on its page.
         character(len=*), intent(in) :: body
         type(json_parser_t) :: p
         type(json_event_t) :: ev
@@ -368,8 +418,11 @@ contains
             case (JSON_STRING)
                 if (depth == 1 .and. key == 'state') state = ev%string_val
                 if (section == 'repos' .and. key == 'name') c%name = ev%string_val
-                if (section == 'jobs') then
+                if (section == 'jobs' .and. depth == 2) then
                     select case (key)
+                    case ('kind'); j%kind = ev%string_val
+                    case ('title'); j%title = ev%string_val
+                    case ('runner'); j%runner = ev%string_val
                     case ('repo'); j%repo = ev%string_val
                     case ('branch'); j%branch = ev%string_val
                     case ('account'); j%account = ev%string_val
@@ -385,13 +438,20 @@ contains
                     key, 1)
                 if (section == 'repos' .and. slot > 0) c%n(slot) = int(ev%int_val)
                 if (section == 'totals' .and. slot > 0) totals(slot) = int(ev%int_val)
-                if (section == 'jobs' .and. key == 'id') j%id = int(ev%int_val)
+                if (section == 'jobs' .and. depth == 2) then
+                    select case (key)
+                    case ('id'); j%id = int(ev%int_val)
+                    case ('change'); j%change = int(ev%int_val)
+                    case ('entry'); j%entry = int(ev%int_val)
+                    case ('entries'); j%entries = int(ev%int_val)
+                    end select
+                end if
             case (JSON_OBJECT_END)
                 if (section == 'repos' .and. len(c%name) > 0) then
                     counts = [counts, c]
                     c%name = ''
                     c%n = 0
-                else if (section == 'jobs' .and. j%id > 0) then
+                else if (section == 'jobs' .and. depth == 2 .and. j%id > 0) then
                     jobs = [jobs, j]
                     call reset_job()
                 else if (section == 'totals') then
@@ -413,6 +473,12 @@ contains
             j%started = ''
             j%finished = ''
             j%commit = ''
+            j%kind = ''
+            j%title = ''
+            j%runner = ''
+            j%change = 0
+            j%entry = 0
+            j%entries = 0
         end subroutine reset_job
 
     end subroutine parse

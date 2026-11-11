@@ -230,8 +230,9 @@ program test_mcp
     call tool(6, 'job', '"id":1,"lines":99999999999999')
     call mcp()
     a = answer(1)
-    call check(passed(1) .and. index(a, 'first, landed\n') > 0 .and. index(a, 'check ran') == 0 &
-        .and. index(a(index(a, 'landed\n') + 8:), '\n') == 0, &
+    ! After the state, the job names its change; then come the lines asked for.
+    call check(passed(1) .and. index(a, 'first, landed\nchange #1 First\n') > 0 .and. &
+        index(a, 'check ran') == 0 .and. index(a(index(a, '#1 First\n') + 10:), '\n') == 0, &
         'job with lines answers that many lines from the end of the log: '//a)
     call check(passed(2) .and. index(answer(2), '\"jobs\":[{\"id\":1,') > 0 .and. &
         passed(4) .and. index(answer(4), '\"jobs\":[{\"id\":1,') > 0, &
@@ -240,8 +241,8 @@ program test_mcp
         index(answer(3), '\"state\":\"landed\"') > 0, &
         'landings lists the landings of a repository: '//answer(3))
     a = answer(5)
-    call check(passed(5) .and. index(a, 'first, landed\n"}]') > 0, &
-        'job with no lines answers the state alone: '//a)
+    call check(passed(5) .and. index(a, 'first, landed\nchange #1 First\n"}]') > 0, &
+        'job with no lines answers the state and the change alone: '//a)
     call check(passed(6) .and. index(answer(6), 'check ran\ncheck done') > 0, &
         'job with more lines than the log has answers all of it: '//answer(6))
 

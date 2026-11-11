@@ -2,7 +2,7 @@
 // real pointer and key events:
 //   node test/web_app_test.mjs FY_BINARY WEB_DIR [SCREENSHOT.png]
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -310,7 +310,7 @@ try {
 
   // The jobs page is live: a landing queued elsewhere appears without input.
   await load('/jobs');
-  await until(hasText('No jobs yet.'), 'jobs page');
+  await until(hasText('No jobs match.'), 'jobs page');
   check(await evaluate('document.title') === 'Jobs · fortyard', 'the jobs page has its address and title');
   const auth = { Cookie: `fy_session=${session.value}`, 'Content-Type': 'application/json' };
   await fetch(url + 'api/v1/repos', { method: 'POST', headers: auth, body: JSON.stringify({ name: 'live' }) });
@@ -319,6 +319,36 @@ try {
   check(true, 'a job queued elsewhere appears on the open jobs page');
   await until(hasText('failed'), 'the landing ends');
   check(true, 'its end appears too');
+
+  // A job has its own page with its stored log; every line has an address.
+  await click(linkTo('/jobs/1'));
+  await until(`!!document.getElementById('L1')`, 'the job page');
+  check(await path() === '/jobs/1' && await evaluate('document.title') === 'Job 1 · fortyard' &&
+    await evaluate(hasText('live · nothing')), 'a row of the jobs page leads to the page of its job');
+  const job1 = await (await fetch(url + 'api/v1/jobs/1', { headers: auth })).json();
+  const lines1 = job1.log.replace(/\n$/, '').split('\n');
+  check(await evaluate(`document.querySelectorAll('[data-box="joblog"] > .fui').length`) === lines1.length &&
+    await evaluate(`document.getElementById('L${lines1.length}').textContent`) === String(lines1.length).padStart(5) + '  ' + lines1.at(-1),
+    'the page shows the whole stored log, one numbered line each');
+  check(await evaluate(hasText('No check is recorded for this job.')), 'a job without a recorded check says so');
+  await load('/jobs/999');
+  check(await evaluate(hasText('There is no job 999.')) &&
+    (await fetch(url + 'jobs/999', { headers: auth })).status === 404, 'a job that does not exist says so, with status 404');
+  await load('/jobs/1#L1');
+  check(await evaluate(`document.getElementById('L1').__ssr === 1 && document.querySelector(':target').id === 'L1'`),
+    'the server sends the log with its line addresses, so #L1 works before any script');
+  check(await adopted(), 'and the WebAssembly adopts the job page');
+
+  // The list is filtered through the address.
+  await load('/jobs?state=landed');
+  check(await evaluate(hasText('No jobs match.')) && !await evaluate(`!!document.querySelector('[data-box="row-j1"]')`),
+    'a state in the address filters the jobs');
+  await click(linkTo('/jobs?state=failed'));
+  await until(`!!document.querySelector('[data-box="row-j1"]')`, 'the failed job');
+  check(await path() === '/jobs?state=failed', 'a filter is a link to its address');
+  await click(linkTo('/jobs?kind=verify&state=failed'));
+  await until(hasText('No jobs match.'), 'no verification');
+  check(await path() === '/jobs?kind=verify&state=failed', 'kind and state filter together');
 
   // Changes and issues: a pushed branch is a change with its own pages.
   await fetch(url + 'api/v1/repos', { method: 'POST', headers: auth, body: JSON.stringify({ name: 'work' }) });
@@ -616,6 +646,93 @@ try {
     await evaluate(`!!document.querySelector('[data-id$="/newest"]')`),
     'the older changes have their own address, by key, and lead back to the newest');
   await load('/work/-/changes');
+  await adopted();
+
+  // Two entries of one change: the first fails its check, the second lands.
+  const jobState = async (id) => (await (await fetch(url + 'api/v1/jobs/' + id, { headers: auth })).json()).state;
+  const landChange = async () => (await (await fetch(url + 'api/v1/repos/work/changes/1/land',
+    { method: 'POST', headers: auth, body: '{}' })).json()).landing;
+  const pushCheck = (script) => {
+    mkdirSync(join(wt, '.fortyard'), { recursive: true });
+    writeFileSync(join(wt, '.fortyard', 'check'), script, { mode: 0o755 });
+    wg('add', '-A');
+    wg('commit', '-q', '--amend', '--no-edit');
+    wg('push', '-q', '-f', `http://x:${admin}@127.0.0.1:${port}${base}/work.git`, 'HEAD:feature');
+  };
+  pushCheck('#!/bin/sh\necho checking\necho "FAIL: not yet"\nexit 1\n');
+  const first = await landChange();
+  for (let i = 0; i < 200 && await jobState(first) !== 'failed'; i++) await sleep(100);
+  await load('/jobs/' + first);
+  const failedJob = await (await fetch(url + 'api/v1/jobs/' + first, { headers: auth })).json();
+  check(await evaluate(hasText('job ' + first)) && await evaluate(hasText('failed')) &&
+    await evaluate(`document.querySelector(${JSON.stringify(linkTo('/work/-/changes/1'))}).textContent`) === 'work #1 Explain the feature',
+    'the page of a job names its change and links to it');
+  check(failedJob.error_line > 0 &&
+    await evaluate(`document.getElementById('L${failedJob.error_line}').textContent.endsWith('FAIL: not yet')`),
+    'the first line with Error or FAIL is named');
+  await click(linkTo(`/jobs/${first}#L${failedJob.error_line}`));
+  await until(`location.hash === '#L${failedJob.error_line}'`, 'the line address');
+  check(await path() === '/jobs/' + first, 'and linked at the top: the link leads to the address of that line');
+  check(await evaluate(`(document.querySelector(':target') || {}).id`) === 'L' + failedJob.error_line,
+    'and the line it leads to is marked as the target');
+  // The page is live: the entry that replaces this one appears without input.
+  pushCheck('#!/bin/sh\necho checking\n');
+  const second = await landChange();
+  await until(`!!document.querySelector(${JSON.stringify(linkTo('/jobs/' + second))})`, 'the next entry');
+  await until(`document.querySelector(${JSON.stringify(linkTo('/jobs/' + second))}).textContent === 'job ${second}, landed'`, 'its landing');
+  check(await evaluate(hasText('entry 1 of 2')) && await evaluate(hasText('next entry of this change:')),
+    'an open job page learns of the next entry of its change and of its outcome');
+  await click(linkTo('/jobs/' + second));
+  await until(hasText('entry 2 of 2'), 'the second entry');
+  check(await path() === '/jobs/' + second && await evaluate(hasText('landed')) &&
+    !await evaluate(hasText('next entry of this change:')), 'the entry that landed is entry 2 of 2 of the same change');
+  await load('/jobs?repo=work');
+  const toChange = (id) => `!!document.querySelector('[data-box="row-j${id}"] ' + ${JSON.stringify(linkTo('/work/-/changes/1'))})`;
+  check(await evaluate(toChange(first)) && await evaluate(toChange(second)) &&
+    await evaluate(`[...document.querySelectorAll('[data-box="row-j${first}"] .fui')].some((e) => e.textContent.includes('entry 1 of 2'))`) &&
+    await evaluate(`[...document.querySelectorAll('[data-box="row-j${second}"] .fui')].some((e) => e.textContent.includes('entry 2 of 2'))`),
+    'the rows of the jobs page link to the change and show the two entries of it');
+  // A change with a title of ordinary length whose check prints CR LF line
+  // ends and fails; its check is recorded with a runner (no runner runs here).
+  const longTitle = 'Jobs name their change, and a job has a page with its log and its checks';
+  wg('fetch', '-q', `http://x:${admin}@127.0.0.1:${port}${base}/work.git`, 'main');
+  wg('checkout', '-q', '-b', 'long', 'FETCH_HEAD');
+  writeFileSync(join(wt, '.fortyard', 'check'), '#!/bin/sh\nprintf "one\\r\\ntwo Error\\r\\n"\nexit 1\n', { mode: 0o755 });
+  wg('add', '-A');
+  wg('commit', '-q', '-m', longTitle);
+  wg('push', '-q', `http://x:${admin}@127.0.0.1:${port}${base}/work.git`, 'HEAD:long');
+  const changes = await (await fetch(url + 'api/v1/repos/work/changes', { headers: auth })).json();
+  const longChange = changes.changes.find((c) => c.title === longTitle).number;
+  const third = (await (await fetch(url + `api/v1/repos/work/changes/${longChange}/land`,
+    { method: 'POST', headers: auth, body: '{}' })).json()).landing;
+  for (let i = 0; i < 200 && await jobState(third) !== 'failed'; i++) await sleep(100);
+  execFileSync('sqlite3', [join(data, 'd', 'fortyard.db'), `INSERT INTO checks (repo, ref, state, runner, created_at,
+    claimed_at, finished_at) VALUES ('work', 'refs/fortyard/checks/${third}', 'failed', 'faepkub4',
+    '2026-11-11T09:41:12Z', '2026-11-11T09:41:16Z', '2026-11-11T09:42:36Z');`]);
+  await load('/jobs/' + third);
+  const logLines = `JSON.stringify([...document.querySelectorAll('[data-box="joblog"] > .fui')].map((e) => e.textContent))`;
+  const ssrLines = await evaluate(logLines);
+  check(await adopted() && ssrLines === await evaluate(logLines) && JSON.parse(ssrLines).includes('    2  one'),
+    'a log line that ends in CR LF is the same from the server and in the application, without the CR');
+  // A filter the server refuses matches no job, from the server and in the application.
+  await load('/jobs?kind=bogus');
+  check(await evaluate(hasText('No jobs match.')) && await adopted() && await evaluate(hasText('No jobs match.')) &&
+    !await evaluate(hasText('Loading...')), 'an unknown kind in the address matches no job');
+  await send('Emulation.setDeviceMetricsOverride', { width: 375, height: 740, deviceScaleFactor: 2, mobile: true });
+  wide = [];
+  for (const to of ['/jobs', '/jobs/' + first]) {
+    await load(to);
+    await adopted();
+    if (!await evaluate(noOverflow)) wide.push(to);
+  }
+  check(wide.length === 0, 'the jobs pages do not scroll sideways on a phone' + (wide.length ? ': ' + wide.join(' ') : ''));
+  await load('/jobs/' + third);
+  await adopted();
+  check(await evaluate(noOverflow) && await evaluate(`(() => { const e = [...document.querySelectorAll('.fui')]
+    .find((e) => e.textContent === 'runner faepkub4'); return !!e && e.getBoundingClientRect().right <= innerWidth; })()`),
+    'on a phone a long change title wraps and the runner of a check stays in view');
+  await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  await load('/jobs?repo=work');
   await adopted();
 
   if (shot) {

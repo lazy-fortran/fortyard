@@ -2,6 +2,8 @@ program test_store
     use fy_sqlite, only: db_t, db_close, db_exec
     use fy_store, only: &
         SCHEMA_VERSION, &
+        check_t, &
+        landing_t, &
         store_bootstrap, &
         store_check_add, &
         store_check_claim, &
@@ -9,6 +11,8 @@ program test_store
         store_check_finish, &
         store_check_get, &
         store_check_release, &
+        store_job_checks, &
+        store_jobs, &
         store_open, &
         store_schema_version, &
         store_snapshot, &
@@ -27,6 +31,10 @@ program test_store
     integer(int64) :: id
     character(len=:), allocatable :: repo, ref
     logical :: found
+    type(landing_t), allocatable :: jobs(:)
+    type(check_t), allocatable :: job_checks(:)
+    integer(int64) :: t0, t1, rate
+    integer :: k
 
     call execute_command_line('rm -f '//path//' '//path//'-wal '//path//'-shm'//' '//path//'.snap')
     call store_open(path, db, stat)
@@ -100,6 +108,26 @@ program test_store
     call check(released == 1, 'a restarted runner hands back its running check')
     call store_check_claim(db, 'r2', id, repo, ref, found)
     call check(found .and. ref == 'refs/c', 'the handed back check is taken again')
+
+    ! The jobs list looks up, for each of its rows, the entries of the row's
+    ! change and its checks: with 6000 landings and their logs that stays a
+    ! matter of milliseconds (without an index on either it takes a second).
+    call db_exec(db, "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n"// &
+        " WHERE i < 6000) INSERT INTO landings (repo, branch, account, state, created_at,"// &
+        " log, change, kind) SELECT 'demo', 'b' || i, 'admin', 'landed', '2026-01-01T00:00:00Z',"// &
+        " hex(zeroblob(2000)), (i + 1) / 2, 'landing' FROM n;"// &
+        " INSERT INTO checks (repo, ref, state, log, created_at) SELECT 'demo',"// &
+        " 'refs/fortyard/checks/' || id, 'passed', log, created_at FROM landings;", stat)
+    call check(stat == 0, 'landings and checks are seeded')
+    call system_clock(t0, rate)
+    call store_jobs(db, '', jobs, stat)
+    do k = 1, size(jobs)
+        call store_job_checks(db, jobs(k), job_checks)
+        call check(size(job_checks) == 1 .and. jobs(k)%entries == 2, 'a job has its check and entries')
+    end do
+    call system_clock(t1)
+    call check(size(jobs) == 40 .and. real(t1 - t0) / real(rate) < 0.2, &
+        'the jobs list with its checks is fast on a database with history')
     call db_close(db)
 
     call fair_share()

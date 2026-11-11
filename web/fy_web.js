@@ -112,10 +112,14 @@ addToLibrary({
   fy_nav_call: function (what, pPtr, pLen, qPtr, qLen) {
     var s = UTF8ToString(pPtr, pLen);
     switch (what) {
-      case 1:
+      case 1: {
+        // A line of the page shown: the browser scrolls to it and marks it (:target).
+        var h = s.indexOf('#');
+        if (h > 0 && s.slice(0, h) === FY_here()) { location.hash = s.slice(h); break; }
         if (s !== FY_here()) history.pushState(null, '', FY_base() + s);
         window.scrollTo(0, 0);
         break;
+      }
       case 2:
         if (s !== FY.title) { FY.title = s; document.title = s; }
         break;

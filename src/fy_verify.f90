@@ -281,6 +281,8 @@ contains
         call git(git_dir, [character(len=256) :: 'update-ref', ref, commit], out, status)
         call store_check_add(db, repo, ref, check, stat, kind='verify')
         call events_notify('checks')
+        ! The page of the job shows the check while it waits for a runner.
+        call events_notify('jobs')
         call finish(db, repo, git_dir, commit, id, check)
     end subroutine run
 

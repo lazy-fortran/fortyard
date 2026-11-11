@@ -14,6 +14,7 @@ module fy_pages
     enumerator :: R_COMMITS
     enumerator :: R_ISSUE
     enumerator :: R_ISSUES
+    enumerator :: R_JOB
     enumerator :: R_JOBS
     enumerator :: R_MISSING
     enumerator :: R_REPOS

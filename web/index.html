@@ -309,6 +309,19 @@
   .fui[data-style="5"][data-tone="13"] { background: var(--hunk-bg); color: var(--mut); }
   .fui[data-style="5"][data-tone="11"] span[data-t="3"] { background: var(--add-gutter); }
   .fui[data-style="5"][data-tone="12"] span[data-t="3"] { background: var(--del-gutter); }
+  /* Jobs and the page of one job: its log is flat text whose lines wrap. */
+  .fui-box[data-box="jobhead"], .fui-box[data-box="jobnext"], .fui-box[data-box="jobtimes"],
+  .fui-box[data-box="jobfilters"], .fui-box[data-box="loghead"] { flex-wrap: wrap; row-gap: 4px;
+    align-items: baseline; }
+  [data-box="jobhead"] > .fui { overflow-wrap: anywhere; min-width: 0; max-width: 100%; }
+  [data-box="card-checks"] > .fui-box { flex-wrap: wrap; row-gap: 2px; }
+  [data-box="jobfilters"] a[data-tone="15"] { font-weight: 600; }
+  .fui-box[data-box="joblog"] { background: var(--bg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 8px 0; }
+  .fui-box[data-box="joblog"] > .fui { white-space: pre-wrap; overflow-wrap: anywhere;
+    padding: 0 16px 0 8px; }
+  .fui-box[data-box="joblog"] > .fui:target { background: var(--hunk-bg); }
+  .fui-box[data-box="joblog"] span[data-t="2"] { color: var(--red); }
   span[data-t="5"] { color: var(--kw); }
   span[data-t="6"] { color: var(--str); }
   span[data-t="7"] { color: var(--com); font-style: italic; }

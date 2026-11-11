@@ -34,6 +34,7 @@ module fy_store
     private
 
     public :: &
+        check_t, &
         landing_t, &
         random_token, &
         release_t, &
@@ -47,10 +48,13 @@ module fy_store
         store_check_get, &
         store_check_release, &
         store_job, &
+        store_job_checks, &
         store_job_counts, &
+        store_job_next, &
         store_jobs, &
         store_jobs_state, &
         store_landing_add, &
+        store_landing_check, &
         store_landing_finish, &
         store_landing_list, &
         store_landing_next, &
@@ -132,13 +136,35 @@ module fy_store
         integer(int64) :: change = 0
         !! "landing", or "verify" for a verification of main (fy_verify).
         character(len=:), allocatable :: kind
+        !! What a job names of its change: the number in its repository and
+        !! the title, and which of the entries of that change it is (0: none).
+        integer :: number = 0, entry = 0, entries = 0
+        character(len=:), allocatable :: title
         !! The name of the token that queued it; empty when not recorded.
         character(len=:), allocatable :: session
     end type landing_t
 
+    type :: check_t
+        !! One run of a job's tree on a runner, as the job shows it. Seconds
+        !! are -1 while the check has not got that far.
+        integer(int64) :: id = 0
+        integer :: wait = -1, run = -1
+        character(len=:), allocatable :: state, runner, created, claimed, finished
+    end type check_t
+
     character(len=*), parameter :: NOW = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
     !! How long a check waits for the runner that checked its repository last.
     character(len=*), parameter :: AFFINITY_SECONDS = '20'
+    !! A job with the number and title of its change and its place among the
+    !! entries of that change (job_read).
+    character(len=*), parameter :: JOB_COLS = 'SELECT l.id, l.repo, l.branch, l.account,'// &
+        " l.state, l.created_at, coalesce(l.started_at, ''), coalesce(l.finished_at, ''),"// &
+        " coalesce(l.commit_id, ''), l.kind, coalesce(c.number, 0), coalesce(c.title, ''),"// &
+        " (SELECT count(*) FROM landings e WHERE e.change = l.change AND e.kind = 'landing'"// &
+        ' AND e.id <= l.id), (SELECT count(*) FROM landings e WHERE e.change = l.change'// &
+        " AND e.kind = 'landing'), coalesce(l.session, '')"
+    character(len=*), parameter :: JOB_FROM = ' FROM landings l LEFT JOIN changes c ON'// &
+        ' c.id = l.change'
 
 contains
 
@@ -980,44 +1006,45 @@ contains
         stat = SQLITE_OK
     end subroutine store_landing_list
 
-    subroutine store_jobs(db, repo, ls, stat)
-        !! Running and queued landings, then the 40 newest finished ones, of
-        !! `repo` or of all repositories when it is empty; without logs.
+    subroutine store_jobs(db, repo, ls, stat, kind, state)
+        !! Running and queued jobs, then the 40 newest finished ones, of `repo`
+        !! or of all repositories when it is empty; without logs. `kind`
+        !! ("landing", "test", "verify") and `state` keep the jobs of that kind
+        !! and in that state; empty, or state "all", keeps all.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: repo
         type(landing_t), allocatable, intent(out) :: ls(:)
         integer, intent(out) :: stat
+        character(len=*), intent(in), optional :: kind, state
         type(stmt_t) :: st
         type(landing_t) :: l
-        character(len=*), parameter :: COLS = "SELECT id, repo, branch, account, state,"// &
-            " created_at, coalesce(started_at, ''), coalesce(finished_at, ''),"// &
-            " coalesce(commit_id, ''), kind, coalesce(session, '') FROM landings"// &
-            " WHERE (?1 = '' OR repo = ?1)"
+        character(len=*), parameter :: WHERE = " WHERE (?1 = '' OR l.repo = ?1) AND"// &
+            " (?2 = '' OR l.kind = ?2) AND (?3 = '' OR l.state = ?3)"
+        character(len=:), allocatable :: only_kind, only_state
         integer :: pass
 
         allocate (ls(0))
+        only_kind = ''
+        if (present(kind)) only_kind = kind
+        only_state = ''
+        if (present(state)) only_state = state
+        if (only_state == 'all') only_state = ''
         do pass = 1, 2
             if (pass == 1) then
-                call db_prepare(db, COLS//" AND state IN ('running', 'queued')"// &
-                    " ORDER BY state = 'queued', id;", st, stat)
+                call db_prepare(db, JOB_COLS//JOB_FROM//WHERE// &
+                    " AND l.state IN ('running', 'queued') ORDER BY l.state = 'queued', l.id;", &
+                    st, stat)
             else
-                call db_prepare(db, COLS//" AND state NOT IN ('running', 'queued')"// &
-                    ' ORDER BY id DESC LIMIT 40;', st, stat)
+                call db_prepare(db, JOB_COLS//JOB_FROM//WHERE// &
+                    " AND l.state NOT IN ('running', 'queued') ORDER BY l.id DESC LIMIT 40;", &
+                    st, stat)
             end if
             if (stat /= SQLITE_OK) return
             call stmt_bind_text(st, 1, repo, stat)
+            call stmt_bind_text(st, 2, only_kind, stat)
+            call stmt_bind_text(st, 3, only_state, stat)
             do while (stmt_step(st) == SQLITE_ROW)
-                l%id = stmt_int(st, 0)
-                l%repo = stmt_text(st, 1)
-                l%branch = stmt_text(st, 2)
-                l%account = stmt_text(st, 3)
-                l%state = stmt_text(st, 4)
-                l%created = stmt_text(st, 5)
-                l%started = stmt_text(st, 6)
-                l%finished = stmt_text(st, 7)
-                l%commit = stmt_text(st, 8)
-                l%kind = stmt_text(st, 9)
-                l%session = stmt_text(st, 10)
+                call job_read(st, l)
                 l%log = ''
                 ls = [ls, l]
             end do
@@ -1036,28 +1063,103 @@ contains
         integer :: stat
 
         found = .false.
-        call db_prepare(db, "SELECT id, repo, branch, account, state, created_at,"// &
-            " coalesce(started_at, ''), coalesce(finished_at, ''), coalesce(commit_id, ''),"// &
-            " coalesce(log, ''), kind, coalesce(session, '') FROM landings WHERE id = ?1;", st, stat)
+        call db_prepare(db, JOB_COLS//", coalesce(l.log, '')"//JOB_FROM//' WHERE l.id = ?1;', &
+            st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, id, stat)
         if (stmt_step(st) == SQLITE_ROW) then
-            l%id = stmt_int(st, 0)
-            l%repo = stmt_text(st, 1)
-            l%branch = stmt_text(st, 2)
-            l%account = stmt_text(st, 3)
-            l%state = stmt_text(st, 4)
-            l%created = stmt_text(st, 5)
-            l%started = stmt_text(st, 6)
-            l%finished = stmt_text(st, 7)
-            l%commit = stmt_text(st, 8)
-            l%log = stmt_text(st, 9)
-            l%kind = stmt_text(st, 10)
-            l%session = stmt_text(st, 11)
+            call job_read(st, l)
+            l%log = stmt_text(st, 15)
             found = .true.
         end if
         call stmt_finalize(st)
     end subroutine store_job
+
+    subroutine job_read(st, l)
+        !! A row of JOB_COLS.
+        type(stmt_t), intent(in) :: st
+        type(landing_t), intent(inout) :: l
+
+        l%id = stmt_int(st, 0)
+        l%repo = stmt_text(st, 1)
+        l%branch = stmt_text(st, 2)
+        l%account = stmt_text(st, 3)
+        l%state = stmt_text(st, 4)
+        l%created = stmt_text(st, 5)
+        l%started = stmt_text(st, 6)
+        l%finished = stmt_text(st, 7)
+        l%commit = stmt_text(st, 8)
+        l%kind = stmt_text(st, 9)
+        l%number = int(stmt_int(st, 10))
+        l%title = stmt_text(st, 11)
+        l%entry = int(stmt_int(st, 12))
+        l%entries = int(stmt_int(st, 13))
+        l%session = stmt_text(st, 14)
+    end subroutine job_read
+
+    subroutine store_job_checks(db, l, checks)
+        !! The checks of job `l`, oldest first: one per attempt. A check names
+        !! its job through its ref, whose last part is the job's number; the
+        !! member of a candidate that is not its last names the candidate's
+        !! check through its check_id.
+        type(db_t), intent(in) :: db
+        type(landing_t), intent(in) :: l
+        type(check_t), allocatable, intent(out) :: checks(:)
+        type(stmt_t) :: st
+        type(check_t) :: c
+        integer :: stat
+
+        allocate (checks(0))
+        ! A UNION, not an OR: with an OR SQLite reads every check of the repository.
+        call db_prepare(db, "SELECT id, state, coalesce(runner, ''), created_at,"// &
+            " coalesce(claimed_at, ''), coalesce(finished_at, ''),"// &
+            " coalesce(CAST(strftime('%s', claimed_at) - strftime('%s', created_at)"// &
+            " AS INTEGER), -1), coalesce(CAST(strftime('%s', finished_at) -"// &
+            " strftime('%s', claimed_at) AS INTEGER), -1) FROM checks WHERE id IN"// &
+            ' (SELECT id FROM checks WHERE repo = ?1 AND ref IN'// &
+            " ('refs/fortyard/checks/' || ?2, 'refs/fortyard/queue/' || ?2,"// &
+            " 'refs/fortyard/verify/' || ?2)"// &
+            ' UNION SELECT check_id FROM landings WHERE id = ?2) ORDER BY id;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, l%repo, stat)
+        call stmt_bind_int(st, 2, l%id, stat)
+        do while (stmt_step(st) == SQLITE_ROW)
+            c%id = stmt_int(st, 0)
+            c%state = stmt_text(st, 1)
+            c%runner = stmt_text(st, 2)
+            c%created = stmt_text(st, 3)
+            c%claimed = stmt_text(st, 4)
+            c%finished = stmt_text(st, 5)
+            c%wait = int(stmt_int(st, 6))
+            c%run = int(stmt_int(st, 7))
+            checks = [checks, c]
+        end do
+        call stmt_finalize(st)
+    end subroutine store_job_checks
+
+    subroutine store_job_next(db, id, next, state)
+        !! The entry that followed entry `id` for the same change, with its
+        !! state; 0 when `id` is the newest entry of its change.
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: id
+        integer(int64), intent(out) :: next
+        character(len=:), allocatable, intent(out) :: state
+        type(stmt_t) :: st
+        integer :: stat
+
+        next = 0
+        state = ''
+        call db_prepare(db, 'SELECT n.id, n.state FROM landings l JOIN landings n ON'// &
+            " n.change = l.change AND n.kind = 'landing' AND n.id > l.id WHERE l.id = ?1"// &
+            " AND l.kind = 'landing' ORDER BY n.id LIMIT 1;", st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, id, stat)
+        if (stmt_step(st) == SQLITE_ROW) then
+            next = stmt_int(st, 0)
+            state = stmt_text(st, 1)
+        end if
+        call stmt_finalize(st)
+    end subroutine store_job_next
 
     subroutine store_job_counts(db, names, counts, stat)
         !! Per repository: running, queued, landed and failed in the last 24
@@ -1095,9 +1197,11 @@ contains
         integer :: stat
 
         s = ''
-        call db_prepare(db, "SELECT count(*) || '.' || coalesce(max(id), 0) || '.' ||"// &
-            " coalesce(max(started_at), '') || '.' || coalesce(max(finished_at), '')"// &
-            ' FROM landings;', st, stat)
+        ! One aggregate each, so each reads an index end instead of every row.
+        call db_prepare(db, "SELECT (SELECT count(*) FROM landings) || '.' ||"// &
+            " coalesce((SELECT max(id) FROM landings), 0) || '.' ||"// &
+            " coalesce((SELECT max(started_at) FROM landings), '') || '.' ||"// &
+            " coalesce((SELECT max(finished_at) FROM landings), '');", st, stat)
         if (stat /= SQLITE_OK) return
         if (stmt_step(st) == SQLITE_ROW) s = stmt_text(st, 0)
         call stmt_finalize(st)
@@ -1131,6 +1235,23 @@ contains
         end if
         call stmt_finalize(st)
     end subroutine store_check_add
+
+    subroutine store_landing_check(db, ids, check)
+        !! Check `check` decides the landings `ids`, the members of a candidate.
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: ids(:), check
+        type(stmt_t) :: st
+        integer :: stat, k
+
+        do k = 1, size(ids)
+            call db_prepare(db, 'UPDATE landings SET check_id = ?1 WHERE id = ?2;', st, stat)
+            if (stat /= SQLITE_OK) return
+            call stmt_bind_int(st, 1, check, stat)
+            call stmt_bind_int(st, 2, ids(k), stat)
+            stat = stmt_step(st)
+            call stmt_finalize(st)
+        end do
+    end subroutine store_landing_check
 
     subroutine store_check_claim(db, runner, id, repo, ref, found, kind, limit)
         !! Gives `runner` the queued check that shares the runners fairly:

@@ -135,6 +135,7 @@ module fy_server
         stats_days_ok, &
         stats_json
     use fy_store, only: &
+        check_t, &
         landing_t, &
         random_token, &
         release_t, &
@@ -147,10 +148,13 @@ module fy_server
         store_check_get, &
         store_check_release, &
         store_job, &
+        store_job_checks, &
         store_job_counts, &
+        store_job_next, &
         store_jobs, &
         store_jobs_state, &
         store_landing_add, &
+        store_landing_check, &
         store_landing_finish, &
         store_landing_list, &
         store_landing_next, &
@@ -238,6 +242,8 @@ module fy_server
     character(len=:), allocatable :: checks_mode
     !! The lander's database connection, for its runner checks.
     type(db_t) :: lander_db
+    !! The landings of the candidate the lander checks, which share its check.
+    integer(int64), allocatable :: candidate_jobs(:)
     !! Lander processes when runners check the landings.
     integer, parameter :: MAX_LANDERS = 4
     !! Seconds past its check_timeout after which a check whose runner has
@@ -656,6 +662,7 @@ contains
             end do
             if (size(held) > 0) then
                 work = tmp_dir()//'/fy-land-'//itoa(int(g(held(1))%id))
+                candidate_jobs = g(held)%id
                 if (checks_mode == 'runner') then
                     call land_candidate(repo_path(g(1)%repo), work, g(1)%repo, tip, branches, &
                         holds, upstream, log, ok, runner=runner_check, &
@@ -665,6 +672,7 @@ contains
                         holds, upstream, log, ok, check=policy%tests /= 'none', &
                         pinned=tips)
                 end if
+                deallocate (candidate_jobs)
                 call execute_command_line('rm -rf '''//work//'''')
                 if (ok) then
                     do k = 1, size(held)
@@ -1765,7 +1773,10 @@ contains
             call events_watch_close(fd)
             return
         end if
+        if (allocated(candidate_jobs)) call store_landing_check(lander_db, candidate_jobs, id)
         call events_notify('checks')
+        ! The pages of the jobs show the check while it waits for a runner.
+        call events_notify('jobs')
         do
             call store_check_get(lander_db, id, state, log, age, limit)
             if (state == 'passed' .or. state == 'failed') exit
@@ -1832,6 +1843,8 @@ contains
         if (req%path == '/api/v1/checks/release') then
             call store_check_release(db, who%token_name, k)
             if (k > 0) call events_notify('checks')
+            ! Their jobs no longer name the runner that restarted.
+            if (k > 0) call events_notify('jobs')
             write (num, '(i0)') k
             res%body = '{"released":'//trim(num)//'}'
             return
@@ -1844,6 +1857,8 @@ contains
                 return
             end if
             call events_notify('checks')
+            ! A job shows its check and runner: its pages ask again.
+            call events_notify('jobs')
             write (num, '(i0)') id
             write (limit, '(i0)') seconds
             res%body = '{"id":'//trim(num)//',"repo":"'//repo//'","ref":"'//ref//'","kind":"'// &
@@ -1884,11 +1899,16 @@ contains
     end subroutine checks_route
 
     subroutine jobs_route(req, db, res)
-        !! GET /api/v1/jobs[?repo=NAME]: running and queued jobs, recent finished
-        !! ones and counts per repository ("checks": the runner checks it holds
-        !! now). Pages learn of changes through
+        !! GET /api/v1/jobs[?repo=NAME][&kind=landing|test|verify][&state=STATE]:
+        !! running and queued jobs, recent finished ones and counts per
+        !! repository ("checks": the runner checks it holds now); state=all is no
+        !! filter. Pages learn of changes through
         !! /api/v1/events?topic=jobs.
-        !! GET /api/v1/jobs/N: one job with its log.
+        !! GET /api/v1/jobs/N: one job with its log and the entry that followed
+        !! it for the same change.
+        !! A job names its change ("change" is the number, "title" its title),
+        !! which of that change's entries it is, and its checks, one per
+        !! attempt. What no row records is null.
         type(http_request_t), intent(in) :: req
         type(db_t), intent(in) :: db
         type(response_t), intent(inout) :: res
@@ -1897,7 +1917,7 @@ contains
         type(landing_t) :: l
         character(len=64), allocatable :: names(:)
         integer, allocatable :: counts(:, :)
-        character(len=:), allocatable :: repo, state
+        character(len=:), allocatable :: repo, state, kind, only
         character(len=24) :: num
         integer(int64) :: id
         integer :: k, stat, ios, totals(5)
@@ -1924,9 +1944,19 @@ contains
             call fail(res, 400, 'bad repository name')
             return
         end if
+        kind = http_query_param(req%query, 'kind')
+        if (len(kind) > 0 .and. kind /= 'landing' .and. kind /= 'test' .and. kind /= 'verify') then
+            call fail(res, 400, 'kind is landing, test or verify')
+            return
+        end if
+        only = http_query_param(req%query, 'state')
+        if (verify(only, 'abcdefghijklmnopqrstuvwxyz') /= 0) then
+            call fail(res, 400, 'bad state')
+            return
+        end if
         state = store_jobs_state(db)
         call store_job_counts(db, names, counts, stat)
-        call store_jobs(db, repo, ls, stat)
+        call store_jobs(db, repo, ls, stat, kind=kind, state=only)
         totals = 0
         res%body = '{"state":"'//json_escape_string(state)//'","repos":['
         do k = 1, size(names)
@@ -1951,16 +1981,86 @@ contains
         function job_json(j, with_log) result(s)
             type(landing_t), intent(in) :: j
             logical, intent(in) :: with_log
-            character(len=:), allocatable :: s
+            character(len=:), allocatable :: s, runner, next_state
+            type(check_t), allocatable :: checks(:)
+            integer(int64) :: next
+            integer :: c
+
             write (num, '(i0)') j%id
             s = '{"id":'//trim(num)//',"kind":"'//j%kind//'","repo":"'//j%repo//'","branch":"'// &
                 json_escape_string(j%branch)//'","account":"'//json_escape_string(j%account)// &
                 '","state":"'//j%state//'","queued":"'//j%created//'","started":"'// &
-                j%started//'","finished":"'//j%finished//'","commit":"'//j%commit// &
-                '","session":'//text_or_null(j%session)
-            if (with_log) s = s//',"log":"'//json_escape_string(j%log)//'"'
+                j%started//'","finished":"'//j%finished//'","commit":"'//j%commit//'"'
+            ! Version, reason and candidate have no column yet; their
+            ! members are there so that what fills them changes, not the form.
+            s = s//',"change":'//number(j%number, 1)//',"title":'//string(j%title, j%number > 0)// &
+                ',"version":null,"reason":null,"session":'//text_or_null(j%session)// &
+                ',"candidate":null,"entry":'// &
+                number(j%entry, 1)//',"entries":'//number(j%entries, 1)
+            call store_job_checks(db, j, checks)
+            runner = ''
+            if (size(checks) > 0) runner = checks(size(checks))%runner
+            s = s//',"runner":'//string(runner, len(runner) > 0)//',"checks":['
+            do c = 1, size(checks)
+                if (c > 1) s = s//','
+                write (num, '(i0)') checks(c)%id
+                s = s//'{"id":'//trim(num)//',"attempt":'//itoa(c)//',"kind":"'//j%kind// &
+                    '","state":"'//checks(c)%state//'","runner":'// &
+                    string(checks(c)%runner, len(checks(c)%runner) > 0)//',"queued":"'// &
+                    checks(c)%created//'","started":'// &
+                    string(checks(c)%claimed, len(checks(c)%claimed) > 0)//',"finished":'// &
+                    string(checks(c)%finished, len(checks(c)%finished) > 0)//',"wait":'// &
+                    number(checks(c)%wait, 0)//',"run":'//number(checks(c)%run, 0)// &
+                    ',"tree":null,"command":null,"image":null,"fo_version":null,'// &
+                    '"exit_status":null}'
+            end do
+            s = s//']'
+            if (with_log) then
+                call store_job_next(db, j%id, next, next_state)
+                if (next > 0) then
+                    write (num, '(i0)') next
+                    s = s//',"next":{"id":'//trim(num)//',"state":"'//next_state//'"}'
+                else
+                    s = s//',"next":null'
+                end if
+                s = s//',"error_line":'//number(error_line(j%log), 1)//',"log":"'// &
+                    json_escape_string(j%log)//'"'
+            end if
             s = s//'}'
         end function job_json
+
+        integer function error_line(log) result(n)
+            !! The number of the first line of `log` that contains Error or
+            !! FAIL, where a reader of a failed job starts; 0 without one.
+            character(len=*), intent(in) :: log
+            integer :: at, fail, k
+
+            at = index(log, 'Error')
+            fail = index(log, 'FAIL')
+            if (at == 0 .or. (fail > 0 .and. fail < at)) at = fail
+            n = 0
+            if (at == 0) return
+            n = 1
+            do k = 1, at - 1
+                if (log(k:k) == new_line('a')) n = n + 1
+            end do
+        end function error_line
+
+        function number(v, least) result(s)
+            !! `v`, or null when it is below `least` (not recorded).
+            integer, intent(in) :: v, least
+            character(len=:), allocatable :: s
+            s = 'null'
+            if (v >= least) s = itoa(v)
+        end function number
+
+        function string(v, recorded) result(s)
+            character(len=*), intent(in) :: v
+            logical, intent(in) :: recorded
+            character(len=:), allocatable :: s
+            s = 'null'
+            if (recorded) s = '"'//json_escape_string(v)//'"'
+        end function string
 
         function itoa(v) result(s)
             integer, intent(in) :: v

@@ -27,6 +27,7 @@ module fy_mcp
         mcp_send_response
     use fy_cli, only: &
         cli_field, &
+        cli_job, &
         cli_tail
     use fy_client, only: &
         client_request, &
@@ -71,8 +72,8 @@ module fy_mcp
         'land', 'Queue the landing of a pushed branch (admin); answers its job', 'repo branch', &
         'landings', 'Recent landings of a repository', 'repo', &
     ! jobs
-        'jobs', 'Running, waiting and recent jobs', 'repo?', &
-        'job', 'A job: its state and the end of its log', 'id lines?', &
+        'jobs', 'Running, waiting and recent jobs with their changes', 'repo? kind? state?', &
+        'job', 'A job: its state, change, checks and the end of its log', 'id lines?', &
         'stats', 'Queue numbers of the last 1, 7 (default) or 30 days', 'repo? days?', &
         'verify', 'Queue a verification of main with the full suite (admin)', 'repo']
     integer, parameter :: N_TOOLS = size(TOOL_LINES) / 3
@@ -262,6 +263,8 @@ contains
             json = text_arg('open (default), closed or all')
             if (tool == 'changes') json = text_arg('open (default), closed, landed, '// &
                 'flagged or all')
+            if (tool == 'jobs') json = text_arg('queued, running, landed, passed, failed or '// &
+                'all (default)')
         case ('version'); json = number_arg('Version of the change, the newest by default')
         case ('from'); json = number_arg('Earlier version to compare with')
         case ('body'); json = text_arg('Text, Markdown')
@@ -269,6 +272,7 @@ contains
         case ('branch'); json = text_arg('Branch on the server')
         case ('days'); json = number_arg('Days of the window: 1, 7 (default) or 30')
         case ('id'); json = number_arg('Job id')
+        case ('kind'); json = text_arg('landing, test or verify')
         case ('lines'); json = number_arg('Lines from the end of the log, 40 by default')
         case default; json = '{"type":"string"}'
         end select
@@ -328,6 +332,11 @@ contains
                 found = len(value) == 0 .or. any(value == [character(len=8) :: 'open', &
                     'closed', 'all']) .or. (tool == 'changes' .and. &
                     any(value == [character(len=8) :: 'landed', 'flagged']))
+                ! A job's states are words; the server checks them.
+                if (tool == 'jobs') found = verify(value, 'abcdefghijklmnopqrstuvwxyz') == 0
+            case ('kind')
+                found = len(value) == 0 .or. any(value == [character(len=8) :: 'landing', &
+                    'test', 'verify'])
             end select
             if (.not. found) then
                 text = '{"error":"'//tool//' needs a valid '//name//'"}'
@@ -347,6 +356,11 @@ contains
         case ('jobs')
             path = '/api/v1/jobs'
             if (len(repo) > 0) path = path//'?repo='//repo
+            value = argument(message, 'kind')
+            if (len(value) > 0) path = path//merge('&', '?', index(path, '?') > 0)//'kind='//value
+            value = argument(message, 'state')
+            if (len(value) > 0) path = path//merge('&', '?', index(path, '?') > 0)//'state='// &
+                value
         case ('job'); path = '/api/v1/jobs/'//argument(message, 'id')
         case ('landings'); path = '/api/v1/repos/'//repo//'/landings'
         case ('stats')
@@ -426,7 +440,7 @@ contains
         body = text
         text = 'job '//cli_field(body, 'id')//': '//cli_field(body, 'kind')//' of '// &
             cli_field(body, 'repo')//' '//cli_field(body, 'branch')//', '// &
-            cli_field(body, 'state')//new_line('a')
+            cli_field(body, 'state')//new_line('a')//cli_job(body)
         ! cli_tail takes no lines for all of them.
         if (lines > 0) text = text//cli_tail(cli_field(body, 'log'), lines)
     end subroutine call_tool
