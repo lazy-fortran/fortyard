@@ -15,6 +15,8 @@ What is started or decided and not finished, each with its issue:
 - #63 Two changes or issues created at the same moment can get the same
   number.
 - #64 Web image build time after an LFortran pin change is unmeasured.
+- The LFortran fork's upstream pull requests: issue #27 of the repository
+  `lfortran` on this instance.
 - Changes #45 (test that a new release takes over without refusing
   requests) and #47 (remote runner over HTTPS) are open and undecided.
 
