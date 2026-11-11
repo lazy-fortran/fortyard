@@ -8,6 +8,7 @@ module fy_change
     use, intrinsic :: iso_fortran_env, only: int64
     use fx_json_build, only: json_escape_string
     use fx_json_parse, only: json_extract_string
+    use fy_events, only: events_notify
     use fy_proc, only: proc_run
     use fy_sqlite, only: db_t, stmt_t, db_prepare, stmt_bind_text, stmt_bind_int, stmt_step, &
         stmt_text, stmt_int, stmt_finalize, SQLITE_OK, SQLITE_ROW
@@ -15,21 +16,24 @@ module fy_change
     private
 
     public :: change_t, change_sync, change_get, change_by_id, change_by_branch, change_comment, change_landed, &
-        change_next_number, change_api, change_message
+        change_next_number, change_api, change_message, change_review_set, &
+        change_review_next, change_last_version
 
     type :: change_t
         integer(int64) :: id = 0
         integer :: number = 0
         character(len=:), allocatable :: repo, key, branch, title, description, author, state, &
-            created, updated, commit
+            created, updated, commit, review, flag_reason
         integer :: versions = 0
+        logical :: flagged = .false.
     end type change_t
 
     character(len=*), parameter :: NOW = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
     integer, parameter :: OUT_BYTES = 1048576
     character(len=*), parameter :: COLUMNS = 'id, number, repo, change_key, branch, title,'// &
         " description, author, state, created_at, updated_at, coalesce(commit_id, ''),"// &
-        ' (SELECT count(*) FROM change_versions v WHERE v.change = changes.id)'
+        ' (SELECT count(*) FROM change_versions v WHERE v.change = changes.id),'// &
+        " coalesce(review_state, ''), flagged, coalesce(flag_reason, '')"
 
 contains
 
@@ -326,6 +330,68 @@ contains
             NOW//' WHERE id = ?1;', id, commit)
     end subroutine change_landed
 
+    subroutine change_review_set(db, id, state, flagged, reason)
+        !! Records a review of the change `id`: its state, and whether and why
+        !! it is flagged for a person.
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: id
+        character(len=*), intent(in) :: state, reason
+        logical, intent(in) :: flagged
+        type(stmt_t) :: st
+        integer :: stat
+
+        call db_prepare(db, 'UPDATE changes SET review_state = ?2, flagged = ?3, flag_reason = ?4'// &
+            ' WHERE id = ?1;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, id, stat)
+        call stmt_bind_text(st, 2, state, stat)
+        call stmt_bind_int(st, 3, int(merge(1, 0, flagged), int64), stat)
+        call stmt_bind_text(st, 4, reason, stat)
+        stat = stmt_step(st)
+        call stmt_finalize(st)
+    end subroutine change_review_set
+
+    subroutine change_review_next(db, c, found)
+        !! The oldest change waiting for the review agent: one whose review was
+        !! requested, or a landed one not reviewed yet.
+        type(db_t), intent(in) :: db
+        type(change_t), intent(out) :: c
+        logical, intent(out) :: found
+        type(stmt_t) :: st
+        integer :: stat
+
+        found = .false.
+        call db_prepare(db, 'SELECT '//COLUMNS//" FROM changes WHERE review_state = 'requested'"// &
+            " OR (state = 'landed' AND review_state IS NULL) ORDER BY id LIMIT 1;", st, stat)
+        if (stat /= SQLITE_OK) return
+        if (stmt_step(st) == SQLITE_ROW) then
+            call read_row(st, c)
+            found = .true.
+        end if
+        call stmt_finalize(st)
+    end subroutine change_review_next
+
+    subroutine change_last_version(db, id, head, base)
+        !! Head and base commit of the newest version of the change `id`.
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: id
+        character(len=:), allocatable, intent(out) :: head, base
+        type(stmt_t) :: st
+        integer :: stat
+
+        head = ''
+        base = ''
+        call db_prepare(db, 'SELECT head, base FROM change_versions WHERE change = ?1'// &
+            ' ORDER BY version DESC LIMIT 1;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, id, stat)
+        if (stmt_step(st) == SQLITE_ROW) then
+            head = stmt_text(st, 0)
+            base = stmt_text(st, 1)
+        end if
+        call stmt_finalize(st)
+    end subroutine change_last_version
+
     function change_message(c, url) result(message)
         !! The landing commit's message: title (#N), description and trailers.
         type(change_t), intent(in) :: c
@@ -410,6 +476,25 @@ contains
             end if
             call comment_add(db, c%id, account, value)
             code = 201
+            answer = '{"change":'//itoa(c%number)//'}'
+        case ('review', 'reviewed')
+            ! review: asks the review agent for a (new) review; reviewed: a
+            ! person has reviewed the change, which also clears its flag.
+            if (method /= 'POST') then
+                call refuse(405, 'POST')
+                return
+            end if
+            if (.not. admin) then
+                call refuse(403, 'review states need the admin scope')
+                return
+            end if
+            if (sub == 'review') then
+                call change_review_set(db, c%id, 'requested', c%flagged, c%flag_reason)
+                call events_notify('jobs')
+            else
+                call change_review_set(db, c%id, 'human-reviewed', .false., '')
+                call comment_add(db, c%id, account, 'Reviewed.')
+            end if
             answer = '{"change":'//itoa(c%number)//'}'
         case ('land')
             if (method /= 'POST') then
@@ -520,6 +605,10 @@ contains
         if (state == 'all') then
             call db_prepare(db, 'SELECT '//COLUMNS//' FROM changes WHERE repo = ?1 AND ?2 = ?2'// &
                 ' ORDER BY number DESC LIMIT 100;', st, stat)
+        else if (state == 'flagged') then
+            ! Changes waiting for a person's review.
+            call db_prepare(db, 'SELECT '//COLUMNS//' FROM changes WHERE repo = ?1 AND ?2 = ?2'// &
+                ' AND flagged <> 0 ORDER BY number DESC LIMIT 100;', st, stat)
         else
             call db_prepare(db, 'SELECT '//COLUMNS//' FROM changes WHERE repo = ?1 AND state = ?2'// &
                 ' ORDER BY number DESC LIMIT 100;', st, stat)
@@ -554,7 +643,8 @@ contains
             ',"created":"'//c%created//'","updated":"'//c%updated//'","commit":"'//c%commit//'"'
         if (index(c%key, 'branch:') /= 1) json = json//',"change_id":"'// &
             json_escape_string(c%key)//'"'
-        json = json//'}'
+        json = json//',"review":"'//c%review//'","flagged":'//merge('true ', 'false', c%flagged)
+        json = trim(json)//',"flag_reason":"'//json_escape_string(c%flag_reason)//'"}'
     end function summary_json
 
     function change_json(db, c) result(json)
@@ -733,6 +823,9 @@ contains
         c%updated = stmt_text(st, 10)
         c%commit = stmt_text(st, 11)
         c%versions = int(stmt_int(st, 12))
+        c%review = stmt_text(st, 13)
+        c%flagged = stmt_int(st, 14) /= 0
+        c%flag_reason = stmt_text(st, 15)
     end subroutine read_row
 
     subroutine exec_bind(db, sql, id, text)

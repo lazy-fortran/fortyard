@@ -99,6 +99,9 @@ contains
             '  change edit N [--title T] [--description-file F|-]', &
             '  change land N [--no-wait]    land the change and follow it', &
             '  change close N, change reopen N', &
+            '  change review N     ask the review agent for a review of the change', &
+            '  change reviewed N   a person reviewed it; clears its flag (admin)', &
+            '  change list --flagged   changes the review agent flagged for a person', &
             '                      (change and push take --repo NAME outside a checkout)', &
             '  issue list [--all]  open issues (--all: also closed ones)', &
             '  issue view N        an issue with its comments', &
@@ -661,10 +664,16 @@ contains
         case ('list')
             state = 'open'
             if (flag('--all')) state = 'all'
+            if (flag('--flagged')) state = 'flagged'
             call client_request(cfg%server, 'GET', path//'?state='//state, cfg%token, '', &
                 code, body, stat)
             if (stat /= 0 .or. code /= 200 .or. flag('--json')) call report(code, body, stat)
             if (stat /= 0 .or. code /= 200 .or. flag('--json')) return
+            if (state == 'flagged') then
+                write (output_unit, '(a)', advance='no') cli_table(body, 'changes', &
+                    [character(len=11) :: 'number', 'state', 'title', 'flag_reason'])
+                return
+            end if
             write (output_unit, '(a)', advance='no') cli_table(body, 'changes', &
                 [character(len=8) :: 'number', 'state', 'author', 'versions', 'branch', 'title'])
         case ('view')
@@ -675,6 +684,12 @@ contains
                 cli_field(body, 'state')//', '//cli_field(body, 'versions')// &
                 ' version(s) by '//cli_field(body, 'author')//', branch '// &
                 cli_field(body, 'branch'), cfg%server//'/'//repo//'/-/changes/'//n, ''
+            text = cli_field(body, 'review')
+            if (len(text) > 0 .and. text /= 'none') then
+                if (cli_field(body, 'flagged') == 'true') text = text// &
+                    ', flagged for a person: '//cli_field(body, 'flag_reason')
+                write (output_unit, '(a)') 'review: '//text, ''
+            end if
             text = cli_field(body, 'description')
             if (len(text) > 0) write (output_unit, '(a)') text, ''
             text = cli_table(body, 'versions_list', [character(len=8) :: 'version', 'head', &
@@ -728,6 +743,15 @@ contains
                 '{"state":"'//state//'"}', code, body, stat)
             if (stat /= 0 .or. code /= 200) call report(code, body, stat)
             write (output_unit, '(a)') '#'//n//' '//state
+        case ('review', 'reviewed')
+            call client_request(cfg%server, 'POST', path//'/'//n//'/'//what, cfg%token, '', &
+                code, body, stat)
+            if (stat /= 0 .or. code /= 200) call report(code, body, stat)
+            if (what == 'review') then
+                write (output_unit, '(a)') 'review of #'//n//' requested'
+            else
+                write (output_unit, '(a)') '#'//n//' reviewed'
+            end if
         case ('land')
             call client_request(cfg%server, 'POST', path//'/'//n//'/land', cfg%token, '', &
                 code, body, stat)
@@ -738,7 +762,7 @@ contains
             if (.not. flag('--no-wait')) call follow_job(cfg, cli_field(body, 'landing'))
         case default
             write (error_unit, '(a)') 'fy: usage: fy change list|view|diff|comment|edit|'// &
-                'land|close|reopen'
+                'land|close|reopen|review|reviewed'
             call quit(2)
         end select
     end subroutine cmd_change

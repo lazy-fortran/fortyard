@@ -22,7 +22,7 @@ module fy_store
     public :: store_check_add, store_check_claim, store_check_finish, store_check_get, &
         store_check_release
 
-    integer, parameter, public :: SCHEMA_VERSION = 12
+    integer, parameter, public :: SCHEMA_VERSION = 13
 
     type :: token_identity_t
         logical :: found = .false.
@@ -271,6 +271,22 @@ contains
             ! so a fork does not continue the numbers in its upstream's history.
             call db_exec(db, 'BEGIN;ALTER TABLE repos ADD COLUMN number_next INTEGER;'// &
                 'DELETE FROM schema_version; INSERT INTO schema_version VALUES (12);'// &
+                'COMMIT;', stat)
+            if (stat /= SQLITE_OK) then
+                call db_exec(db, 'ROLLBACK;', version)
+                return
+            end if
+        end if
+        if (store_schema_version(db) < 13) then
+            ! Review state of a change (fy_review): NULL until reviewed, then
+            ! 'ai-reviewed' or 'human-reviewed'; 'requested' asks for a review
+            ! and 'failed' records one that gave no usable answer. Changes
+            ! landed before reviews existed are not reviewed.
+            call db_exec(db, 'BEGIN;ALTER TABLE changes ADD COLUMN review_state TEXT;'// &
+                'ALTER TABLE changes ADD COLUMN flagged INTEGER NOT NULL DEFAULT 0;'// &
+                'ALTER TABLE changes ADD COLUMN flag_reason TEXT;'// &
+                "UPDATE changes SET review_state = 'none' WHERE state <> 'open';"// &
+                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (13);'// &
                 'COMMIT;', stat)
             if (stat /= SQLITE_OK) then
                 call db_exec(db, 'ROLLBACK;', version)

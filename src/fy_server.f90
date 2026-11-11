@@ -8,6 +8,7 @@ module fy_server
         http_bearer_token, http_cookie, http_query_param, http_read_head, http_read_body, &
         http_basic_password
     use fy_git_http, only: git_http_route, git_http_serve
+    use fy_review, only: review_enabled, reviewer_main
     use fy_land, only: land_branch, land_candidate, land_hook_install, land_check
     use fy_issue, only: issue_api
     use fy_verify, only: verifier_main, verify_request
@@ -104,9 +105,9 @@ contains
         ! mirrors repositories, and the slots after it land branches: several
         ! when runners check them, so one repository's long check does not hold
         ! up the others, else one.
-        integer :: pids(nworkers + 2 + MAX_LANDERS)
-        integer(int64) :: started(nworkers + 2 + MAX_LANDERS), now, rate
-        integer :: i, pid, status, slots
+        integer :: pids(nworkers + 3 + MAX_LANDERS)
+        integer(int64) :: started(nworkers + 3 + MAX_LANDERS), now, rate
+        integer :: i, pid, status, slots, review_slot
         character(len=:), allocatable :: followed
         integer :: me
 
@@ -118,6 +119,12 @@ contains
                 ! The last slot verifies main (fy_verify), on runners only.
                 if (checks_mode == 'runner') slots = nworkers + 2 + MAX_LANDERS
             end if
+        end if
+        ! One more process reviews changes when a model is configured (fy_review).
+        review_slot = 0
+        if (allocated(repos_dir) .and. review_enabled()) then
+            slots = slots + 1
+            review_slot = slots
         end if
         do i = 1, slots
             call spawn(i)
@@ -192,7 +199,9 @@ contains
             end do
             if (pids(slot) /= 0) return
             if (.not. proc_die_with_parent(me)) call proc_exit(0)
-            if (slot == nworkers + 2 + MAX_LANDERS) then
+            if (slot == review_slot) then
+                call reviewer_main(db_path, repos_dir)
+            else if (slot == nworkers + 2 + MAX_LANDERS) then
                 call verifier_main(db_path, repos_dir)
             else if (slot > nworkers + 1) then
                 call lander_main(db_path, slot - nworkers - 1)
