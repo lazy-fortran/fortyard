@@ -328,6 +328,7 @@ contains
                 action='read', iostat=ios)
             if (ios /= 0) return
             inquire (unit=u, size=n)
+            deallocate (s)
             allocate (character(len=n) :: s)
             if (n > 0) read (u, iostat=ios) s
             close (u)
