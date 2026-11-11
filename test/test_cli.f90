@@ -82,6 +82,9 @@ program test_cli
     call run('cd '//work//' && '//env//fy//' landings')
     call check(index(out, 'LANDING  STATE') == 1 .and. index(out, 'first') > 0, &
         'fy landings finds the repository from the checkout: '//out)
+    call run('cd '//work//' && '//env//fy//' land --help && '//env//fy//' jobs')
+    call check(stat == 0 .and. index(out, 'queued') == 0 .and. index(out, 'land ') > 0 .and. &
+        index(out, new_line('a')//'3 ') == 0, 'asking for help lands nothing: '//out)
 
     ! Agents use the same operations through fy mcp.
     call run('printf "%s\n" ''{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":'// &

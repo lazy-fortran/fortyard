@@ -20,6 +20,8 @@ program fy
     character(len=:), allocatable :: command
 
     command = arg(1)
+    ! Asking for help never runs a command: `fy land --help` once landed.
+    if (wants_help()) command = 'help'
     select case (command)
     case ('serve')
         call cmd_serve()
@@ -934,6 +936,15 @@ contains
         if (index(url, cfg%server) /= 1 .and. index(cfg%server, protocol//'://'//host) /= 1) return
         write (output_unit, '(a)') 'username=x', 'password='//cfg%token
     end subroutine cmd_git_credential
+
+    logical function wants_help()
+        integer :: i
+
+        wants_help = .false.
+        do i = 2, command_argument_count()
+            if (arg(i) == '--help' .or. arg(i) == '-h') wants_help = .true.
+        end do
+    end function wants_help
 
     function positional(k) result(s)
         !! The k-th argument after the command that is neither an option nor
