@@ -1,6 +1,7 @@
 program fy
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit, int64
     use fx_json_build, only: json_escape_string
+    use fx_json_parse, only: json_extract_string, json_extract_int
     use fx_mcp, only: mcp_server_t, mcp_server_init, mcp_server_add_action, &
         mcp_server_run
     use fy_build_info, only: FY_VERSION, FY_COMMIT
@@ -1004,11 +1005,28 @@ contains
     end subroutine report
 
     subroutine cmd_mcp()
+        !! The MCP server: one tool whose action names the operation; the other
+        !! arguments are listed in the tool's description.
         type(mcp_server_t) :: server
 
-        call mcp_server_init(server, 'fortyard', 'fortyard forge: account and server status')
+        call mcp_server_init(server, 'fortyard', 'fortyard forge. Arguments by action: '// &
+            'repo for jobs, changes, issues, verify; repo and number for change, change_diff, '// &
+            'change_land, issue; plus body for change_comment and issue_comment; repo, title '// &
+            'and body for issue_new; id for job.')
         call mcp_server_add_action(server, 'whoami', 'Account of the stored fortyard token')
         call mcp_server_add_action(server, 'version', 'Version of the fortyard server')
+        call mcp_server_add_action(server, 'jobs', 'Running, waiting and recent jobs')
+        call mcp_server_add_action(server, 'job', 'A job with its log')
+        call mcp_server_add_action(server, 'changes', 'Open changes of a repository')
+        call mcp_server_add_action(server, 'change', 'A change with versions and comments')
+        call mcp_server_add_action(server, 'change_diff', 'The diff of a change')
+        call mcp_server_add_action(server, 'change_comment', 'Comment on a change')
+        call mcp_server_add_action(server, 'change_land', 'Land a change (admin)')
+        call mcp_server_add_action(server, 'issues', 'Open issues of a repository')
+        call mcp_server_add_action(server, 'issue', 'An issue with its comments')
+        call mcp_server_add_action(server, 'issue_new', 'Open an issue')
+        call mcp_server_add_action(server, 'issue_comment', 'Comment on an issue')
+        call mcp_server_add_action(server, 'verify', 'Verify main with the full suite (admin)')
         call mcp_server_run(server, mcp_handler)
     end subroutine cmd_mcp
 
@@ -1017,13 +1035,53 @@ contains
         character(len=:), allocatable, intent(out) :: response
         logical, intent(out) :: is_error
         type(config_t) :: cfg
-        character(len=:), allocatable :: path
-        integer :: code, stat
+        character(len=:), allocatable :: path, method, payload, repo, n, text, title
+        integer :: code, stat, expect
 
         is_error = .true.
+        repo = mcp_argument(params, 'repo')
+        n = mcp_argument(params, 'number')
+        method = 'GET'
+        payload = ''
+        expect = 200
         select case (trim(action))
         case ('whoami'); path = '/api/v1/whoami'
         case ('version'); path = '/api/v1/version'
+        case ('jobs')
+            path = '/api/v1/jobs'
+            if (len(repo) > 0) path = path//'?repo='//repo
+        case ('job'); path = '/api/v1/jobs/'//mcp_argument(params, 'id')
+        case ('changes'); path = '/api/v1/repos/'//repo//'/changes'
+        case ('change'); path = '/api/v1/repos/'//repo//'/changes/'//n
+        case ('change_diff'); path = '/api/v1/repos/'//repo//'/changes/'//n//'/diff'
+        case ('change_comment', 'issue_comment')
+            text = mcp_argument(params, 'body')
+            method = 'POST'
+            expect = 201
+            payload = '{"body":"'//json_escape_string(text)//'"}'
+            if (action == 'change_comment') then
+                path = '/api/v1/repos/'//repo//'/changes/'//n//'/comments'
+            else
+                path = '/api/v1/repos/'//repo//'/issues/'//n//'/comments'
+            end if
+        case ('change_land')
+            path = '/api/v1/repos/'//repo//'/changes/'//n//'/land'
+            method = 'POST'
+            expect = 202
+        case ('issues'); path = '/api/v1/repos/'//repo//'/issues'
+        case ('issue'); path = '/api/v1/repos/'//repo//'/issues/'//n
+        case ('issue_new')
+            title = mcp_argument(params, 'title')
+            text = mcp_argument(params, 'body')
+            path = '/api/v1/repos/'//repo//'/issues'
+            method = 'POST'
+            expect = 201
+            payload = '{"title":"'//json_escape_string(title)//'","body":"'// &
+                json_escape_string(text)//'"}'
+        case ('verify')
+            path = '/api/v1/repos/'//repo//'/verify'
+            method = 'POST'
+            expect = 202
         case default
             response = '{"error":"unknown action"}'
             return
@@ -1033,9 +1091,27 @@ contains
             response = '{"error":"not logged in; run fy login"}'
             return
         end if
-        call client_request(cfg%server, 'GET', path, cfg%token, '', code, response, stat)
+        if (method == 'POST' .and. len(payload) == 0) payload = '{}'
+        call client_request(cfg%server, method, path, cfg%token, payload, code, response, stat)
         if (stat /= 0) response = '{"error":"server not reachable"}'
-        is_error = stat /= 0 .or. code /= 200
+        is_error = stat /= 0 .or. code /= expect
     end subroutine mcp_handler
+
+    function mcp_argument(params, name) result(value)
+        !! params.arguments.NAME of an MCP tool call, a string or a number.
+        character(len=*), intent(in) :: params, name
+        character(len=:), allocatable :: value
+        integer :: k
+        logical :: found
+        character(len=24) :: b
+        call json_extract_string(params, 'arguments.'//name, value, found)
+        if (found) return
+        call json_extract_int(params, 'arguments.'//name, k, found)
+        value = ''
+        if (found) then
+            write (b, '(i0)') k
+            value = trim(b)
+        end if
+    end function mcp_argument
 
 end program fy

@@ -83,6 +83,12 @@ program test_cli
     call check(index(out, 'LANDING  STATE') == 1 .and. index(out, 'first') > 0, &
         'fy landings finds the repository from the checkout: '//out)
 
+    ! Agents use the same operations through fy mcp.
+    call run('printf "%s\n" ''{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":'// &
+        '"fortyard","arguments":{"action":"changes","repo":"demo"}}}'' | '//env//fy//' mcp')
+    call check(index(out, '\"changes\":[') > 0 .and. index(out, '"isError":false') > 0, &
+        'fy mcp lists the changes of a repository: '//out)
+
     call proc_kill(sup, SIGTERM)
     call proc_wait(sup, stat)
     print '(a)', 'cli: all checks passed'
