@@ -93,6 +93,12 @@ program test_policy
     call run(in//fy//' repo policy demo tests=affected batch=2')
     call check(stat == 0 .and. index(out, '"tests":"affected","review":"after"') > 0 .and. &
         index(out, '"batch":2') > 0, 'settings are set and the others kept: '//out)
+    call run(in//fy//' repo policy demo check_timeout=25')
+    call check(stat == 0 .and. index(out, '"unreviewed_limit":0,"check_timeout":25}') > 0, &
+        'the time limit of a check is set in minutes: '//out)
+    call run(in//fy//' repo policy demo check_timeout=10081')
+    call check(stat /= 0 .and. index(out, 'check_timeout is 0') > 0, &
+        'a time limit over a week is refused: '//out)
     call run(in//fy//' repo policy demo tests=some')
     call check(stat /= 0 .and. index(out, 'tests is full, affected or none') > 0, &
         'a value that is none of the choices is refused: '//out)
@@ -270,7 +276,8 @@ contains
 
         call policy_get(db, 'unit', p, found)
         call check(found .and. p%tests == 'full' .and. p%review == 'after' .and. p%bisect .and. &
-            p%batch == 8 .and. p%unreviewed_limit == 0, 'a new repository has the defaults')
+            p%batch == 8 .and. p%unreviewed_limit == 0 .and. p%check_timeout == 60, &
+            'a new repository has the defaults')
         call policy_get(db, 'nosuch', p, found)
         call check(.not. found, 'no policy without a repository')
         call policy_set(p, 'batch', '0', error)
@@ -279,12 +286,18 @@ contains
         call check(len(error) > 0, 'batch=65 is refused')
         call policy_set(p, 'unreviewed_limit', '-1', error)
         call check(len(error) > 0, 'a negative limit is refused')
+        call policy_set(p, 'check_timeout', '-1', error)
+        call check(len(error) > 0, 'a negative time limit is refused')
+        call policy_set(p, 'check_timeout', '0', error)
+        call check(len(error) == 0 .and. p%check_timeout == 0, 'check_timeout=0 is no limit')
         call policy_set(p, 'bisect', 'maybe', error)
         call check(len(error) > 0, 'bisect=maybe is refused')
         call policy_set(p, 'review', 'never', error)
         call check(len(error) > 0, 'review=never is refused')
-        call policy_from_json(p, '{"batch":4,"unreviewed_limit":"3","bisect":"off"}', error)
+        call policy_from_json(p, '{"batch":4,"unreviewed_limit":"3","bisect":"off",'// &
+            '"check_timeout":90}', error)
         call check(len(error) == 0 .and. p%batch == 4 .and. p%unreviewed_limit == 3 .and. &
+            p%check_timeout == 90 .and. &
             .not. p%bisect .and. p%tests == 'full', 'JSON sets what it names: '//error)
         call policy_from_json(p, '{"tests":"none","review":"sometimes"}', error)
         call check(index(error, 'review is after or before') > 0, 'JSON is validated: '//error)
@@ -309,7 +322,7 @@ contains
         call policy_put(db, 'unit', p, found)
         call policy_get(db, 'unit', p)
         call check(found .and. policy_json('unit', p) == '{"name":"unit","tests":"affected",'// &
-            '"review":"after","bisect":"off","batch":4,"unreviewed_limit":3}', &
+            '"review":"after","bisect":"off","batch":4,"unreviewed_limit":3,"check_timeout":90}', &
             'a policy is stored: '//policy_json('unit', p))
         call policy_get(db, 'demo', p)
         call check(p%tests == 'full' .and. p%batch == 8, 'for its repository only')

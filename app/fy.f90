@@ -148,6 +148,9 @@ contains
             '                      batch=N  most landings checked as one candidate (1..64)', &
             '                      unreviewed_limit=N  refuse landings while N landed', &
             '                        changes wait for a review (0: no limit)', &
+            '                      check_timeout=MINUTES  a runner ends a check that runs', &
+            '                        longer; it runs once more, then the landing fails', &
+            '                        with the reason timeout (default 60; 0: no limit)', &
             '  repo list           list repositories', &
             '                      clone and push: git clone http://x:TOKEN@HOST/NAME.git', &
         ! runners
@@ -718,10 +721,11 @@ contains
     end subroutine cmd_landings
 
     subroutine cmd_jobs()
-        !! fy jobs [REPO]: running, waiting and recent jobs.
+        !! fy jobs [REPO]: running, waiting and recent jobs, under a line naming
+        !! the repositories that hold runners and how many.
         type(config_t) :: cfg
-        character(len=:), allocatable :: body, path
-        integer :: code, stat
+        character(len=:), allocatable :: body, path, held, rest, name
+        integer :: code, stat, s, e
 
         call config_load(cfg)
         call require_login(cfg)
@@ -732,6 +736,24 @@ contains
             call report(code, body, stat)
             return
         end if
+        held = ''
+        rest = body(1:max(0, index(body, '"totals":') - 1))
+        do
+            s = index(rest, '{"name":"')
+            if (s == 0) exit
+            rest = rest(s + 9:)
+            name = rest(1:index(rest, '"') - 1)
+            s = index(rest, '"checks":')
+            if (s == 0) exit
+            e = verify(rest(s + 9:), '0123456789')
+            if (e > 1) then
+                if (rest(s + 9:s + 8 + e - 1) /= '0') then
+                    if (len(held) > 0) held = held//', '
+                    held = held//name//' '//rest(s + 9:s + 8 + e - 1)
+                end if
+            end if
+        end do
+        if (len(held) > 0) write (output_unit, '(a)') 'runners held: '//held
         write (output_unit, '(a)', advance='no') cli_table(body, 'jobs', &
             [character(len=8) :: 'id', 'kind', 'repo', 'state', 'started', 'branch'])
     end subroutine cmd_jobs

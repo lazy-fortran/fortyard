@@ -6,6 +6,8 @@ module fy_land
     !! merged history (such as an upstream's) stays an ancestor of `main`. The
     !! commit is made in the bare repository itself, from git's three-way merge
     !! of trees; files are written only for the checks that read them.
+    use, intrinsic :: iso_fortran_env, only: &
+        int64
     use fy_proc, only: &
         proc_find, &
         proc_run
@@ -762,30 +764,44 @@ contains
         full = trim(cwd)//'/'//path
     end function absolute
 
-    subroutine land_check(work, out, code, verify)
+    subroutine land_check(work, out, code, verify, limit, timed_out, grace)
         !! The check of a landing commit checked out in `work`: fo build and fo
         !! test for an fpm project (applications built, so tests may run them),
         !! else an executable .fortyard/check; under a memory cap when systemd can
         !! give one. `out` is its output, `code` its exit status. With `verify`,
         !! the verification of main instead (fy_verify): .fortyard/verify, the
         !! repository's full suite, else for an fpm project every test run
-        !! again, without reusing earlier passes.
+        !! again, without reusing earlier passes. `limit` is the time limit in
+        !! seconds (0: none; default an hour, six for a verification): the
+        !! check runs in a process group of its own, which is sent SIGTERM at
+        !! the limit and SIGKILL `grace` seconds later (default 30), so no
+        !! compiler or test program it started survives; `timed_out` says
+        !! that the limit ended it. A process it started that outlives it,
+        !! also in a new session, is killed when it ends.
         character(len=*), intent(in) :: work
         character(len=:), allocatable, intent(out) :: out
         integer, intent(out) :: code
         logical, intent(in), optional :: verify
+        integer, intent(in), optional :: limit, grace
+        logical, intent(out), optional :: timed_out
         character(len=1024), allocatable :: cmd(:)
         character(len=256) :: runtime
-        character(len=8) :: limit
-        integer :: rn, rs
+        character(len=16) :: seconds, after
+        integer(int64) :: started, ended, rate
+        integer :: rn, rs, lim
         logical :: exists, full
 
+        if (present(timed_out)) timed_out = .false.
         full = .false.
         if (present(verify)) full = verify
-        limit = '3600'
+        lim = 3600
+        ! The full suite of a large code may take hours.
+        if (full) lim = 21600
+        if (present(limit)) lim = limit
+        write (seconds, '(i0)') lim
+        after = '30'
+        if (present(grace)) write (after, '(i0)') grace
         if (full) then
-            ! The full suite of a large code may take hours.
-            limit = '21600'
             inquire (file=work//'/.fortyard/verify', exist=exists)
             if (exists) then
                 cmd = [character(len=1024) :: './.fortyard/verify']
@@ -812,13 +828,28 @@ contains
                 cmd = [character(len=1024) :: './.fortyard/check']
             end if
         end if
-        cmd = [character(len=1024) :: 'timeout', trim(limit), cmd]
+        ! timeout puts the check in a process group of its own and signals the
+        ! whole group, so compilers and test programs end with it.
+        if (lim > 0) cmd = [character(len=1024) :: 'timeout', '-k', trim(after), trim(seconds), cmd]
         call get_environment_variable('XDG_RUNTIME_DIR', runtime, rn, rs)
         if (rs == 0 .and. len(proc_find('systemd-run')) > 0) cmd = [character(len=1024) :: &
             'systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', &
             'MemorySwapMax=0', cmd]
-        call proc_run([character(len=1024) :: 'sh', '-c', 'exec "$@" 2>&1', 'check', cmd], out, &
-            code, LOG_BYTES, dir=work)
+        call system_clock(started, rate)
+        ! A process the check started in a session of its own escapes the
+        ! group's signals; it is found by a mark in its environment and
+        ! killed once the check ended. The output goes through a file, so
+        ! such a process cannot hold the pipe open past the limit.
+        call proc_run([character(len=1024) :: 'sh', '-c', 'o=$(mktemp) || exit 125; '// &
+            'FORTYARD_CHECK="${FORTYARD_CHECK-}/$$/" "$@" > "$o" 2>&1; s=$?; '// &
+            'for i in 1 2 3 4 5; do p=$(grep -lzs -- "^FORTYARD_CHECK=.*/$$/" '// &
+            '/proc/[0-9]*/environ); [ -n "$p" ] || break; for f in $p; do f=${f#/proc/}; '// &
+            'kill -KILL "${f%/environ}" 2> /dev/null; done; done; '// &
+            'cat "$o"; rm -f "$o"; exit $s', 'check', cmd], out, code, LOG_BYTES, dir=work)
+        call system_clock(ended)
+        ! 124: timeout ended it with SIGTERM; 137: with SIGKILL after the grace.
+        if (present(timed_out)) timed_out = lim > 0 .and. (code == 124 .or. code == 137) .and. &
+            ended - started >= int(lim, int64)*rate
     end subroutine land_check
 
     function check_ref(ident) result(ref)

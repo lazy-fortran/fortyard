@@ -42,6 +42,7 @@ module fy_store
         store_bootstrap, &
         store_check_add, &
         store_check_claim, &
+        store_check_error, &
         store_check_finish, &
         store_check_get, &
         store_check_release, &
@@ -1041,7 +1042,8 @@ contains
     end subroutine store_job
 
     subroutine store_job_counts(db, names, counts, stat)
-        !! Per repository: running, queued, landed and failed in the last 24 hours.
+        !! Per repository: running, queued, landed and failed in the last 24
+        !! hours, and the runner checks it holds now.
         type(db_t), intent(in) :: db
         character(len=64), allocatable, intent(out) :: names(:)
         integer, allocatable, intent(out) :: counts(:, :)
@@ -1050,17 +1052,18 @@ contains
         character(len=64) :: nm
         integer :: n, k
 
-        allocate (names(0), counts(4, 0))
+        allocate (names(0), counts(5, 0))
         call db_prepare(db, "SELECT repo, sum(state = 'running'), sum(state = 'queued'),"// &
             " sum(state = 'landed' AND finished_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now',"// &
             " '-1 day')), sum(state = 'failed' AND finished_at >= strftime('%Y-%m-%dT%H:%M:%SZ',"// &
-            " 'now', '-1 day')) FROM landings GROUP BY repo ORDER BY repo;", st, stat)
+            " 'now', '-1 day')), (SELECT count(*) FROM checks c WHERE c.state = 'running' AND"// &
+            ' c.repo = landings.repo) FROM landings GROUP BY repo ORDER BY repo;', st, stat)
         if (stat /= SQLITE_OK) return
         do while (stmt_step(st) == SQLITE_ROW)
             n = size(names) + 1
             nm = stmt_text(st, 0)
             names = [names, nm]
-            counts = reshape([counts, [(int(stmt_int(st, k)), k = 1, 4)]], [4, n])
+            counts = reshape([counts, [(int(stmt_int(st, k)), k = 1, 5)]], [5, n])
         end do
         call stmt_finalize(st)
         stat = SQLITE_OK
@@ -1111,18 +1114,24 @@ contains
         call stmt_finalize(st)
     end subroutine store_check_add
 
-    subroutine store_check_claim(db, runner, id, repo, ref, found, kind)
-        !! Gives `runner` the oldest queued check it may take, landing checks
-        !! before verifications: one of a repository it checked last, or that
-        !! no runner checked yet, or one that has waited AFFINITY_SECONDS. A
-        !! repository so stays on the runner whose build tree and caches are
-        !! warm for it.
+    subroutine store_check_claim(db, runner, id, repo, ref, found, kind, limit)
+        !! Gives `runner` the queued check that shares the runners fairly:
+        !! landing checks before verifications, then the check of the
+        !! repository that holds the fewest running checks, then the oldest.
+        !! A check queued less than AFFINITY_SECONDS ago is left to the runner
+        !! that served its repository last while that runner is free, so the
+        !! build tree warm for it is used; a busy warm runner reserves nothing,
+        !! so no check waits behind another repository's check. One statement,
+        !! so concurrent claims never take the same check. `limit` is the
+        !! check's time limit in seconds (0: none), fixed at the claim: six
+        !! hours for a verification, else the repository's check_timeout.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: runner
         integer(int64), intent(out) :: id
         character(len=:), allocatable, intent(out) :: repo, ref
         logical, intent(out) :: found
         character(len=:), allocatable, intent(out), optional :: kind
+        integer, intent(out), optional :: limit
         type(stmt_t) :: st
         integer :: stat
 
@@ -1130,12 +1139,19 @@ contains
         id = 0
         repo = ''
         ref = ''
+        if (present(limit)) limit = 0
         call db_prepare(db, "UPDATE checks SET state = 'running', runner = ?1, claimed_at = "// &
-            NOW//" WHERE id = (SELECT c.id FROM checks c WHERE c.state = 'queued' AND"// &
-            ' (coalesce((SELECT p.runner FROM checks p WHERE p.repo = c.repo AND p.runner'// &
-            ' IS NOT NULL ORDER BY p.id DESC LIMIT 1), ?1) = ?1 OR c.created_at <='// &
-            " strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-"//AFFINITY_SECONDS//" seconds'))"// &
-            " ORDER BY c.kind = 'verify', c.id LIMIT 1) RETURNING id, repo, ref, kind;", st, stat)
+            NOW//", time_limit = CASE WHEN kind = 'verify' THEN 21600 ELSE coalesce((SELECT"// &
+            ' 60*policy_check_timeout FROM repos WHERE name = checks.repo), 3600) END'// &
+            " WHERE id = (SELECT c.id FROM checks c WHERE c.state = 'queued' AND NOT"// &
+            ' (c.created_at > strftime('//"'%Y-%m-%dT%H:%M:%SZ', 'now',"// &
+            " '-"//AFFINITY_SECONDS//" seconds') AND EXISTS (SELECT 1 FROM checks p WHERE p.id ="// &
+            ' (SELECT q.id FROM checks q WHERE q.repo = c.repo AND q.runner IS NOT NULL ORDER BY'// &
+            ' q.id DESC LIMIT 1) AND p.runner <> ?1 AND NOT EXISTS (SELECT 1 FROM checks b WHERE'// &
+            " b.state = 'running' AND b.runner = p.runner)))"// &
+            " ORDER BY c.kind = 'verify', (SELECT count(*) FROM checks r WHERE r.state ="// &
+            " 'running' AND r.repo = c.repo), c.id LIMIT 1) RETURNING id, repo, ref, kind,"// &
+            ' time_limit;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, runner, stat)
         if (stmt_step(st) == SQLITE_ROW) then
@@ -1143,6 +1159,7 @@ contains
             repo = stmt_text(st, 1)
             ref = stmt_text(st, 2)
             if (present(kind)) kind = stmt_text(st, 3)
+            if (present(limit)) limit = int(stmt_int(st, 4))
             found = .true.
         end if
         call stmt_finalize(st)
@@ -1157,8 +1174,9 @@ contains
         integer :: stat
 
         count = 0
-        call db_prepare(db, "UPDATE checks SET state = 'queued', runner = NULL, claimed_at = NULL"// &
-            " WHERE state = 'running' AND runner = ?1 RETURNING id;", st, stat)
+        call db_prepare(db, "UPDATE checks SET state = 'queued', runner = NULL, claimed_at = NULL,"// &
+            ' queued_at = '//NOW//" WHERE state = 'running' AND runner = ?1 RETURNING id;", st, &
+            stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, runner, stat)
         do while (stmt_step(st) == SQLITE_ROW)
@@ -1167,47 +1185,105 @@ contains
         call stmt_finalize(st)
     end subroutine store_check_release
 
-    subroutine store_check_finish(db, id, state, log, found)
-        !! Records the result of a running check: "passed" or "failed".
+    subroutine store_check_error(db, id, log, timeout, state, found, runner, lost_grace)
+        !! A running check ended without a verdict: its runner failed or was
+        !! lost, or with `timeout` the check reached its time limit. It is
+        !! queued again, except at its second timeout, which ends it in the
+        !! state "timeout". `log` is appended to its log; `state` is the new one.
+        !! With `runner`, only while that runner holds the check, so a runner
+        !! taken as lost cannot speak for a later claim. With `lost_grace`,
+        !! only when the claim is older than twice its time limit (a failure
+        !! is run again from an empty build directory) plus `lost_grace`
+        !! seconds: its runner is lost.
         type(db_t), intent(in) :: db
         integer(int64), intent(in) :: id
-        character(len=*), intent(in) :: state, log
+        character(len=*), intent(in) :: log
+        logical, intent(in) :: timeout
+        character(len=:), allocatable, intent(out) :: state
+        logical, intent(out) :: found
+        character(len=*), intent(in), optional :: runner
+        integer, intent(in), optional :: lost_grace
+        character(len=:), allocatable :: only
+        type(stmt_t) :: st
+        integer :: stat
+
+        found = .false.
+        state = ''
+        only = ''
+        if (present(runner)) only = ' AND runner = ?4'
+        if (present(lost_grace)) only = only//' AND coalesce(time_limit, 3600) > 0 AND'// &
+            " CAST(strftime('%s', 'now') - strftime('%s', claimed_at) AS INTEGER) >"// &
+            ' 2*coalesce(time_limit, 3600) + ?5'
+        ! SET reads the row as it was, so `timeouts` there is the count before.
+        call db_prepare(db, 'UPDATE checks SET timeouts = timeouts + ?2, log ='// &
+            " coalesce(log || char(10), '') || ?3, state = CASE WHEN ?2 = 1 AND timeouts >= 1"// &
+            " THEN 'timeout' ELSE 'queued' END, runner = CASE WHEN ?2 = 1 AND timeouts >= 1 THEN"// &
+            ' runner END, claimed_at = CASE WHEN ?2 = 1 AND timeouts >= 1 THEN claimed_at END,'// &
+            ' finished_at = CASE WHEN ?2 = 1 AND timeouts >= 1 THEN '//NOW//' END, queued_at ='// &
+            ' '//NOW//" WHERE id = ?1 AND state = 'running'"//only//' RETURNING state;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, id, stat)
+        call stmt_bind_int(st, 2, int(merge(1, 0, timeout), int64), stat)
+        call stmt_bind_text(st, 3, log, stat)
+        if (present(runner)) call stmt_bind_text(st, 4, runner, stat)
+        if (present(lost_grace)) call stmt_bind_int(st, 5, int(lost_grace, int64), stat)
+        if (stmt_step(st) == SQLITE_ROW) then
+            state = stmt_text(st, 0)
+            found = .true.
+        end if
+        call stmt_finalize(st)
+    end subroutine store_check_error
+
+    subroutine store_check_finish(db, id, runner, state, log, found)
+        !! Records the result of a check that `runner` holds: "passed" or
+        !! "failed". A runner whose claim was taken from it as lost finds
+        !! nothing. The log follows what earlier runner errors left in it.
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: id
+        character(len=*), intent(in) :: runner, state, log
         logical, intent(out) :: found
         type(stmt_t) :: st
         integer :: stat
 
         found = .false.
-        call db_prepare(db, 'UPDATE checks SET state = ?2, log = ?3, finished_at = '//NOW// &
-            " WHERE id = ?1 AND state = 'running' RETURNING id;", st, stat)
+        call db_prepare(db, "UPDATE checks SET state = ?2, log = coalesce(log || char(10), '')"// &
+            ' || ?3, finished_at = '//NOW//" WHERE id = ?1 AND state = 'running' AND runner = ?4"// &
+            ' RETURNING id;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, id, stat)
         call stmt_bind_text(st, 2, state, stat)
         call stmt_bind_text(st, 3, log, stat)
+        call stmt_bind_text(st, 4, runner, stat)
         found = stmt_step(st) == SQLITE_ROW
         call stmt_finalize(st)
     end subroutine store_check_finish
 
-    subroutine store_check_get(db, id, state, log, age)
-        !! State and log of a check, and seconds since it was queued or claimed.
+    subroutine store_check_get(db, id, state, log, age, limit)
+        !! State and log of a check, and seconds since it was queued, queued
+        !! again or claimed; `limit`, the time limit in seconds its last claim
+        !! was given (0: none).
         type(db_t), intent(in) :: db
         integer(int64), intent(in) :: id
         character(len=:), allocatable, intent(out) :: state, log
         integer, intent(out) :: age
+        integer, intent(out), optional :: limit
         type(stmt_t) :: st
         integer :: stat
 
         state = ''
         log = ''
         age = 0
+        if (present(limit)) limit = 0
         call db_prepare(db, "SELECT state, coalesce(log, ''), CAST(strftime('%s', 'now') -"// &
-            " strftime('%s', coalesce(claimed_at, created_at)) AS INTEGER) FROM checks"// &
-            ' WHERE id = ?1;', st, stat)
+            " strftime('%s', coalesce(claimed_at, queued_at, created_at)) AS INTEGER),"// &
+            ' coalesce(time_limit, 3600) FROM checks WHERE id = ?1;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, id, stat)
         if (stmt_step(st) == SQLITE_ROW) then
             state = stmt_text(st, 0)
             log = stmt_text(st, 1)
             age = int(stmt_int(st, 2))
+            if (present(limit)) limit = int(stmt_int(st, 3))
         end if
         call stmt_finalize(st)
     end subroutine store_check_get

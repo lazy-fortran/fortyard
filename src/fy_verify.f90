@@ -302,6 +302,13 @@ contains
         do
             call store_check_get(db, check, state, log, age)
             if (state == 'passed' .or. state == 'failed') exit
+            ! Ended at its time limit twice: no verdict, but nothing more to wait for.
+            if (state == 'timeout') then
+                state = 'failed'
+                log = 'Reason: timeout. The verification reached its time limit a second'// &
+                    ' time and was ended by the runner.'//new_line('a')//log
+                exit
+            end if
             if ((state == 'queued' .and. age > 21600) .or. (state == 'running' .and. age > 28800)) &
                 then
                 state = 'failed'

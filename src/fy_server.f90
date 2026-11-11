@@ -141,6 +141,7 @@ module fy_server
         store_account_find, &
         store_check_add, &
         store_check_claim, &
+        store_check_error, &
         store_check_finish, &
         store_check_get, &
         store_check_release, &
@@ -238,6 +239,9 @@ module fy_server
     type(db_t) :: lander_db
     !! Lander processes when runners check the landings.
     integer, parameter :: MAX_LANDERS = 4
+    !! Seconds past its check_timeout after which a check whose runner has
+    !! not reported is taken as lost.
+    integer, parameter :: LOST_GRACE = 300
     !! Seconds between fetches of a mirror.
     integer :: mirror_interval = 60
     !! Database and cookie of the page being composed (in critical fortui_render).
@@ -1729,15 +1733,19 @@ contains
 
     subroutine runner_check(repo, ref, passed, log)
         !! Queues a check of `ref` for a runner and sleeps until it reports. A
-        !! check no runner takes within an hour, or whose runner does not report
-        !! within two, fails.
+        !! check no runner takes within an hour fails. A check whose runner has
+        !! not reported for twice the time limit of its claim (a failure is
+        !! run again from an empty build directory) plus 5 minutes is taken
+        !! from that runner, lost, and queued again; a check that reached its
+        !! time limit twice fails with the reason timeout.
         character(len=*), intent(in) :: repo, ref
         logical, intent(out) :: passed
         character(len=:), allocatable, intent(out) :: log
         character(len=:), allocatable :: state
+        character(len=16) :: minutes
         integer(int64) :: id
-        integer :: stat, age, fd
-        logical :: changed
+        integer :: stat, age, fd, limit
+        logical :: changed, found
 
         passed = .false.
         if (.not. checks_mode_set()) then
@@ -1753,15 +1761,28 @@ contains
         end if
         call events_notify('checks')
         do
-            call store_check_get(lander_db, id, state, log, age)
+            call store_check_get(lander_db, id, state, log, age, limit)
             if (state == 'passed' .or. state == 'failed') exit
+            write (minutes, '(i0)') limit/60
+            if (state == 'timeout') then
+                log = 'Reason: timeout. The check reached its time limit (check_timeout '// &
+                    trim(minutes)//' minutes) a second time; the runner ended it, which is'// &
+                    ' no verdict on the change.'//new_line('a')//log
+                exit
+            end if
             if (state == 'queued' .and. age > 3600) then
                 log = 'No runner took the check within an hour.'
                 exit
             end if
-            if (state == 'running' .and. age > 7200) then
-                log = 'The runner did not report within two hours.'
-                exit
+            if (state == 'running' .and. limit > 0 .and. age > 2*limit + LOST_GRACE) then
+                call store_check_error(lander_db, id, 'Runner error: the runner did not report'// &
+                    ' within twice the time limit ('//trim(minutes)//' minutes) plus 5 minutes'// &
+                    ' and is taken as lost; the check is queued again.', .false., state, found, &
+                    lost_grace=LOST_GRACE)
+                if (found) then
+                    call events_notify('checks')
+                    cycle
+                end if
             end if
             ! Wakes on a runner's report; the timeout only enforces the limits above.
             changed = events_wait(fd, 'checks', 60000)
@@ -1775,19 +1796,24 @@ contains
     end function checks_mode_set
 
     subroutine checks_route(req, db, res)
-        !! POST /api/v1/checks/claim: the oldest queued check for the calling
-        !! runner (200 with {"id","repo","ref"}, or 204 when there is none).
-        !! POST /api/v1/checks/N/result {"passed":true|false,"log":"..."}.
+        !! POST /api/v1/checks/claim: the next queued check for the calling
+        !! runner (200 with {"id","repo","ref","kind","timeout"}, timeout in
+        !! seconds and 0 for none, or 204 when there is none).
+        !! POST /api/v1/checks/N/result {"passed":true|false,"log":"..."}, or
+        !! {"error":"timeout"|"runner","log":"..."} for a check that ended
+        !! without a verdict: it is queued again, at its second timeout it
+        !! ends in the state timeout. Only the runner that holds the check
+        !! reports it; a runner taken as lost gets 409.
         !! POST /api/v1/checks/release: the calling runner's running checks
         !! are queued again (it restarted).
         type(http_request_t), intent(in) :: req
         type(db_t), intent(in) :: db
         type(response_t), intent(inout) :: res
         type(token_identity_t) :: who
-        character(len=:), allocatable :: repo, ref, log, kind
-        character(len=24) :: num
+        character(len=:), allocatable :: repo, ref, log, kind, error, state
+        character(len=24) :: num, limit
         integer(int64) :: id
-        integer :: ios, k
+        integer :: ios, k, seconds
         logical :: found, ok
 
         if (.not. authenticated(req, db, who, res)) return
@@ -1805,7 +1831,7 @@ contains
             return
         end if
         if (req%path == '/api/v1/checks/claim') then
-            call store_check_claim(db, who%token_name, id, repo, ref, found, kind)
+            call store_check_claim(db, who%token_name, id, repo, ref, found, kind, seconds)
             if (.not. found) then
                 res%code = 204
                 res%body = ''
@@ -1813,8 +1839,9 @@ contains
             end if
             call events_notify('checks')
             write (num, '(i0)') id
+            write (limit, '(i0)') seconds
             res%body = '{"id":'//trim(num)//',"repo":"'//repo//'","ref":"'//ref//'","kind":"'// &
-                kind//'"}'
+                kind//'","timeout":'//trim(limit)//'}'
             return
         end if
         k = index(req%path, '/result')
@@ -1830,18 +1857,30 @@ contains
         ok = index(req%body, '"passed":true') > 0
         call json_extract_string(req%body, 'log', log, found)
         if (.not. found) log = ''
-        call store_check_finish(db, id, merge('passed', 'failed', ok), log, found)
+        call json_extract_string(req%body, 'error', error, found)
+        if (found) then
+            if (error /= 'timeout' .and. error /= 'runner') then
+                call fail(res, 400, 'error is timeout or runner')
+                return
+            end if
+            call store_check_error(db, id, log, error == 'timeout', state, found, &
+                runner=who%token_name)
+        else
+            state = merge('passed', 'failed', ok)
+            call store_check_finish(db, id, who%token_name, state, log, found)
+        end if
         if (.not. found) then
             call fail(res, 409, 'no running check with that number')
             return
         end if
         call events_notify('checks')
-        res%body = '{"recorded":true}'
+        res%body = '{"recorded":true,"state":"'//state//'"}'
     end subroutine checks_route
 
     subroutine jobs_route(req, db, res)
         !! GET /api/v1/jobs[?repo=NAME]: running and queued jobs, recent finished
-        !! ones and counts per repository. Pages learn of changes through
+        !! ones and counts per repository ("checks": the runner checks it holds
+        !! now). Pages learn of changes through
         !! /api/v1/events?topic=jobs.
         !! GET /api/v1/jobs/N: one job with its log.
         type(http_request_t), intent(in) :: req
@@ -1855,7 +1894,7 @@ contains
         character(len=:), allocatable :: repo, state
         character(len=24) :: num
         integer(int64) :: id
-        integer :: k, stat, ios, totals(4)
+        integer :: k, stat, ios, totals(5)
         logical :: found
 
         if (.not. authenticated(req, db, who, res)) return
@@ -1889,7 +1928,8 @@ contains
             if (k > 1) res%body = res%body//','
             res%body = res%body//'{"name":"'//trim(names(k))//'","running":'// &
                 itoa(counts(1, k))//',"queued":'//itoa(counts(2, k))//',"landed":'// &
-                itoa(counts(3, k))//',"failed":'//itoa(counts(4, k))//'}'
+                itoa(counts(3, k))//',"failed":'//itoa(counts(4, k))//',"checks":'// &
+                itoa(counts(5, k))//'}'
         end do
         res%body = res%body//'],"totals":{"running":'//itoa(totals(1))//',"queued":'// &
             itoa(totals(2))//',"landed":'//itoa(totals(3))//',"failed":'//itoa(totals(4))// &

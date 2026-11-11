@@ -151,12 +151,13 @@ contains
         character(len=*), intent(in) :: server, token, data_dir, claim
         logical, intent(in), optional :: remote
         character(len=:), allocatable :: repo, ref, out, body, work, id, kept, kind
+        character(len=16) :: minutes
         character(len=256) :: tmp
         ! Fixed length: gfortran overflows typed array constructors around
         ! deferred-length strings.
         character(len=1024) :: w, src, r
-        integer :: code, stat, n, s, e
-        logical :: found
+        integer :: code, stat, n, s, e, limit
+        logical :: found, timed_out
 
         call json_extract_string(claim, 'repo', repo, found)
         call json_extract_string(claim, 'ref', ref, found)
@@ -169,6 +170,18 @@ contains
             e = e + 1
         end do
         id = claim(s:e - 1)
+        ! Seconds, 0 for none; a server without the field gives the old hour.
+        limit = 3600
+        if (kind == 'verify') limit = 21600
+        s = index(claim, '"timeout":') + 10
+        if (s > 10) then
+            e = s
+            do while (e <= len(claim))
+                if (index('0123456789', claim(e:e)) == 0) exit
+                e = e + 1
+            end do
+            if (e > s) read (claim(s:e - 1), *) limit
+        end if
         call get_environment_variable('TMPDIR', tmp, n, stat)
         if (stat /= 0 .or. n == 0) tmp = '/tmp'
         ! One work tree per repository, kept between checks with its build
@@ -213,14 +226,24 @@ contains
             ! A failure is confirmed from an empty build directory before it
             ! is reported, so stale build state can never fail a landing.
             call proc_run([character(len=1024) :: 'touch', w], body, stat, 4096)
-            call land_check(work, out, code, verify=kind == 'verify')
+            call land_check(work, out, code, verify=kind == 'verify', limit=limit, &
+                timed_out=timed_out)
+            if (timed_out) then
+                call report_timeout()
+                return
+            end if
             if (code /= 0) then
                 inquire (file=work//'/build/.', exist=found)
                 if (found) then
                     kept = out
                     call proc_run([character(len=1024) :: 'rm', '-rf', trim(w)//'/build'], &
                         body, stat, 4096)
-                    call land_check(work, out, code, verify=kind == 'verify')
+                    call land_check(work, out, code, verify=kind == 'verify', limit=limit, &
+                        timed_out=timed_out)
+                    if (timed_out) then
+                        call report_timeout()
+                        return
+                    end if
                     out = 'With the kept build directory the check failed; it was rerun '// &
                         'from an empty build directory.'//new_line('a')// &
                         '--- with the kept build directory (end) ---'//new_line('a')// &
@@ -233,6 +256,21 @@ contains
         call client_request(server, 'POST', '/api/v1/checks/'//id//'/result', token, &
             '{"passed":'//merge('true ', 'false', code == 0)//',"log":"'// &
             json_escape_string(out)//'"}', code, body, stat)
+
+    contains
+
+        subroutine report_timeout()
+            !! An error, not a result: the server queues the check again, and
+            !! fails the landing with the reason timeout at the second one.
+            write (minutes, '(i0)') limit/60
+            out = 'The time limit ('//trim(minutes)//' min) ended the check: the runner'// &
+                ' stopped it and every process it started. A time limit is no verdict on the'// &
+                ' change; a second one fails the landing or verification with the reason timeout.'// &
+                new_line('a')//'--- output (end) ---'//new_line('a')//tail_text(out, 4000)
+            call client_request(server, 'POST', '/api/v1/checks/'//id//'/result', token, &
+                '{"error":"timeout","log":"'//json_escape_string(out)//'"}', code, body, stat)
+        end subroutine report_timeout
+
     end subroutine run_one
 
     subroutine expire_state(data_dir)

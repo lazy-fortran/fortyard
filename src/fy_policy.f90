@@ -13,6 +13,8 @@ module fy_policy
     !!   batch             1..BATCH_MAX             most landings in one candidate
     !!   unreviewed_limit  0 (no limit) or N        nothing is queued to land
     !!                     while N landed changes wait for a review
+    !!   check_timeout     0 (no limit) or minutes  a runner ends a check that
+    !!                     runs longer, without a verdict (CHECK_TIMEOUT_MAX)
     use, intrinsic :: iso_fortran_env, only: &
         int64
     use fx_json_build, only: &
@@ -66,15 +68,18 @@ module fy_policy
         policy_unreviewed
 
     integer, parameter, public :: BATCH_MAX = 64
+    !! A week, so that the limit in seconds fits an integer.
+    integer, parameter, public :: CHECK_TIMEOUT_MAX = 10080
     character(len=*), parameter, public :: POLICY_KEYS = &
         'tests=full|affected|none review=after|before bisect=on|off batch=1..64'// &
-        ' unreviewed_limit=N (0: no limit)'
+        ' unreviewed_limit=N (0: no limit) check_timeout=MINUTES (0: no limit)'
 
     type :: policy_t
         character(len=:), allocatable :: tests, review
         logical :: bisect = .true.
         integer :: batch = 8
         integer :: unreviewed_limit = 0
+        integer :: check_timeout = 60
     end type policy_t
 
     !! A landed change that still waits for a review: flagged for a person, or
@@ -98,7 +103,7 @@ contains
         p%review = 'after'
         if (present(found)) found = .false.
         call db_prepare(db, 'SELECT policy_tests, policy_review, policy_bisect, policy_batch,'// &
-            ' policy_unreviewed_limit FROM repos WHERE name = ?1;', st, stat)
+            ' policy_unreviewed_limit, policy_check_timeout FROM repos WHERE name = ?1;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, repo, stat)
         if (stmt_step(st) == SQLITE_ROW) then
@@ -107,6 +112,7 @@ contains
             p%bisect = stmt_int(st, 2) /= 0
             p%batch = int(stmt_int(st, 3))
             p%unreviewed_limit = int(stmt_int(st, 4))
+            p%check_timeout = int(stmt_int(st, 5))
             if (present(found)) found = .true.
         end if
         call stmt_finalize(st)
@@ -122,8 +128,8 @@ contains
 
         found = .false.
         call db_prepare(db, 'UPDATE repos SET policy_tests = ?2, policy_review = ?3,'// &
-            ' policy_bisect = ?4, policy_batch = ?5, policy_unreviewed_limit = ?6'// &
-            ' WHERE name = ?1 RETURNING id;', st, stat)
+            ' policy_bisect = ?4, policy_batch = ?5, policy_unreviewed_limit = ?6,'// &
+            ' policy_check_timeout = ?7 WHERE name = ?1 RETURNING id;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, repo, stat)
         call stmt_bind_text(st, 2, p%tests, stat)
@@ -131,6 +137,7 @@ contains
         call stmt_bind_int(st, 4, int(merge(1, 0, p%bisect), int64), stat)
         call stmt_bind_int(st, 5, int(p%batch, int64), stat)
         call stmt_bind_int(st, 6, int(p%unreviewed_limit, int64), stat)
+        call stmt_bind_int(st, 7, int(p%check_timeout, int64), stat)
         found = stmt_step(st) == SQLITE_ROW
         call stmt_finalize(st)
     end subroutine policy_put
@@ -175,6 +182,13 @@ contains
                 p%unreviewed_limit = n
             else
                 error = 'unreviewed_limit is 0 (no limit) or a positive number'
+            end if
+        case ('check_timeout')
+            n = number(value)
+            if (n >= 0 .and. n <= CHECK_TIMEOUT_MAX) then
+                p%check_timeout = n
+            else
+                error = 'check_timeout is 0 (no limit) or minutes up to 10080'
             end if
         case default
             error = 'no such setting: '//key//' ('//POLICY_KEYS//')'
@@ -235,7 +249,8 @@ contains
                     if (event%event_type == JSON_STRING) then
                         call policy_set(q, key, event%string_val, error)
                     else if (event%event_type == JSON_INTEGER .and. event%int64_valid .and. &
-                            (key == 'batch' .or. key == 'unreviewed_limit')) then
+                            (key == 'batch' .or. key == 'unreviewed_limit' .or. &
+                            key == 'check_timeout')) then
                         write (num, '(i0)') event%int64_val
                         call policy_set(q, key, trim(num), error)
                     else
@@ -260,7 +275,7 @@ contains
         pure logical function is_setting(name)
             character(len=*), intent(in) :: name
             is_setting = name == 'tests' .or. name == 'review' .or. name == 'bisect' .or. &
-                name == 'batch' .or. name == 'unreviewed_limit'
+                name == 'batch' .or. name == 'unreviewed_limit' .or. name == 'check_timeout'
         end function is_setting
     end subroutine policy_from_json
 
@@ -271,7 +286,8 @@ contains
 
         json = '{"name":"'//json_escape_string(repo)//'","tests":"'//p%tests//'","review":"'// &
             p%review//'","bisect":"'//trim(merge('on ', 'off', p%bisect))//'","batch":'// &
-            itoa(p%batch)//',"unreviewed_limit":'//itoa(p%unreviewed_limit)//'}'
+            itoa(p%batch)//',"unreviewed_limit":'//itoa(p%unreviewed_limit)//',"check_timeout":'// &
+            itoa(p%check_timeout)//'}'
     end function policy_json
 
     pure logical function policy_reviewed(c)

@@ -84,6 +84,21 @@ contains
         call migration_add(list, 'tokens-parent', &
             'ALTER TABLE tokens ADD COLUMN parent INTEGER;')
 
+        ! Runners shared fairly with a time limit per check: the minutes a
+        ! repository's check may run (0: no limit), how often a check ended at
+        ! that limit, when a check was queued again after a runner error, and
+        ! the limit in seconds its claim was given. The indexes serve the
+        ! claim, which counts each repository's running checks and finds the
+        ! runner that last served it.
+        call migration_add(list, 'checks-fair-share-timeout', &
+            'ALTER TABLE repos ADD COLUMN policy_check_timeout INTEGER NOT NULL DEFAULT 60;'// &
+            'ALTER TABLE checks ADD COLUMN timeouts INTEGER NOT NULL DEFAULT 0;'// &
+            'ALTER TABLE checks ADD COLUMN queued_at TEXT;'// &
+            'ALTER TABLE checks ADD COLUMN time_limit INTEGER;'// &
+            'CREATE INDEX checks_by_state_repo ON checks (state, repo);'// &
+            "CREATE INDEX checks_running ON checks (runner) WHERE state = 'running';"// &
+            'CREATE INDEX checks_served ON checks (repo, id) WHERE runner IS NOT NULL;')
+
     end subroutine migrations_registry
 
 end module fy_migrations

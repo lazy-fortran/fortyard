@@ -5,7 +5,9 @@ program test_store
         store_bootstrap, &
         store_check_add, &
         store_check_claim, &
+        store_check_error, &
         store_check_finish, &
+        store_check_get, &
         store_check_release, &
         store_open, &
         store_schema_version, &
@@ -13,6 +15,7 @@ program test_store
         store_token_create, &
         store_token_lookup, &
         token_identity_t
+    use fy_proc, only: proc_exit, proc_fork, proc_wait
     use, intrinsic :: iso_fortran_env, only: int64
     implicit none
 
@@ -78,13 +81,13 @@ program test_store
     call store_check_add(db, 'demo', 'refs/a', id, stat)
     call store_check_claim(db, 'r1', id, repo, ref, found)
     call check(found .and. repo == 'demo', 'the first check of a repository goes to any runner')
-    call store_check_finish(db, id, 'passed', '', found)
+    call store_check_finish(db, id, 'r1', 'passed', '', found)
     call store_check_add(db, 'demo', 'refs/b', id, stat)
     call store_check_claim(db, 'r2', id, repo, ref, found)
     call check(.not. found, 'another runner leaves a fresh check to the warm one')
     call store_check_claim(db, 'r1', id, repo, ref, found)
     call check(found .and. ref == 'refs/b', 'the warm runner takes it')
-    call store_check_finish(db, id, 'passed', '', found)
+    call store_check_finish(db, id, 'r1', 'passed', '', found)
     call store_check_add(db, 'demo', 'refs/c', id, stat)
     call db_exec(db, "UPDATE checks SET created_at = '2000-01-01T00:00:00Z' WHERE ref = 'refs/c';", &
         stat)
@@ -99,7 +102,199 @@ program test_store
     call check(found .and. ref == 'refs/c', 'the handed back check is taken again')
     call db_close(db)
 
+    call fair_share()
+    call errors_and_timeouts()
+    call concurrent_claims()
+    call claim_cost()
+
 contains
+
+    subroutine fresh(file)
+        character(len=*), intent(in) :: file
+        call execute_command_line('rm -f '//file//' '//file//'-wal '//file//'-shm')
+        call store_open(file, db, stat)
+        call check(stat == 0, 'a fresh store opens: '//file)
+    end subroutine fresh
+
+    subroutine fair_share()
+        !! Two runners and three repositories: while r1 runs a long check of
+        !! a, the free runner r2 takes b's check, then c's, before a's second,
+        !! although a's was queued first; a verification waits for them all.
+        integer(int64) :: long, mine
+        character(len=:), allocatable :: kind
+
+        call fresh('build/test_store_fair.db')
+        call store_check_add(db, 'a', 'refs/a1', long, stat)
+        call store_check_claim(db, 'r1', id, repo, ref, found)
+        call check(found .and. id == long, 'r1 takes a''s long check')
+        call store_check_add(db, 'd', 'refs/v', id, stat, kind='verify')
+        call store_check_add(db, 'a', 'refs/a2', id, stat)
+        call store_check_add(db, 'b', 'refs/b1', id, stat)
+        call store_check_add(db, 'c', 'refs/c1', id, stat)
+        call store_check_claim(db, 'r2', mine, repo, ref, found)
+        call check(found .and. ref == 'refs/b1', 'a repository holding no runner goes first: '//ref)
+        call store_check_finish(db, mine, 'r2', 'passed', '', found)
+        call store_check_claim(db, 'r2', mine, repo, ref, found)
+        call check(found .and. ref == 'refs/c1', 'then the next one holding none: '//ref)
+        call store_check_finish(db, mine, 'r2', 'passed', '', found)
+        call store_check_claim(db, 'r2', mine, repo, ref, found)
+        call check(found .and. ref == 'refs/a2', 'then a''s second, its warm runner being busy: '// &
+            ref)
+        call store_check_finish(db, mine, 'r2', 'passed', '', found)
+        call store_check_claim(db, 'r2', mine, repo, ref, found, kind)
+        call check(found .and. kind == 'verify', 'the verification comes last')
+        ! Equal holdings: the oldest check goes first.
+        call store_check_add(db, 'b', 'refs/b2', id, stat)
+        call store_check_add(db, 'c', 'refs/c2', id, stat)
+        call store_check_finish(db, long, 'r1', 'passed', '', found)
+        call store_check_claim(db, 'r3', id, repo, ref, found)
+        call check(found .and. ref == 'refs/b2', 'between equals the oldest: '//ref)
+        call db_close(db)
+    end subroutine fair_share
+
+    subroutine errors_and_timeouts()
+        !! A runner error queues the check again; so does its first timeout,
+        !! and the second ends it in the state timeout. The log keeps each.
+        !! Only the runner that holds a check reports it, and one is lost only
+        !! past twice the limit of its claim.
+        character(len=:), allocatable :: state, log
+        integer(int64) :: first
+        integer :: age, limit
+
+        call fresh('build/test_store_errors.db')
+        call store_check_add(db, 'a', 'refs/x', first, stat)
+        call store_check_claim(db, 'r1', id, repo, ref, found)
+        call store_check_error(db, id, 'runner lost', .false., state, found)
+        call check(found .and. state == 'queued', 'a runner error queues the check again')
+        call store_check_claim(db, 'r1', id, repo, ref, found)
+        call check(found .and. id == first, 'and it is taken again')
+        call store_check_error(db, id, 'first timeout', .true., state, found)
+        call check(found .and. state == 'queued', 'a first timeout queues it again')
+        call store_check_error(db, id, 'not running', .true., state, found)
+        call check(.not. found, 'only a running check takes an error')
+        call store_check_claim(db, 'r1', id, repo, ref, found)
+        call store_check_error(db, id, 'second timeout', .true., state, found)
+        call check(found .and. state == 'timeout', 'the second timeout ends it')
+        call store_check_get(db, id, state, log, age)
+        call check(state == 'timeout' .and. index(log, 'runner lost') > 0 .and. &
+            index(log, 'first timeout') > 0 .and. index(log, 'second timeout') > 0, &
+            'the log keeps every error: '//log)
+        call store_check_claim(db, 'r1', id, repo, ref, found)
+        call check(.not. found, 'a check ended by its time limit is not taken again')
+        ! A queued again check counts its age from then, not from its creation.
+        call store_check_add(db, 'a', 'refs/y', first, stat)
+        call db_exec(db, "UPDATE checks SET created_at = '2000-01-01T00:00:00Z' WHERE ref ="// &
+            " 'refs/y';", stat)
+        call store_check_claim(db, 'r1', id, repo, ref, found)
+        call store_check_error(db, id, 'runner lost', .false., state, found)
+        call store_check_get(db, id, state, log, age)
+        call check(state == 'queued' .and. age < 600, 'a check queued again is young again')
+        ! Only the runner that holds a check reports it.
+        call store_check_claim(db, 'r2', id, repo, ref, found, limit=limit)
+        call check(found .and. limit == 3600, 'a claim is given the limit of its repository')
+        call store_check_finish(db, id, 'r1', 'passed', 'late', found)
+        call check(.not. found, 'another runner''s result is refused')
+        call store_check_error(db, id, 'late', .true., state, found, runner='r1')
+        call check(.not. found, 'and so is another runner''s error')
+        ! A runner is lost only past twice the limit of its claim and the grace.
+        call store_check_error(db, id, 'lost', .false., state, found, lost_grace=300)
+        call check(.not. found, 'a runner within its limit is not lost')
+        call db_exec(db, "UPDATE checks SET claimed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now',"// &
+            " '-7400 seconds') WHERE ref = 'refs/y';", stat)
+        call store_check_error(db, id, 'lost', .false., state, found, lost_grace=300)
+        call check(.not. found, 'nor one that may still run the check a second time')
+        call db_exec(db, "UPDATE checks SET claimed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now',"// &
+            " '-7600 seconds') WHERE ref = 'refs/y';", stat)
+        call store_check_error(db, id, 'lost', .false., state, found, lost_grace=300)
+        call check(found .and. state == 'queued', 'a runner past that is lost')
+        call store_check_claim(db, 'r1', id, repo, ref, found)
+        call store_check_finish(db, id, 'r2', 'passed', 'late', found)
+        call check(.not. found, 'the lost runner''s late result is refused')
+        call store_check_finish(db, id, 'r1', 'passed', 'ok', found)
+        call check(found, 'the result of the runner that holds it counts')
+        call store_check_add(db, 'a', 'refs/v', first, stat, kind='verify')
+        call store_check_claim(db, 'r1', id, repo, ref, found, limit=limit)
+        call check(found .and. limit == 21600, 'a verification is given six hours')
+        call db_close(db)
+    end subroutine errors_and_timeouts
+
+    subroutine concurrent_claims()
+        !! Runner processes claiming at once never take the same check.
+        integer, parameter :: RUNNERS = 6, CHECKS = 300
+        character(len=*), parameter :: file = 'build/test_store_race.db'
+        integer :: pids(RUNNERS), k, u, ios, n, taken(CHECKS)
+        integer(int64) :: got
+        character(len=8) :: name
+
+        call fresh(file)
+        do k = 1, CHECKS
+            write (name, '(i0)') mod(k, 7)
+            call store_check_add(db, 'repo'//trim(name), 'refs/r', id, stat)
+        end do
+        call db_close(db)
+        do k = 1, RUNNERS
+            pids(k) = proc_fork()
+            if (pids(k) == 0) then
+                write (name, '(a,i0)') 'r', k
+                call store_open(file, db, stat)
+                open (newunit=u, file=file//'.'//trim(name), status='replace', action='write')
+                do
+                    call store_check_claim(db, trim(name), got, repo, ref, found)
+                    if (.not. found) exit
+                    write (u, '(i0)') got
+                end do
+                close (u)
+                call db_close(db)
+                call proc_exit(0)
+            end if
+        end do
+        do k = 1, RUNNERS
+            call proc_wait(pids(k), stat)
+            call check(stat == 0, 'a claiming process ends cleanly')
+        end do
+        taken = 0
+        do k = 1, RUNNERS
+            write (name, '(a,i0)') 'r', k
+            open (newunit=u, file=file//'.'//trim(name), status='old', action='read')
+            do
+                read (u, *, iostat=ios) n
+                if (ios /= 0) exit
+                taken(n) = taken(n) + 1
+            end do
+            close (u, status='delete')
+        end do
+        call check(all(taken == 1), 'each of the checks was taken exactly once')
+    end subroutine concurrent_claims
+
+    subroutine claim_cost()
+        !! The claim with 10 000 checks in the table: 9 000 finished, 1 000
+        !! queued across 50 repositories, 8 running. Prints the time per claim.
+        integer(int64) :: t0, t1, rate
+        integer :: k
+        character(len=8) :: name
+
+        call fresh('build/test_store_cost.db')
+        call db_exec(db, 'BEGIN;', stat)
+        do k = 1, 10000
+            write (name, '(i0)') mod(k, 50)
+            call store_check_add(db, 'repo'//trim(name), 'refs/r', id, stat)
+        end do
+        call db_exec(db, "UPDATE checks SET state = 'passed', runner = 'r' || (id % 8),"// &
+            " created_at = '2000-01-01T00:00:00Z' WHERE id <= 9000;"// &
+            "UPDATE checks SET state = 'running', runner = 'r' || id WHERE id > 9000 AND"// &
+            ' id <= 9008;', stat)
+        call db_exec(db, 'COMMIT;', stat)
+        call system_clock(t0, rate)
+        do k = 1, 100
+            write (name, '(a,i0)') 'q', k
+            call store_check_claim(db, trim(name), id, repo, ref, found)
+            call check(found, 'a claim among 10 000 checks finds one')
+        end do
+        call system_clock(t1)
+        write (*, '(a,f8.3,a)') 'claim with 10 000 checks: ', &
+            1000.0*real(t1 - t0)/real(rate)/100.0, ' ms per claim'
+        call db_close(db)
+    end subroutine claim_cost
 
     subroutine check(ok, what)
         logical, intent(in) :: ok
