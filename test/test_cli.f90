@@ -24,7 +24,10 @@ program test_cli
 
     sup = 0
     call getcwd(cwd)
-    call execute_command_line('rm -rf '//data//' '//work//' && mkdir -p '//data, exitstat=stat)
+    ! The repository exists from an earlier version of the server, with its hook.
+    call execute_command_line('rm -rf '//data//' '//work//' '//work//'-other && mkdir -p '//data// &
+        ' && git init -q --bare '//data//'/repos/demo.git && printf "#!/bin/sh\nexit 0\n" > '// &
+        data//'/repos/demo.git/hooks/pre-receive', exitstat=stat)
     call store_open(data//'/fortyard.db', db, stat)
     call store_bootstrap(db, admin, stat)
     call store_repo_add(db, 'demo', '', stat, mode='primary')
@@ -40,10 +43,13 @@ program test_cli
     end if
     call sock_close(lfd)
     do i = 1, 150
-        inquire (file=data//'/repos/demo.git/HEAD', exist=exists)
+        call execute_command_line('grep -q allow-large '//data// &
+            '/repos/demo.git/hooks/pre-receive', exitstat=stat)
+        exists = stat == 0
         if (exists) exit
         call proc_sleep_ms(100)
     end do
+    call check(exists, 'a server start replaces the hook of an existing repository')
     call execute_command_line('fy=$(ls -t build/fo/bin/fy build/fo/app/fy 2>/dev/null | '// &
         'head -1); echo $PWD/$fy > '//data//'/fy', exitstat=stat)
     fy = trim(read_line(data//'/fy'))
@@ -91,6 +97,36 @@ program test_cli
         '"fortyard","arguments":{"action":"changes","repo":"demo"}}}'' | '//env//fy//' mcp')
     call check(index(out, '\"changes\":[') > 0 .and. index(out, '"isError":false') > 0, &
         'fy mcp lists the changes of a repository: '//out)
+
+    ! fy push refuses a file over 1 MiB before it sends anything, unless
+    ! .fortyard/allow-large allows it.
+    call run('cd '//work//' && git checkout -q -b heavy FETCH_HEAD && head -c 2000000 '// &
+        '/dev/urandom > data.bin && '//git//'add data.bin && '//git//'commit -q -m Heavy && '// &
+        env//fy//' push')
+    call check(stat /= 0 .and. index(out, 'fy: not pushed, files over the size limit') > 0 .and. &
+        index(out, 'data.bin (2000000 bytes)') > 0, 'fy push names a file over 1 MiB: '//out)
+    call run('git --git-dir='//data//'/repos/demo.git rev-parse -q --verify refs/heads/heavy')
+    call check(stat /= 0, 'nothing of the refused push reached the server')
+    call run('cd '//work//' && printf "*.bin\n" > .fortyard/allow-large && '//git//'add -A && '// &
+        git//'commit -q -m "Allow it" && '//env//fy//' push')
+    call check(stat == 0 .and. index(out, 'change #') > 0, 'fy push sends an allowed file: '//out)
+
+    ! History the server already has is not held against a push, also where
+    ! main has moved on since: it once held a large file and allowed it.
+    call execute_command_line('cd '//work//' && git checkout -q -b old FETCH_HEAD && '// &
+        'head -c 2000000 /dev/urandom > old.bin && printf "*.bin\n" > .fortyard/allow-large'// &
+        ' && '//git//'add -A && '//git//'commit -q -m "Large and allowed" && '//git// &
+        'rm -q old.bin .fortyard/allow-large && '//git//'commit -q -m "Gone" && '// &
+        'FY_LANDING=1 '//git//'push -q '//trim(cwd)//'/'//data//'/repos/demo.git HEAD:main && '// &
+        git//'clone -q -b main '//trim(cwd)//'/'//data//'/repos/demo.git '//trim(cwd)//'/'//work// &
+        '-other && cd '//trim(cwd)//'/'//work//'-other && printf "on\n" > moved && '//git// &
+        'add moved && '//git//'commit -q -m "Main moves on" && FY_LANDING=1 '//git//'push -q '// &
+        'origin HEAD:main', exitstat=stat)
+    call check(stat == 0, 'main moves on past a large file that is gone again')
+    call run('cd '//work//' && git checkout -q -b behind && printf "more\n" >> README && '// &
+        git//'commit -q -am "Behind main" && '//env//fy//' push')
+    call check(stat == 0 .and. index(out, 'change #') > 0, &
+        'fy push from a checkout behind main sends what the server accepts: '//out)
 
     call proc_kill(sup, SIGTERM)
     call proc_wait(sup, stat)

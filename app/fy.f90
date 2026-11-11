@@ -8,6 +8,7 @@ program fy
     use fy_runner, only: runner_main
     use fy_client, only: client_request, config_t, config_load, config_save, client_set_proxy
     use fy_cli, only: cli_table, cli_field, cli_tail
+    use fy_land, only: land_push_check
     use fy_proc, only: proc_setenv, proc_sleep_ms
     use fy_posix, only: tcp_listen, activated_listen_fd, sock_bound_port
     use fy_server, only: server_supervise, server_set_web_dir, server_set_data_dir, &
@@ -93,6 +94,9 @@ contains
             '                      passed and follow it to the end (admin)', &
             '  land REPO BRANCH    land a branch that is already pushed', &
             '  push [BRANCH]       push HEAD to BRANCH, which opens or updates its change', &
+            '                      (push and land send no file over 1 MiB, or over the bytes', &
+            '                      in .fortyard/size-limit, that .fortyard/allow-large does', &
+            '                      not allow)', &
             '  change list [--all] open changes (--all: also landed and closed ones)', &
             '  change view N       a change with its versions, comments and landings', &
             '  change diff N [--version V] [--from W]', &
@@ -422,6 +426,7 @@ contains
         !! reach git through its environment, so no command line shows them.
         type(config_t), intent(in) :: cfg
         character(len=*), intent(in) :: repo, branch
+        character(len=:), allocatable :: remote, large
         integer :: stat
 
         call proc_setenv('GIT_TERMINAL_PROMPT', '0')
@@ -430,8 +435,17 @@ contains
         call proc_setenv('GIT_CONFIG_VALUE_0', 'Authorization: Bearer '//cfg%token)
         call proc_setenv('GIT_CONFIG_KEY_1', 'http.proxy')
         call proc_setenv('GIT_CONFIG_VALUE_1', cfg%proxy)
-        call execute_command_line('git push --quiet --force "'//cfg%server//'/'//repo// &
-            '.git" HEAD:refs/heads/'//branch, exitstat=stat)
+        remote = cfg%server//'/'//repo//'.git'
+        ! What the server would refuse is found before anything is sent.
+        call land_push_check(remote, large)
+        if (len_trim(large) > 0) then
+            call proc_setenv('GIT_CONFIG_COUNT', '0')
+            write (error_unit, '(a)') 'fy: not pushed, files over the size limit (allow them in '// &
+                '.fortyard/allow-large):', trim(large)
+            call quit(1)
+        end if
+        call execute_command_line('git push --quiet --force "'//remote//'" HEAD:refs/heads/'// &
+            branch, exitstat=stat)
         call proc_setenv('GIT_CONFIG_COUNT', '0')
         if (stat /= 0) then
             write (error_unit, '(a)') 'fy: pushing HEAD to '//repo//' '//branch//' failed'

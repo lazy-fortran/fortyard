@@ -241,6 +241,10 @@ contains
                         ! Due at once: fetch in the first round after a start.
                         last = [last, now - int(mirror_interval, int64) * rate]
                         k = size(names)
+                        ! A repository from before a change of the hook gets the new one.
+                        inquire (file=repo_path(repos(i)%name)//'/HEAD', exist=exists)
+                        if (exists .and. repos(i)%mode == 'primary') &
+                            call land_hook_install(repo_path(repos(i)%name), status)
                     end if
                     call system_clock(now, rate)
                     inquire (file=repo_path(repos(i)%name)//'/HEAD', exist=exists)

@@ -144,23 +144,52 @@ program test_git_http
     reply = get('/api/v1/repos/demo/log?ref=main')
     call check(index(reply, 'Remove README') == 0, 'main stays where it was')
 
-    ! Larger than git's 1 MiB post buffer: the body arrives in chunked encoding.
+    ! A push brings no file over 1 MiB, also not one a later commit removes
+    ! again, unless .fortyard/allow-large of the pushed commit allows it.
     call execute_command_line('head -c 3000000 /dev/urandom > '//work//'/big && '//git// &
         '-C '//work//' add big && '//git//'-C '//work//' commit -q -m "Large file" && '// &
+        git//'-C '//work//' rm -q --cached big && '//git//'-C '//work//' commit -q -m "Remove it"'// &
+        ' && ! '//git//'-C '//work//' push -q '//url//' HEAD:big 2> '//work//'-refused && '// &
+        'grep -q "Files over the size limit (allow them in .fortyard/allow-large):" '//work//'-refused'// &
+        ' && grep -q "big (3000000 bytes)" '//work//'-refused && ! git --git-dir='//data// &
+        '/repos/demo.git rev-parse -q --verify refs/heads/big', exitstat=stat)
+    call check(stat == 0, 'a push with a file over 1 MiB in its history is refused and names it')
+    ! Larger than git's 1 MiB post buffer: the body arrives in chunked encoding.
+    call execute_command_line('printf "b?g\n" > '//work//'/.fortyard/allow-large && '//git// &
+        '-C '//work//' add -A && '//git//'-C '//work//' commit -q -m "Allow it" && '// &
         git//'-C '//work//' push -q '//url//' HEAD:big && '//git//'-C '//work// &
         '-clone fetch -q origin big && '//git//'-C '//work//'-clone show FETCH_HEAD:big | '// &
         'cmp -s - '//work//'/big', exitstat=stat)
-    call check(stat == 0, 'a 3 MB push arrives intact and is fetched again')
-    ! A landing must not bring a file over 1 MiB onto main.
+    call check(stat == 0, 'an allowed 3 MB push arrives intact and is fetched again')
+    ! The same content under a second path that no pattern allows is still refused.
+    call execute_command_line('cp '//work//'/big '//work//'/copy && '//git//'-C '//work// &
+        ' add copy && '//git//'-C '//work//' commit -q -m "Copy" && ! '//git//'-C '//work// &
+        ' push -q '//url//' HEAD:two 2> '//work//'-refused && grep -q "copy (3000000 bytes)" '// &
+        work//'-refused && ! grep -q "big (" '//work//'-refused', exitstat=stat)
+    call check(stat == 0, 'an allowed large file is refused under a path that is not allowed')
+    ! The limit is the repository's own where .fortyard/size-limit gives one.
+    call execute_command_line(git//'-C '//work//' rm -q -f copy && printf "1000\n" > '//work// &
+        '/.fortyard/size-limit && head -c 2000 /dev/urandom > '//work//'/mid && '//git//'-C '// &
+        work//' add -A && '//git//'-C '//work//' commit -q --amend -m "Limit" && ! '//git// &
+        '-C '//work//' push -q '//url//' HEAD:two 2> '//work//'-refused && '// &
+        'grep -q "mid (2000 bytes)" '//work//'-refused', exitstat=stat)
+    call check(stat == 0, 'a push is held to the limit in .fortyard/size-limit')
+    ! A landing must not bring a file over the limit onto main either, here on a
+    ! branch that reached the repository past the check on receive.
     call execute_command_line(git//'-C '//work//'-clone fetch -q origin main && '//git//'-C '//work// &
-        '-clone checkout -q -B large origin/main && cp '//work//'/big '//work//'-clone/big && '// &
-        git//'-C '//work//'-clone add big && '//git//'-C '//work//'-clone commit -q -m Large && '// &
-        git//'-C '//work//'-clone push -q '//url//' HEAD:large', exitstat=stat)
+        '-clone checkout -q -B large origin/main && printf "x\n" > '//work//'-clone/small && '// &
+        git//'-C '//work//'-clone add small && '//git//'-C '//work//'-clone commit -q -m Large && '// &
+        git//'-C '//work//'-clone push -q '//url//' HEAD:large && cp '//work//'/big '//work//'/mid '// &
+        work//'-clone && cp '//work//'/.fortyard/size-limit '//work//'-clone/.fortyard && '// &
+        git//'-C '//work//'-clone add big mid .fortyard/size-limit && '//git//'-C '//work// &
+        '-clone commit -q --amend --no-edit && FY_LANDING=1 '//git//'-C '//work// &
+        '-clone push -q --force '//trim(cwd)//'/'//data//'/repos/demo.git HEAD:large', exitstat=stat)
+    call check(stat == 0, 'a branch with a large file is placed in the repository')
     reply = post('/api/v1/repos/demo/land', '{"branch":"large"}')
     call wait_landing(3, 'failed')
     reply = get('/api/v1/jobs/3')
-    call check(index(reply, 'Files over 1 MiB') > 0 .and. index(reply, 'big (3000000 bytes)') > 0, &
-        'a landing refuses a file over 1 MiB')
+    call check(index(reply, 'Files over the size limit') > 0 .and. index(reply, 'big (3000000 bytes)') > 0 &
+        .and. index(reply, 'mid (2000 bytes)') > 0, 'a landing refuses files over the size limit')
 
     ! A branch that is main plus one merge commit lands as that merge: the
     ! merged history stays an ancestor of main.

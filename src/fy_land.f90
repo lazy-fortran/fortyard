@@ -8,7 +8,7 @@ module fy_land
     implicit none
     private
 
-    public :: land_branch, land_candidate, land_hook_install, land_check, check_runner_i
+    public :: land_branch, land_candidate, land_hook_install, land_check, land_push_check, check_runner_i
 
     abstract interface
         subroutine check_runner_i(repo, ref, passed, log)
@@ -22,13 +22,49 @@ module fy_land
     integer, parameter :: LOG_BYTES = 65536
     !! git's empty tree, the base of a first landing.
     character(len=*), parameter :: EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
-    !! Prints each file the landing adds or changes that is over 1 MiB and not
-    !! matched by a pattern in .fortyard/allow-large (one shell pattern a line).
-    character(len=*), parameter :: SIZE_CHECK = 'git diff --name-only --diff-filter=AMR "$1" HEAD '// &
+    !! The repository's size limit in bytes, read into $lim from the text of
+    !! .fortyard/size-limit: 1 MiB unless that is a single number.
+    character(len=*), parameter :: SIZE_LIMIT = 'case "$lim" in ""|*[!0-9]*) lim=1048576;; esac; '
+    !! Prints each file the landing adds or changes that is over the size limit
+    !! and not matched by a pattern in .fortyard/allow-large (one shell pattern
+    !! a line).
+    character(len=*), parameter :: SIZE_CHECK = 'lim=$(cat .fortyard/size-limit 2>/dev/null); '// &
+        SIZE_LIMIT//'git diff --name-only --diff-filter=AMR "$1" HEAD '// &
         '| while IFS= read -r f; do s=$(git cat-file -s "HEAD:$f"); '// &
-        '[ "$s" -gt 1048576 ] || continue; ok=; if [ -f .fortyard/allow-large ]; then '// &
+        '[ "$s" -gt "$lim" ] || continue; ok=; if [ -f .fortyard/allow-large ]; then '// &
         'while IFS= read -r p; do case "$f" in $p) ok=1;; esac; done < .fortyard/allow-large; '// &
         'fi; [ -n "$ok" ] || echo "$f ($s bytes)"; done'
+    !! A shell function for a push: reads the pushed commits and prints each
+    !! file one of them adds or changes that is over the size limit and matched
+    !! by no pattern in .fortyard/allow-large, both taken from the pushed commit
+    !! $1. Every pushed commit counts, so a large file cannot enter history and
+    !! leave again, and every path does, so a copy under an allowed path does
+    !! not carry the file in. A merge counts for what differs from all it merges.
+    character(len=*), parameter :: SIZE_RECEIVE = 'large() { '// &
+        'allow=$(git cat-file -p "$1:.fortyard/allow-large" 2>/dev/null); '// &
+        'lim=$(git cat-file -p "$1:.fortyard/size-limit" 2>/dev/null); '//SIZE_LIMIT// &
+        'git -c core.quotePath=false diff-tree --stdin -r -c --root --no-abbrev | '// &
+        'awk -F"\t" ''/^:/ { n = split($1, a, " "); print a[n - 1], $2 }'' | sort -u | '// &
+        'git cat-file --batch-check="%(objecttype) %(objectsize) %(rest)" | '// &
+        'while read -r t s f; do [ "$t" = blob ] && [ "$s" -gt "$lim" ] || continue; '// &
+        'printf "%s\n" "$allow" | { while IFS= read -r p; do [ -n "$p" ] || continue; '// &
+        'case "$f" in $p) exit 0;; esac; done; exit 1; } || echo "$f ($s bytes)"; done; }'
+    !! What a push of HEAD to the remote $1 sends: the commits HEAD has beyond
+    !! the remote's refs. A ref whose commit is not here cannot be left out, so
+    !! before a refusal those are fetched and the push is looked at again:
+    !! history the remote already has is never held against the push. Nothing
+    !! when the remote does not answer; the push then fails by itself.
+    character(len=*), parameter :: PUSH_CHECK = SIZE_RECEIVE//'; '// &
+        'refs=$(git ls-remote "$1" 2>/dev/null) || exit 0; '// &
+        'sent() { { echo HEAD; printf "%s\n" "$refs" | while read -r h r; do '// &
+        'git cat-file -e "$h^{commit}" 2>/dev/null && echo "^$h"; done; } | '// &
+        'git rev-list --stdin | large HEAD; }; '// &
+        'out=$(sent); [ -n "$out" ] || exit 0; '// &
+        'miss=$(printf "%s\n" "$refs" | while read -r h r; do case "$r" in '// &
+        'refs/*"^{}") ;; refs/*) git cat-file -e "$h^{commit}" 2>/dev/null || echo "$r";; '// &
+        'esac; done); if [ -n "$miss" ]; then '// &
+        'git fetch -q --no-tags --no-write-fetch-head "$1" $miss 2>/dev/null || exit 0; '// &
+        'out=$(sent); fi; [ -z "$out" ] || printf "%s\n" "$out"'
     !! fo fmt --check on the Fortran files the landing adds or changes, except
     !! those matched by a pattern in .fortyard/format-exclude (one shell pattern
     !! a line), for code that follows another project's style.
@@ -43,30 +79,58 @@ contains
 
     subroutine land_hook_install(repo, stat)
         !! A pre-receive hook in the bare repository `repo`: pushes may create and
-        !! update any branch except `main`, which only landing changes.
+        !! update any branch except `main`, which only landing changes, and bring
+        !! no file over the size limit that .fortyard/allow-large does not allow.
         character(len=*), intent(in) :: repo
         integer, intent(out) :: stat
         character(len=:), allocatable :: out
         integer :: u, ios
 
-        open (newunit=u, file=repo//'/hooks/pre-receive', status='replace', action='write', &
+        ! Written aside and renamed, so a push in progress reads a whole hook.
+        open (newunit=u, file=repo//'/hooks/pre-receive.new', status='replace', action='write', &
             iostat=ios)
         stat = ios
         if (ios /= 0) return
         write (u, '(a)') '#!/bin/sh', &
-            '# Installed by fortyard: main changes only by landing (fy land).', &
+            '# Installed by fortyard: main changes only by landing (fy land), and a', &
+            '# push brings no file over the size limit outside .fortyard/allow-large.', &
             '[ -n "$FY_LANDING" ] && exit 0', &
+            SIZE_RECEIVE, &
+            'found=', &
             'while read old new ref; do', &
             '    if [ "$ref" = refs/heads/main ]; then', &
             '        echo "main changes only by landing: push a branch, then fy land" >&2', &
             '        exit 1', &
             '    fi', &
+            '    # A deleted ref brings nothing.', &
+            '    case "$new" in *[!0]*) ;; *) continue ;; esac', &
+            '    out=$(git rev-list "$new" --not --all </dev/null | large "$new")', &
+            '    [ -n "$out" ] || continue', &
+            '    [ -n "$found" ] || echo "Files over the size limit (allow them in .fortyard/allow-large):" >&2', &
+            '    echo "$out" >&2', &
+            '    found=1', &
             'done', &
+            '[ -z "$found" ] || exit 1', &
             'exit 0'
         close (u)
-        call proc_run([character(len=1024) :: 'chmod', '755', repo//'/hooks/pre-receive'], &
+        call proc_run([character(len=1024) :: 'chmod', '755', repo//'/hooks/pre-receive.new'], &
             out, stat, 1024)
+        if (stat == 0) call proc_run([character(len=1024) :: 'mv', '-f', &
+            repo//'/hooks/pre-receive.new', repo//'/hooks/pre-receive'], out, stat, 1024)
     end subroutine land_hook_install
+
+    subroutine land_push_check(remote, large)
+        !! What the receiving repository would refuse of a push of HEAD of the
+        !! checkout in the current directory to the git remote `remote`: `large`
+        !! lists the files over the size limit that .fortyard/allow-large does not allow,
+        !! and is empty when there are none.
+        character(len=*), intent(in) :: remote
+        character(len=:), allocatable, intent(out) :: large
+        integer :: status
+
+        call proc_run([character(len=2048) :: 'sh', '-c', PUSH_CHECK, 'push-check', remote], &
+            large, status, LOG_BYTES)
+    end subroutine land_push_check
 
     subroutine land_branch(repo, work, name, branch, ident, base_url, upstream, commit, log, ok, &
             runner, number, message_in, min_number, onto, hold, alone)
@@ -246,7 +310,7 @@ contains
         call run([character(len=1024) :: 'sh', '-c', SIZE_CHECK, 'size-check', &
             base], work)
         if (status /= 0 .or. len_trim(out) > 0) then
-            log = 'Files over 1 MiB (allow them in .fortyard/allow-large):'//new_line('a')//out
+            log = 'Files over the size limit (allow them in .fortyard/allow-large):'//new_line('a')//out
             return
         end if
         call run([character(len=1024) :: 'sh', '-c', FORMAT_CHECK, 'format-check', &
