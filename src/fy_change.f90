@@ -612,7 +612,8 @@ contains
                         repo//'#'//itoa(c%number), c%title)
                 end if
             end if
-            call change_get(db, repo, c%number, c, ok)
+            ! Not c%number: the change is reset on entry.
+            call change_get(db, repo, number, c, ok)
             answer = change_json(db, c)
         end subroutine edit
 

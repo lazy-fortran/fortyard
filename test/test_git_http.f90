@@ -23,6 +23,7 @@ program test_git_http
     character(len=:), allocatable :: admin, reader, url, base, reply
     character(len=4096) :: cwd
     integer :: lfd, port, stat, sup, i
+    integer(int64) :: t0, t1, rate
     logical :: exists
 
     sup = 0
@@ -116,6 +117,15 @@ program test_git_http
     call execute_command_line(git//'clone -q http://'//base//'/demo.git '//work// &
         '-anon >/dev/null 2>&1', exitstat=stat)
     call check(stat /= 0, 'nobody clones without a token')
+
+    ! Told a length it never gets, git's backend answers and then waits
+    ! forever, and the worker with it: only the body of a POST is passed on.
+    call system_clock(t0, rate)
+    reply = exchange('GET /demo.git/info/refs?service=git-upload-pack HTTP/1.1'//CRLF// &
+        'Authorization: Bearer '//reader//CRLF//'Content-Length: 5'//CRLF//CRLF//'hello')
+    call system_clock(t1)
+    call check(index(reply, 'HTTP/1.1 200') == 1 .and. index(reply, 'refs/heads/main') > 0 &
+        .and. t1 - t0 < 3*rate, 'a GET with a body is answered by git and ends')
 
     ! Writing needs the admin scope and a primary repository.
     call execute_command_line('printf "more\n" >> '//work//'-clone/README && '//git//'-C '// &

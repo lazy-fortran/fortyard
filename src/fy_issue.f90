@@ -169,6 +169,7 @@ contains
                 call exec_text3(db, 'UPDATE issues SET state = ?2, updated_at = '//NOW// &
                     ' WHERE id = ?1 AND ?3 = ?3;', it%id, s, '')
             end if
+            ! Not it%number: the issue is reset on entry.
             call issue_get(db, repo, number, it, ok)
             answer = issue_json(db, it)
         end subroutine edit

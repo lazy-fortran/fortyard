@@ -1,5 +1,6 @@
 module fy_http
     !! HTTP/1.1 requests and responses, one request per connection.
+    use, intrinsic :: iso_fortran_env, only: int64, compiler_options
     use fy_posix, only: sock_recv, sock_send_all
     implicit none
     private
@@ -7,7 +8,7 @@ module fy_http
     public :: http_request_t, http_parse_head, http_read_request
     public :: http_send_response, http_status_text, http_bearer_token, http_cookie
     public :: http_query_param, http_percent_decode, http_read_head, http_read_body
-    public :: http_basic_password
+    public :: http_basic_password, http_chunk_size, http_compiler_options
 
     integer, parameter, public :: HTTP_MAX_HEAD = 65536
     integer, parameter, public :: HTTP_MAX_BODY = 1048576
@@ -43,7 +44,8 @@ contains
         type(http_request_t), intent(out) :: req
         integer, intent(out) :: status
         logical, intent(in), optional :: streaming
-        integer :: eol, pos, sp1, sp2, colon, ios
+        integer :: eol, pos, sp1, sp2, colon
+        integer(int64) :: length
         character(len=:), allocatable :: line, target, name, value
 
         req%method = ''
@@ -87,7 +89,7 @@ contains
             colon = index(line, ':')
             if (colon < 2) return
             name = lower(line(1:colon - 1))
-            value = trim(adjustl(line(colon + 1:)))
+            value = unpadded(line(colon + 1:))
             select case (name)
             case ('authorization')
                 req%authorization = value
@@ -100,8 +102,13 @@ contains
             case ('if-none-match')
                 req%if_none_match = value
             case ('content-length')
-                read (value, *, iostat=ios) req%content_length
-                if (ios /= 0 .or. req%content_length < 0) return
+                length = decimal(value)
+                if (length < 0) return
+                if (length > huge(req%content_length)) then
+                    status = 413
+                    return
+                end if
+                req%content_length = int(length)
                 req%has_length = .true.
             case ('transfer-encoding')
                 if (lower(value) /= 'chunked') then
@@ -194,6 +201,66 @@ contains
         if (len(req%body) > req%content_length) req%body = req%body(1:req%content_length)
         status = 0
     end subroutine http_read_body
+
+    pure function unpadded(s) result(r)
+        !! `s` without the blanks and tabs around it, HTTP's optional whitespace.
+        character(len=*), intent(in) :: s
+        character(len=:), allocatable :: r
+        character(len=*), parameter :: OWS = ' '//achar(9)
+        integer :: first, last
+
+        first = verify(s, OWS)
+        last = verify(s, OWS, back=.true.)
+        if (first == 0) then
+            r = ''
+        else
+            r = s(first:last)
+        end if
+    end function unpadded
+
+    pure function http_compiler_options() result(options)
+        !! The compiler options of the parsing modules, to show that a build
+        !! keeps their runtime checks.
+        character(len=:), allocatable :: options
+
+        options = compiler_options()
+    end function http_compiler_options
+
+    pure function decimal(s) result(n)
+        !! Value of a string of decimal digits, at most huge(0) + 1, or -1 when
+        !! it is anything else. A list-directed read also takes "/", "2*7" or
+        !! "1,2" and leaves overflow to the runtime library.
+        character(len=*), intent(in) :: s
+        integer(int64) :: n
+        integer :: i
+
+        n = -1
+        if (len(s) == 0 .or. verify(s, '0123456789') /= 0) return
+        n = 0
+        do i = 1, len(s)
+            n = min(10*n + iachar(s(i:i)) - 48, int(huge(0), int64) + 1)
+        end do
+    end function decimal
+
+    pure function http_chunk_size(field) result(n)
+        !! Size of a chunk from the hexadecimal field of its size line, or -1
+        !! when the field is malformed or larger than a default integer.
+        character(len=*), intent(in) :: field
+        integer :: n
+        integer(int64) :: v
+        integer :: i, digit
+
+        n = -1
+        ! Eight digits keep the value far inside 64 bits while it is summed.
+        if (len(field) < 1 .or. len(field) > 8) return
+        v = 0
+        do i = 1, len(field)
+            digit = index('0123456789abcdef', lower(field(i:i))) - 1
+            if (digit < 0) return
+            v = 16*v + digit
+        end do
+        if (v <= huge(n)) n = int(v)
+    end function http_chunk_size
 
     function http_basic_password(req) result(password)
         !! The password of HTTP Basic authorization, or empty; git sends an

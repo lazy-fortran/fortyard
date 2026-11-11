@@ -2,13 +2,13 @@ module fy_git_http
     !! Git's smart HTTP protocol (clone, fetch, push) through `git http-backend`
     !! as a CGI program. Request and response bodies are passed through in
     !! blocks, so a large clone or push needs no more memory than a small one.
-    use fy_http, only: http_request_t, http_status_text
+    use fy_http, only: http_request_t, http_status_text, http_chunk_size
     use fy_posix, only: sock_recv, sock_send_all
     use fy_proc, only: proc_spawn, proc_find, proc_exit_status, fd_read, fd_write_all, fd_close
     implicit none
     private
 
-    public :: git_http_route, git_http_serve
+    public :: git_http_route, git_http_serve, git_http_copy_chunked
 
     character(len=2), parameter :: CRLF = achar(13)//achar(10)
     !! Largest request body passed on (a push), in bytes.
@@ -89,7 +89,9 @@ contains
         if (len(req%git_protocol) > 0) call add('GIT_PROTOCOL='//req%git_protocol)
         if (len(req%content_encoding) > 0) &
             call add('HTTP_CONTENT_ENCODING='//req%content_encoding)
-        if (req%has_length) then
+        ! Only a POST body is passed on; the backend waits forever for a
+        ! length it was told and never gets.
+        if (req%has_length .and. req%method == 'POST') then
             write (num, '(i0)') req%content_length
             call add('CONTENT_LENGTH='//trim(num))
         end if
@@ -103,7 +105,7 @@ contains
         if (pid < 0) return
         if (req%method == 'POST') then
             if (req%chunked) then
-                call copy_chunked(fd, rest, to_child, stat)
+                call git_http_copy_chunked(fd, rest, to_child, stat)
             else
                 call copy_length(fd, rest, req%content_length, to_child, stat)
             end if
@@ -148,7 +150,7 @@ contains
         end do
     end subroutine copy_length
 
-    subroutine copy_chunked(fd, rest, out, stat)
+    subroutine git_http_copy_chunked(fd, rest, out, stat)
         !! Decodes a chunked body from the socket and passes its data to `out`,
         !! up to MAX_PUSH bytes.
         integer, intent(in) :: fd, out
@@ -156,7 +158,7 @@ contains
         integer, intent(out) :: stat
         character(len=:), allocatable :: pend
         character(len=65536) :: buf
-        integer :: eol, csize, n, total, semi, ios
+        integer :: eol, csize, n, total, semi
 
         pend = rest
         total = 0
@@ -171,16 +173,16 @@ contains
             end do
             semi = index(pend(1:eol - 1), ';')
             if (semi == 0) semi = eol
-            if (semi == 1 .or. verify(pend(1:semi - 1), '0123456789abcdefABCDEF') /= 0) return
-            read (pend(1:semi - 1), '(z16)', iostat=ios) csize
-            if (ios /= 0 .or. csize < 0) return
+            csize = http_chunk_size(pend(1:semi - 1))
+            if (csize < 0) return
             pend = pend(eol + 2:)
             if (csize == 0) then
                 stat = 0
                 return
             end if
+            ! Compared before adding: the sum of two sizes can pass huge(total).
+            if (csize > MAX_PUSH - total) return
             total = total + csize
-            if (total > MAX_PUSH) return
             ! Chunk data, then its CRLF.
             do while (csize > 0)
                 if (len(pend) == 0) then
@@ -196,6 +198,7 @@ contains
             do while (len(pend) < 2)
                 if (.not. more()) return
             end do
+            if (pend(1:2) /= CRLF) return
             pend = pend(3:)
         end do
 
@@ -207,7 +210,7 @@ contains
             if (more) pend = pend//buf(1:n)
         end function more
 
-    end subroutine copy_chunked
+    end subroutine git_http_copy_chunked
 
     subroutine relay(from, fd, stat)
         !! Turns the CGI program's header block into an HTTP status line and

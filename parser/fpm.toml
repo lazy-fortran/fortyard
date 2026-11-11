@@ -1,0 +1,18 @@
+name = "fy_parser"
+version = "0.1.0"
+license = "proprietary"
+author = "Christopher Albert"
+maintainer = "albert@tugraz.at"
+description = "fortyard's parsers of request bytes, with what they are built on"
+
+# The flags of a package reach its own sources only, in every profile: the
+# release build keeps the bounds checks on here and nowhere else.
+[build]
+auto-executables = false
+auto-tests = false
+flags = ["-fcheck=bounds"]
+
+[fortran]
+implicit-typing = false
+implicit-external = false
+source-form = "free"
