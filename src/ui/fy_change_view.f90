@@ -479,7 +479,6 @@ contains
     subroutine item_view(admin, narrow)
         logical, intent(in) :: admin, narrow
         character(len=:), allocatable :: base_path
-        logical :: submitted
         integer :: k
 
         if (.not. item_loaded) then
@@ -557,8 +556,8 @@ contains
 
         call row_begin(GAP, id="commentrow")
         if (text_input("comment", comment_input, placeholder="Add a comment", &
-            submitted=submitted, size=BODY)) continue
-        if ((button("send", "Comment", height=ROW_H, size=BODY) .or. submitted) .and. &
+            size=BODY, lines=4)) continue
+        if (button("send", "Comment", height=ROW_H, size=BODY) .and. &
             len_trim(comment_input) > 0) call fetch_start(action_req, 'POST', item_of// &
             '/comments', '{"body":"'//json_escape_string(trim(comment_input))//'"}')
         call row_end()
@@ -632,9 +631,10 @@ contains
         logical :: submitted
 
         call text("New issue", size=TITLE, style=UI_HEADING, id="title")
-        if (text_input("newtitle", new_title, placeholder="Title", size=BODY)) continue
+        if (text_input("newtitle", new_title, placeholder="Title", submitted=submitted, &
+            size=BODY)) continue
         if (text_input("newbody", new_body, placeholder="What happened, and what should", &
-            submitted=submitted, size=BODY)) continue
+            size=BODY, lines=8)) continue
         if ((button("create", "Open issue", height=ROW_H, size=BODY) .or. submitted) .and. &
             len_trim(new_title) > 0) call fetch_start(action_req, 'POST', '/api/v1/repos/'// &
             url_encode(repo)//'/issues', '{"title":"'//json_escape_string(trim(new_title))// &

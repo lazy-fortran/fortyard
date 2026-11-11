@@ -297,6 +297,8 @@ try {
   await until(hasText('Why it matters for the study.'), 'the change page');
   check(await path() === '/work/-/changes/1', 'a change has its own page with its description');
   await click('[data-id$="/comment"]');
+  check(await evaluate(`document.querySelector('[data-id$="/comment"]').tagName`) === 'TEXTAREA',
+    'the comment field takes several lines');
   await type('Looks right.');
   await click('[data-id$="/send"]');
   await until(hasText('Looks right.'), 'the comment shown');
