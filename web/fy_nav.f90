@@ -9,12 +9,14 @@ module fy_nav
 
     public :: &
         nav_assign, &
+        nav_at_end, &
         nav_base, &
         nav_copy, &
         nav_location, &
         nav_popped, &
         nav_pref, &
         nav_push, &
+        nav_scroll_end, &
         nav_set_pref, &
         nav_title
 
@@ -34,8 +36,10 @@ module fy_nav
     end interface
 
     ! What fy_nav_call and fy_nav_get do.
-    integer(c_int), parameter :: DO_PUSH = 1, DO_TITLE = 2, DO_ASSIGN = 3, DO_PREF = 4, DO_COPY = 5
-    integer(c_int), parameter :: GET_LOCATION = 1, GET_POPPED = 2, GET_COOKIE = 3, GET_BASE = 4
+    integer(c_int), parameter :: DO_PUSH = 1, DO_TITLE = 2, DO_ASSIGN = 3, DO_PREF = 4, DO_COPY = 5, &
+        DO_SCROLL_END = 6
+    integer(c_int), parameter :: GET_LOCATION = 1, GET_POPPED = 2, GET_COOKIE = 3, GET_BASE = 4, &
+        GET_AT_END = 5
 
 contains
 
@@ -93,6 +97,16 @@ contains
         character(len=*), intent(in) :: text
         call js_call(DO_COPY, text, len(text, c_int), text, 0_c_int)
     end subroutine nav_copy
+
+    logical function nav_at_end()
+        !! Whether the reader is at the end of the page.
+        nav_at_end = len(get(GET_AT_END, '')) > 0
+    end function nav_at_end
+
+    subroutine nav_scroll_end()
+        !! Scrolls to the end of the page once the frame is drawn.
+        call js_call(DO_SCROLL_END, ' ', 0_c_int, ' ', 0_c_int)
+    end subroutine nav_scroll_end
 
     function get(what, name) result(s)
         integer(c_int), intent(in) :: what

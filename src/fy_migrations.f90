@@ -137,6 +137,10 @@ contains
         call migration_add(list, 'landings-urgent-sealed', &
             'ALTER TABLE landings ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0;'// &
             'ALTER TABLE landings ADD COLUMN sealed INTEGER NOT NULL DEFAULT 0;')
+        ! Each append to the live log of a check announces it to the pages of
+        ! the jobs that share the check.
+        call migration_add(list, 'landings-by-check-id', &
+            'CREATE INDEX landings_by_check ON landings (check_id);')
 
     end subroutine migrations_registry
 

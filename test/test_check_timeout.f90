@@ -1,8 +1,48 @@
+module test_check_timeout_live
+    !! A live log as the server keeps one: the bytes a running check wrote,
+    !! copied from its output file each time it is announced.
+    use, intrinsic :: iso_fortran_env, only: int64
+    implicit none
+    character(len=:), allocatable :: live_log, first_told, live_path
+    integer :: told = 0
+
+contains
+
+    subroutine live_sink(path, used)
+        character(len=*), intent(in) :: path
+        integer(int64), intent(out) :: used
+        character(len=:), allocatable :: bytes
+        integer(int64) :: have
+        integer :: u, ios
+
+        if (.not. allocated(live_log)) live_log = ''
+        live_path = path
+        told = told + 1
+        used = len(live_log, int64)
+        inquire (file=path, size=have)
+        if (have > used) then
+            open (newunit=u, file=path, status='old', access='stream', form='unformatted', &
+                action='read', iostat=ios)
+            if (ios == 0) then
+                allocate (character(len=int(have - used)) :: bytes)
+                read (u, pos=used + 1, iostat=ios) bytes
+                close (u)
+                if (ios == 0) live_log = live_log//bytes
+            end if
+        end if
+        used = len(live_log, int64)
+        if (told == 1) first_told = live_log
+    end subroutine live_sink
+
+end module test_check_timeout_live
+
 program test_check_timeout
     !! The time limit of a check (policy check_timeout). The limit ends the
     !! check's whole process group, also a child that ignores SIGTERM, and
     !! leaves no process behind, also none that left the check's session. A
-    !! check that reached it is queued again once; the second timeout fails
+    !! check whose output is sent while it runs is ended by the limit too, and
+    !! its live log keeps what it wrote before. A check without a limit ends
+    !! with the process that runs it. A check that reached it is queued again once; the second timeout fails
     !! the landing with the reason timeout. A check whose runner has not
     !! reported for twice its limit plus 5 minutes is taken from it and queued
     !! again, and that runner's late result is refused. Here the test acts as
@@ -10,7 +50,8 @@ program test_check_timeout
     !! test_check_timeout_slow has a runner end a check at a one-minute limit.
     use, intrinsic :: iso_fortran_env, only: int64
     use fy_events, only: events_notify
-    use fy_land, only: land_check
+    use fy_land, only: land_check, land_set_live
+    use test_check_timeout_live, only: first_told, live_log, live_path, live_sink, told
     use fy_policy, only: policy_get, policy_put, policy_t
     use fy_posix, only: &
         sock_bound_port, &
@@ -20,7 +61,8 @@ program test_check_timeout
         sock_set_timeouts, &
         tcp_connect, &
         tcp_listen
-    use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, SIGTERM, proc_setenv
+    use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, SIGKILL, SIGTERM, &
+        proc_setenv
     use fy_server, only: server_supervise, server_set_data_dir, server_set_checks
     use fy_sqlite, only: db_t, db_close, db_exec
     use fy_store, only: store_open, store_bootstrap, store_repo_add, store_token_create
@@ -36,6 +78,7 @@ program test_check_timeout
     type(policy_t) :: policy
     character(len=:), allocatable :: admin, manual, other, base, url, reply, out, id
     character(len=16) :: num
+    character(len=4096) :: cwd
     integer :: lfd, port, stat, sup, run, i, code
     integer(int64) :: t0, t1, rate
     logical :: exists, timed_out, found
@@ -92,6 +135,53 @@ program test_check_timeout
     call execute_command_line('d=$(cat '//group//'/daemon) && test -n "$d" && for i in $(seq 300); '// &
         'do ps -o stat= -p "$d" | grep -qv Z || exit 0; sleep 0.1; done; exit 1', exitstat=stat)
     call check(stat == 0, 'the daemon it left is gone')
+
+    ! A check whose output is sent while it runs: what it wrote reaches the
+    ! live log before the limit, the limit ends it as any other, and the live
+    ! log and its output keep what it wrote; the output file is removed.
+    call execute_command_line('printf ''#!/bin/sh\necho before the limit\nsleep 300\n'' > '// &
+        group//'/.fortyard/check', exitstat=stat)
+    call land_set_live(live_sink)
+    call system_clock(t0, rate)
+    call land_check(group, out, code, limit=3, timed_out=timed_out, grace=1)
+    call system_clock(t1)
+    call land_set_live()
+    call check(timed_out .and. t1 - t0 < 120*rate, 'a check that sends its output is ended '// &
+        'by its time limit: '//out)
+    call check(told >= 2 .and. index(first_told, 'before the limit') == 1, &
+        'its output was sent while it ran: '//first_told)
+    call check(live_log == 'before the limit'//new_line('a') .and. &
+        index(out, 'before the limit') == 1, 'its live log and its output keep what it wrote: '// &
+        live_log)
+    inquire (file=live_path, exist=exists)
+    call check(.not. exists, 'its output file is removed: '//live_path)
+
+    ! Without a time limit, a check still ends with the runner or lander that
+    ! started it, also a process it left in the background: here a child of
+    ! the test runs the check and is killed.
+    call execute_command_line('printf ''#!/bin/sh\nsleep 300 &\necho $! > grandchild\n'// &
+        'while :; do echo tick; sleep 0.2; done\n'' > '//group//'/.fortyard/check && rm -f '// &
+        group//'/grandchild', exitstat=stat)
+    call getcwd(cwd)
+    run = proc_fork()
+    if (run == 0) then
+        call proc_setenv('TMPDIR', trim(cwd)//'/'//group)
+        call land_check(group, out, code, limit=0)
+        call proc_exit(0)
+    end if
+    do i = 1, 300
+        inquire (file=group//'/grandchild', size=t0)
+        if (t0 > 0) exit
+        call proc_sleep_ms(100)
+    end do
+    call check(t0 > 0, 'the check without a time limit runs')
+    call proc_kill(run, SIGKILL)
+    call proc_wait(run, stat)
+    run = 0
+    call execute_command_line('c=$(cat '//group//'/grandchild) && test -n "$c" && for i in '// &
+        '$(seq 300); do ps -o stat= -p "$c" | grep -qv Z || exit 0; sleep 0.1; done; exit 1', &
+        exitstat=stat)
+    call check(stat == 0, 'a check without a time limit ends with the process that ran it')
 
     call execute_command_line('rm -rf '//data//' '//work//' && mkdir -p '//data, exitstat=stat)
     call store_open(data//'/fortyard.db', db, stat)

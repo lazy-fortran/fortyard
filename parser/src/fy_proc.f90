@@ -24,6 +24,8 @@ module fy_proc
         proc_setenv, &
         proc_sleep_ms, &
         proc_spawn, &
+        proc_start, &
+        proc_try_wait, &
         proc_wait, &
         proc_wait_any
 
@@ -384,6 +386,72 @@ contains
         to_child = int(inp(2))
         from_child = int(outp(1))
     end subroutine proc_spawn
+
+    subroutine proc_start(argv, outfile, pid, dir)
+        !! Starts argv(1) with the arguments argv(2:), found on PATH, without
+        !! waiting: standard output and error go to the file `outfile`, which
+        !! is created empty, standard input is /dev/null. pid < 0 when it could
+        !! not start; proc_try_wait or proc_exit_status collect it.
+        character(len=*), intent(in) :: argv(:), outfile
+        integer, intent(out) :: pid
+        character(len=*), intent(in), optional :: dir
+        character(kind=c_char), allocatable, target :: strings(:), cdir(:), cout(:)
+        character(kind=c_char), target :: devnull(10)
+        type(c_ptr), allocatable, target :: ptrs(:)
+        integer(c_int) :: rc, nullfd, outfd
+        integer :: u, ios, parent
+
+        pid = -1
+        ! Created here, so the child only opens it.
+        open (newunit=u, file=outfile, status='replace', action='write', iostat=ios)
+        if (ios /= 0) return
+        close (u)
+        call c_vector(argv, strings, ptrs)
+        call c_strings(outfile, cout)
+        if (present(dir)) call c_strings(dir, cdir)
+        devnull = transfer('/dev/null'//c_null_char, devnull)
+        parent = int(c_getpid())
+        pid = proc_fork()
+        if (pid /= 0) return
+        ! The output goes to a file, not a pipe, so no SIGPIPE would end a
+        ! check whose caller is gone; a timeout(1) it starts passes the signal
+        ! on to the check's whole process group. Without the signal (macOS)
+        ! the check's watcher ends the group.
+        if (c_set_pdeathsig(int(SIGTERM, c_int)) == 0 .and. int(c_getppid()) /= parent) &
+            call c_exit_now(127_c_int)
+        nullfd = c_open(devnull, 0_c_int)
+        outfd = c_open(cout, 1_c_int)
+        if (outfd < 0) call c_exit_now(127_c_int)
+        rc = c_dup2(nullfd, 0_c_int)
+        rc = c_dup2(outfd, 1_c_int)
+        rc = c_dup2(outfd, 2_c_int)
+        if (allocated(cdir)) then
+            if (c_chdir(c_loc(cdir)) /= 0) call c_exit_now(127_c_int)
+        end if
+        rc = c_execvp(ptrs(1), ptrs)
+        call c_exit_now(127_c_int)
+    end subroutine proc_start
+
+    subroutine proc_try_wait(pid, done, status)
+        !! Whether child `pid` has ended, without waiting; then `status` is its
+        !! exit code, or 128 + the signal that ended it.
+        integer, intent(in) :: pid
+        logical, intent(out) :: done
+        integer, intent(out) :: status
+        integer(c_int) :: st, rc
+        integer(c_int), parameter :: WNOHANG = 1
+
+        st = 0
+        status = -1
+        rc = c_waitpid(int(pid, c_int), st, WNOHANG)
+        done = rc == pid .or. rc < 0
+        if (rc /= pid) return
+        if (iand(st, 127) == 0) then
+            status = iand(ishft(st, -8), 255)
+        else
+            status = 128 + iand(st, 127)
+        end if
+    end subroutine proc_try_wait
 
     integer function proc_exit_status(pid) result(status)
         !! Waits for `pid`: its exit code, or 128 + the signal that ended it.

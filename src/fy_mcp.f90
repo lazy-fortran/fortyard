@@ -74,7 +74,7 @@ module fy_mcp
         'landings', 'Recent landings of a repository', 'repo', &
     ! jobs
         'jobs', 'Running, waiting and recent jobs with their changes', 'repo? kind? state?', &
-        'job', 'A job: its state, change, checks and the end of its log', 'id lines?', &
+        'job', 'A job: its state, change, checks and the end of its log', 'id lines? offset?', &
         'stats', 'Queue numbers of the last 1, 7 (default) or 30 days', 'repo? days?', &
         'verify', 'Queue a verification of main with the full suite (admin)', 'repo']
     integer, parameter :: N_TOOLS = size(TOOL_LINES) / 3
@@ -275,6 +275,8 @@ contains
         case ('id'); json = number_arg('Job id')
         case ('kind'); json = text_arg('landing, test or verify')
         case ('lines'); json = number_arg('Lines from the end of the log, 40 by default')
+        case ('offset'); json = number_arg('Byte offset in the log: the log text from there, '// &
+                'while the job runs the live log; the answer names the next offset')
         case default; json = '{"type":"string"}'
         end select
 
@@ -326,7 +328,7 @@ contains
             case ('review', 'attention')
                 found = verify(value, 'abcdefghijklmnopqrstuvwxyz-') == 0
             case ('branch'); if (len(value) > 0) found = repo_ref_ok(value)
-            case ('days', 'number', 'id', 'lines', 'version', 'from')
+            case ('days', 'number', 'id', 'lines', 'offset', 'version', 'from')
                 found = found .and. verify(value, '0123456789') == 0
             case ('state')
                 ! The server answers a state it does not know with an empty list.
@@ -362,7 +364,10 @@ contains
             value = argument(message, 'state')
             if (len(value) > 0) path = path//merge('&', '?', index(path, '?') > 0)//'state='// &
                 value
-        case ('job'); path = '/api/v1/jobs/'//argument(message, 'id')
+        case ('job')
+            path = '/api/v1/jobs/'//argument(message, 'id')
+            value = argument(message, 'offset')
+            if (len(value) > 0) path = path//'/log?from='//value
         case ('landings'); path = '/api/v1/repos/'//repo//'/landings'
         case ('stats')
             path = '/api/v1/stats?repo='//repo
@@ -435,6 +440,21 @@ contains
         if (stat /= 0) text = '{"error":"server not reachable"}'
         is_error = stat /= 0 .or. code /= expect
         if (tool /= 'job' .or. is_error) return
+        if (len(argument(message, 'offset')) > 0) then
+            ! New log text from the offset on, and where to ask next.
+            body = text
+            text = 'job '//argument(message, 'id')//' '//cli_field(body, 'state')//', '
+            if (cli_field(body, 'live') == 'true') then
+                text = text//'live log'
+            else
+                text = text//'stored log'
+            end if
+            text = text//' bytes '//cli_field(body, 'from')//' to '//cli_field(body, 'next')// &
+                ' of '//cli_field(body, 'length')//'; next offset '//cli_field(body, 'next')
+            if (cli_field(body, 'ended') == 'true') text = text//'; the job has ended'
+            text = text//new_line('a')//cli_field(body, 'text')
+            return
+        end if
         ! A whole log would crowd out the rest of an agent's context.
         lines = 40
         value = argument(message, 'lines')

@@ -11,6 +11,7 @@ module fy_events
     private
 
     public :: &
+        events_forget, &
         events_notify, &
         events_set_dir, &
         events_stream, &
@@ -87,10 +88,21 @@ contains
         close (u)
     end subroutine events_notify
 
+    subroutine events_forget(topic)
+        !! Removes the file of a topic that no longer changes, such as the
+        !! live log of a job that ended.
+        character(len=*), intent(in) :: topic
+        integer :: u, ios
+        if (.not. allocated(dir)) return
+        open (newunit=u, file=dir//'/'//topic, status='old', iostat=ios)
+        if (ios == 0) close (u, status='delete')
+    end subroutine events_forget
+
     subroutine events_stream(fd, topic)
-        !! A server-sent event stream on socket `fd`: one event at once (the
-        !! page loads its state), then one each time `topic` changes, until the
-        !! client goes away.
+        !! A server-sent event stream on socket `fd`: one event per topic at
+        !! once (the page loads its state), then one each time a topic changes,
+        !! until the client goes away. `topic` names one topic or several,
+        !! separated by commas; each event is named by its topic.
         integer, intent(in) :: fd
         character(len=*), intent(in) :: topic
         character(len=2), parameter :: CRLF = achar(13)//achar(10)
@@ -100,11 +112,11 @@ contains
         integer(c_int) :: ino, wd, rc
         integer(c_intptr_t) :: got
         integer :: stat
+        character(len=:), allocatable :: msg
 
         call sock_send_all(fd, 'HTTP/1.1 200 OK'//CRLF//'Content-Type: text/event-stream'//CRLF// &
             'Cache-Control: no-store'//CRLF//'X-Accel-Buffering: no'//CRLF// &
-            'Connection: close'//CRLF//CRLF//'retry: 2000'//LF//LF// &
-            'event: '//topic//LF//'data: now'//LF//LF, stat)
+            'Connection: close'//CRLF//CRLF//'retry: 2000'//LF//LF//each('now'), stat)
         if (stat /= 0 .or. .not. allocated(dir)) return
         ino = c_inotify_init1(IN_CLOEXEC)
         if (ino < 0) return
@@ -128,12 +140,39 @@ contains
             if (fds(1)%revents /= 0) then
                 got = c_read(ino, buf, int(size(buf), c_size_t))
                 if (got <= 0) exit
-                if (.not. names(buf(1:got), topic)) cycle
-                call sock_send_all(fd, 'event: '//topic//LF//'data: changed'//LF//LF, stat)
+                msg = each('changed', buf(1:got))
+                if (len(msg) == 0) cycle
+                call sock_send_all(fd, msg, stat)
                 if (stat /= 0) exit
             end if
         end do
         rc = c_close(ino)
+
+    contains
+
+        function each(data, bytes) result(s)
+            !! An event for every topic, or with `bytes` (inotify records) for
+            !! each topic they name.
+            character(len=*), intent(in) :: data
+            character(kind=c_char), intent(in), optional :: bytes(:)
+            character(len=:), allocatable :: s
+            integer :: a, b
+
+            s = ''
+            a = 1
+            do while (a <= len(topic))
+                b = index(topic(a:), ',')
+                if (b == 0) b = len(topic) - a + 2
+                if (present(bytes)) then
+                    if (names(bytes, topic(a:a + b - 2))) s = s//'event: '//topic(a:a + b - 2)// &
+                        LF//'data: '//data//LF//LF
+                else
+                    s = s//'event: '//topic(a:a + b - 2)//LF//'data: '//data//LF//LF
+                end if
+                a = a + b
+            end do
+        end function each
+
     end subroutine events_stream
 
     integer function events_watch_open() result(fd)

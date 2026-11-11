@@ -18,6 +18,7 @@ module fy_verify
         change_get, &
         change_t
     use fy_events, only: &
+        events_forget, &
         events_notify, &
         events_wait, &
         events_watch_open
@@ -25,6 +26,9 @@ module fy_verify
         issue_comment, &
         issue_open, &
         issue_set_state
+    use fy_live, only: &
+        live_outcome, &
+        live_remove
     use fy_policy, only: &
         policy_get, &
         policy_t
@@ -342,15 +346,15 @@ contains
                 k = j
                 if (one == 'timeout') then
                     ! Ended at its time limit twice: no verdict, but nothing more to wait for.
-                    text = 'Reason: timeout. The verification reached its time limit a second'// &
-                        ' time and was ended by the runner.'//new_line('a')//text
+                    text = live_outcome(text, 'Reason: timeout. The verification reached its'// &
+                        ' time limit a second time and was ended by the runner.')
                 else if (one == 'lost') then
                     text = 'No runner reported a result.'
                 end if
                 state = 'failed'
                 log = text
-                if (size(checks) > 1) log = 'On the runner class '//trim(classes(j))//':'// &
-                    new_line('a')//log
+                if (size(checks) > 1) log = live_outcome(log, 'On the runner class '// &
+                    trim(classes(j))//'.')
             end do
             if (.not. waiting) exit
             changed = events_wait(fd, 'checks', 60000)
@@ -359,6 +363,13 @@ contains
             'refs/fortyard/verify/'//trim(num)], out, status)
         call exec(db, 'UPDATE landings SET state = ?2, log = ?3, finished_at = '//NOW// &
             ' WHERE id = ?1;', id, state, log)
+        ! The job keeps its stored log only.
+        do j = 1, size(checks)
+            write (num, '(i0)') checks(j)
+            call live_remove('check-'//trim(num))
+        end do
+        write (num, '(i0)') id
+        call events_forget('log-'//trim(num))
         call events_notify('jobs')
         write (error_unit, '(a)') 'fy: verification '//trim(num)//' of '//repo//' at '// &
             commit(1:min(12, len(commit)))//' '//state

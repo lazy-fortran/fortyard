@@ -6,6 +6,8 @@ module fy_store
         int8
     use fx_hash, only: &
         sha256_string
+    use fy_live, only: &
+        LIVE_EARLIER
     use fy_migrations, only: &
         migration_t, &
         migrations_registry
@@ -47,6 +49,8 @@ module fy_store
         store_check_error, &
         store_check_finish, &
         store_check_get, &
+        store_check_holder, &
+        store_check_jobs, &
         store_check_release, &
         store_job, &
         store_job_checks, &
@@ -161,6 +165,11 @@ module fy_store
     end type check_t
 
     character(len=*), parameter :: NOW = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+    !! A check's log with the new text ?3 first, as the live log of its last
+    !! attempt had it, and what earlier attempts left after it.
+    character(len=*), parameter :: LOG_FIRST = "?3 || CASE WHEN coalesce(log, '') = '' THEN ''"// &
+        " ELSE CASE WHEN ?3 = '' OR substr(?3, -1) = char(10) THEN '' ELSE char(10) END || '"// &
+        LIVE_EARLIER//"' || char(10) || log END"
     !! How long a check waits for the runner that checked its repository last.
     character(len=*), parameter :: AFFINITY_SECONDS = '20'
     !! A job with the number and title of its change and its place among the
@@ -1516,7 +1525,8 @@ contains
         !! A running check ended without a verdict: its runner failed or was
         !! lost, or with `timeout` the check reached its time limit. It is
         !! queued again, except at its second timeout, which ends it in the
-        !! state "timeout". `log` is appended to its log; `state` is the new one.
+        !! state "timeout". `log` goes before its log (LOG_FIRST); `state` is
+        !! the new one.
         !! With `runner`, only while that runner holds the check, so a runner
         !! taken as lost cannot speak for a later claim. With `lost_grace`,
         !! only when the claim is older than twice its time limit (a failure
@@ -1542,8 +1552,8 @@ contains
             " CAST(strftime('%s', 'now') - strftime('%s', claimed_at) AS INTEGER) >"// &
             ' 2*coalesce(time_limit, 3600) + ?5'
         ! SET reads the row as it was, so `timeouts` there is the count before.
-        call db_prepare(db, 'UPDATE checks SET timeouts = timeouts + ?2, log ='// &
-            " coalesce(log || char(10), '') || ?3, state = CASE WHEN ?2 = 1 AND timeouts >= 1"// &
+        call db_prepare(db, 'UPDATE checks SET timeouts = timeouts + ?2, log = '// &
+            LOG_FIRST//', state = CASE WHEN ?2 = 1 AND timeouts >= 1'// &
             " THEN 'timeout' ELSE 'queued' END, runner = CASE WHEN ?2 = 1 AND timeouts >= 1 THEN"// &
             ' runner END, claimed_at = CASE WHEN ?2 = 1 AND timeouts >= 1 THEN claimed_at END,'// &
             ' finished_at = CASE WHEN ?2 = 1 AND timeouts >= 1 THEN '//NOW//' END, queued_at ='// &
@@ -1564,7 +1574,7 @@ contains
     subroutine store_check_finish(db, id, runner, state, log, found)
         !! Records the result of a check that `runner` holds: "passed" or
         !! "failed". A runner whose claim was taken from it as lost finds
-        !! nothing. The log follows what earlier runner errors left in it.
+        !! nothing. `log` goes before what earlier attempts left in its log.
         type(db_t), intent(in) :: db
         integer(int64), intent(in) :: id
         character(len=*), intent(in) :: runner, state, log
@@ -1573,8 +1583,8 @@ contains
         integer :: stat
 
         found = .false.
-        call db_prepare(db, "UPDATE checks SET state = ?2, log = coalesce(log || char(10), '')"// &
-            ' || ?3, finished_at = '//NOW//" WHERE id = ?1 AND state = 'running' AND runner = ?4"// &
+        call db_prepare(db, 'UPDATE checks SET state = ?2, log = '//LOG_FIRST// &
+            ', finished_at = '//NOW//" WHERE id = ?1 AND state = 'running' AND runner = ?4"// &
             ' RETURNING id;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, id, stat)
@@ -1614,6 +1624,50 @@ contains
         end if
         call stmt_finalize(st)
     end subroutine store_check_get
+
+    subroutine store_check_holder(db, id, runner, found)
+        !! The runner that holds check `id` while it runs; found is false when
+        !! the check does not run.
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: id
+        character(len=:), allocatable, intent(out) :: runner
+        logical, intent(out) :: found
+        type(stmt_t) :: st
+        integer :: stat
+
+        runner = ''
+        found = .false.
+        call db_prepare(db, "SELECT coalesce(runner, '') FROM checks WHERE id = ?1 AND"// &
+            " state = 'running';", st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, id, stat)
+        if (stmt_step(st) == SQLITE_ROW) then
+            runner = stmt_text(st, 0)
+            found = .true.
+        end if
+        call stmt_finalize(st)
+    end subroutine store_check_holder
+
+    subroutine store_check_jobs(db, id, jobs)
+        !! The jobs that check `id` decides: the one whose number ends its ref,
+        !! and the members of a candidate that share the check.
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: id
+        integer(int64), allocatable, intent(out) :: jobs(:)
+        type(stmt_t) :: st
+        integer :: stat
+
+        allocate (jobs(0))
+        call db_prepare(db, "SELECT CAST(substr(ref, length(rtrim(ref, '0123456789')) + 1)"// &
+            ' AS INTEGER) FROM checks WHERE id = ?1 UNION SELECT id FROM landings'// &
+            ' WHERE check_id = ?1;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, id, stat)
+        do while (stmt_step(st) == SQLITE_ROW)
+            if (stmt_int(st, 0) > 0) jobs = [jobs, stmt_int(st, 0)]
+        end do
+        call stmt_finalize(st)
+    end subroutine store_check_jobs
 
     subroutine store_release_add(db, repo, version, commit, notes, uploader, stat)
         !! Opens release `version` of `repo`; its file is uploaded next.

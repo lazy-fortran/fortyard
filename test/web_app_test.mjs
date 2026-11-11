@@ -722,8 +722,88 @@ try {
   await load('/jobs/' + third);
   const logLines = `JSON.stringify([...document.querySelectorAll('[data-box="joblog"] > .fui')].map((e) => e.textContent))`;
   const ssrLines = await evaluate(logLines);
-  check(await adopted() && ssrLines === await evaluate(logLines) && JSON.parse(ssrLines).includes('    2  one'),
+  check(await adopted() && ssrLines === await evaluate(logLines) && JSON.parse(ssrLines).includes('    1  one'),
     'a log line that ends in CR LF is the same from the server and in the application, without the CR');
+  // A check that writes a line, waits for a gate, writes another and the start
+  // of a UTF-8 character, waits for a second gate, writes the rest of it and
+  // 2997 more lines, writes a line every 0.2 s until a third gate and then a
+  // last line: its lines appear on the open job page while it runs.
+  const liveTitle = 'Show the log of a running check';
+  wg('fetch', '-q', `http://x:${admin}@127.0.0.1:${port}${base}/work.git`, 'main');
+  wg('checkout', '-q', '-b', 'live', 'FETCH_HEAD');
+  const gate = (n) => join(data, 'gate' + n);
+  writeFileSync(join(wt, '.fortyard', 'check'), `#!/bin/sh\necho "first line"\nwhile [ ! -f ${gate(1)} ]; do sleep 0.05; done\n` +
+    `echo "second line"\nprintf 'third line \\342\\234'\nwhile [ ! -f ${gate(2)} ]; do sleep 0.05; done\nprintf '\\223\\n'\n` +
+    `seq 4 3000 | sed 's/^/line /'\nwhile [ ! -f ${gate(3)} ]; do echo tick; sleep 0.2; done\necho "last line"\n`, { mode: 0o755 });
+  wg('add', '-A');
+  wg('commit', '-q', '-m', liveTitle);
+  wg('push', '-q', `http://x:${admin}@127.0.0.1:${port}${base}/work.git`, 'HEAD:live');
+  const liveChanges = await (await fetch(url + 'api/v1/repos/work/changes', { headers: tokenAuth })).json();
+  const liveChange = liveChanges.changes.find((c) => c.title === liveTitle).number;
+  const fourth = (await (await fetch(url + `api/v1/repos/work/changes/${liveChange}/land`,
+    { method: 'POST', headers: tokenAuth, body: '{}' })).json()).landing;
+  const logRows = `[...document.querySelectorAll('[data-box="joblog"] > .fui')]`;
+  const logText = `${logRows}.map((e) => e.textContent).join('\\n')`;
+  const lineText = (n) => `(document.getElementById('L${n}') || {}).textContent || ''`;
+  const waitFor = async (expr) => {
+    for (let i = 0; i < 400; i++) {
+      if (await evaluate(expr)) return true;
+      await sleep(50);
+    }
+    return false;
+  };
+  const fetchesOf = (part) => `performance.getEntriesByType('resource').filter((e) => e.name.includes(${JSON.stringify(part)})).length`;
+  for (let i = 0; i < 400; i++) {
+    const log = await (await fetch(url + `api/v1/jobs/${fourth}/log`, { headers: tokenAuth })).json();
+    if (log.live && log.text.includes('first line')) break;
+    await sleep(50);
+  }
+  await load('/jobs/' + fourth);
+  check(await waitFor(`${logText}.endsWith('    1  first line')`) && await jobState(fourth) === 'running' &&
+    await evaluate(hasText('· live')) && await evaluate(`!!document.getElementById('L1')`),
+    'the page of a running job shows the lines its check wrote so far, each with its address');
+  await load('/jobs?repo=work');
+  check(await waitFor(`[...document.querySelectorAll('[data-box="row-j${fourth}"] .fui')].some((e) => e.textContent === 'first line')`),
+    'the jobs list shows the last line of a running job');
+  await load('/jobs/' + fourth);
+  await until(`window.Module && typeof Module._fortui_web_step === 'function'`, 'WebAssembly running');
+  await evaluate(`performance.setResourceTimingBufferSize(100000)`);
+  writeFileSync(gate(1), '');
+  check(await waitFor(`${logText}.endsWith('    3  third line')`) && await jobState(fourth) === 'running',
+    'lines the check writes later appear on the open page while the check still runs: ' +
+    JSON.stringify((await evaluate(logText)).slice(-80)));
+  // The log ends inside a character: the page asks for more only when the
+  // log grows again, not in a loop.
+  const asked = await evaluate(fetchesOf(`/jobs/${fourth}/log`));
+  const askedAt = Date.now();
+  await waitFor(`performance.now() - ${await evaluate('performance.now()')} > 1500`);
+  const askedMore = await evaluate(fetchesOf(`/jobs/${fourth}/log`)) - asked;
+  check(askedMore <= 1 + Math.floor((Date.now() - askedAt) / 2000),
+    `the page does not ask in a loop while the log ends inside a character (${askedMore} requests)`);
+  writeFileSync(gate(2), '');
+  check(await waitFor(`${lineText(3000)}.endsWith('line 3000') && ${lineText(3)}.endsWith('third line ✓')`),
+    'a long log keeps each line at its address, the first and the newest lines');
+  const rows = await evaluate(`${logRows}.length`);
+  check(rows <= 510 && await evaluate(`${logText}.includes('are left out here')`) && await evaluate(`!document.getElementById('L1500')`),
+    `the page keeps the first and the last lines of a long log, not all of them (${rows} rows)`);
+  // Each line the check writes reaches the jobs list at most once in 5 s.
+  await load('/jobs?repo=work');
+  await until(`window.Module && typeof Module._fortui_web_step === 'function'`, 'WebAssembly running');
+  await evaluate(`performance.setResourceTimingBufferSize(100000)`);
+  await waitFor(`[...document.querySelectorAll('[data-box="row-j${fourth}"] .fui')].some((e) => e.textContent === 'tick')`);
+  await waitFor(`${fetchesOf('/api/v1/jobs?')} >= 1`);
+  const jobsAsked = await evaluate(fetchesOf('/api/v1/jobs?'));
+  const listedAt = Date.now();
+  await sleep(8000);
+  const listedMore = await evaluate(fetchesOf('/api/v1/jobs?')) - jobsAsked;
+  check(listedMore <= 1 + Math.floor((Date.now() - listedAt) / 5000),
+    `a check that writes all the time makes the jobs list ask at most every 5 s (${listedMore} requests in 8 s)`);
+  await load('/jobs/' + fourth);
+  writeFileSync(gate(3), '');
+  check(await waitFor(`${logText}.includes('last line') && !${hasText('· live')}`) &&
+    await jobState(fourth) === 'landed' && await evaluate(`${lineText(3000)}.endsWith('line 3000')`) &&
+    await evaluate(`${lineText(2)}.endsWith('second line')`),
+    'when the job ends the page shows its stored log, its lines at the addresses they had');
   // A filter the server refuses matches no job, from the server and in the application.
   await load('/jobs?kind=bogus');
   check(await evaluate(hasText('No jobs match.')) && await adopted() && await evaluate(hasText('No jobs match.')) &&

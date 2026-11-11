@@ -6,9 +6,11 @@ module fy_nav
 
     public :: &
         nav_assign, &
+        nav_at_end, &
         nav_copy, &
         nav_popped, &
         nav_push, &
+        nav_scroll_end, &
         nav_set_pref, &
         nav_title
 
@@ -39,5 +41,13 @@ contains
     subroutine nav_copy(text)
         character(len=*), intent(in) :: text
     end subroutine nav_copy
+
+    logical function nav_at_end()
+        !! A page the server composes starts at its end.
+        nav_at_end = .true.
+    end function nav_at_end
+
+    subroutine nav_scroll_end()
+    end subroutine nav_scroll_end
 
 end module fy_nav

@@ -11,6 +11,7 @@ module fy_stream
     public :: &
         stream_close, &
         stream_count, &
+        stream_count_of, &
         stream_open
 
     interface
@@ -25,6 +26,12 @@ module fy_stream
             integer(c_int), value :: id
         end function js_count
 
+        integer(c_int) function js_count_of(id, t, nt) bind(C, name="fy_stream_count_of")
+            import :: c_int, c_char
+            integer(c_int), value :: id, nt
+            character(kind=c_char), intent(in) :: t(*)
+        end function js_count_of
+
         subroutine js_close(id) bind(C, name="fy_stream_close")
             import :: c_int
             integer(c_int), value :: id
@@ -34,7 +41,8 @@ module fy_stream
 contains
 
     integer function stream_open(path, topic)
-        !! Opens the stream at `path` (an application path) for events `topic`.
+        !! Opens the stream at `path` (an application path) for events `topic`,
+        !! one name or several separated by commas.
         character(len=*), intent(in) :: path, topic
         stream_open = int(js_open(path, len(path, c_int), topic, len(topic, c_int)))
     end function stream_open
@@ -44,6 +52,13 @@ contains
         integer, intent(in) :: id
         stream_count = int(js_count(int(id, c_int)))
     end function stream_count
+
+    integer function stream_count_of(id, topic)
+        !! Events of the stream named `topic` so far.
+        integer, intent(in) :: id
+        character(len=*), intent(in) :: topic
+        stream_count_of = int(js_count_of(int(id, c_int), topic, len(topic, c_int)))
+    end function stream_count_of
 
     subroutine stream_close(id)
         integer, intent(in) :: id

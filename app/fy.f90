@@ -25,6 +25,9 @@ program fy
     use fy_land, only: &
         land_git_check, &
         land_push_check
+    use fy_live, only: &
+        live_earlier_at, &
+        live_gap_line
     use fy_mcp, only: &
         mcp_main
     use fy_policy, only: &
@@ -205,8 +208,9 @@ contains
             '                      verifications of main), each with its change', &
             '  verify [REPO] [--no-wait]', &
             '                      verify main''s newest commit with the full suite', &
-            '  job ID [--wait]     a job''s state, change, checks and log; --wait', &
-            '                      follows it', &
+            '  job ID [--wait|--follow]', &
+            '                      a job''s state, change, checks and log; --wait', &
+            '                      follows it, --follow prints its log as it grows', &
             '  stats [REPO] [--days N]', &
             '                      queue numbers of the last 1, 7 or 30 days (7 unless N', &
             '                      says so) of a repository or of all: time from fy land', &
@@ -604,6 +608,197 @@ contains
         call quit(1)
     end subroutine follow_job
 
+    subroutine follow_log(cfg, id)
+        !! Prints the log of job `id` as it grows (GET /api/v1/jobs/ID/log),
+        !! then its outcome; a failed job ends fy with status 1, as with --wait.
+        !! Live offsets count the bytes the check wrote. When the job ends after
+        !! its live log was printed, the stored log follows from the same
+        !! offset: it is the output of the check's last attempt with its
+        !! outcome after it, and of a long output its first and last part with
+        !! a line that says how many bytes were left out; earlier attempts
+        !! after it are not printed again. A stored log that does not hold
+        !! what was printed last at that offset, as when the check was not
+        !! run again after its runner was lost, is printed whole.
+        type(config_t), intent(in) :: cfg
+        character(len=*), intent(in) :: id
+        character(len=:), allocatable :: body, text, state, begun, seen, stored
+        character(len=24) :: num
+        character(len=1) :: last
+        integer(int64) :: from, next, length
+        integer :: code, stat, at
+        logical :: printed_live
+
+        from = 0
+        last = new_line('a')
+        printed_live = .false.
+        begun = ''
+        seen = ''
+        do
+            write (num, '(i0)') from
+            call client_request(cfg%server, 'GET', '/api/v1/jobs/'//id//'/log?from='// &
+                trim(num), cfg%token, '', code, body, stat)
+            if (stat /= 0 .or. code /= 200) call report(code, body, stat)
+            length = field_int(body, 'length')
+            next = field_int(body, 'next')
+            text = cli_field(body, 'text')
+            if (cli_field(body, 'live') == 'true') then
+                if (length < from .or. (len(begun) > 0 .and. cli_field(body, 'begun') /= begun)) &
+                    then
+                    ! The check started again: run again after a timeout or a
+                    ! lost runner, or another check after a candidate was split.
+                    write (output_unit, '(a)') new_line('a')//'--- the log starts again ---'
+                    from = 0
+                    last = new_line('a')
+                    seen = ''
+                    begun = cli_field(body, 'begun')
+                    cycle
+                end if
+                begun = cli_field(body, 'begun')
+                call put_log(text, last)
+                printed_live = printed_live .or. len(text) > 0
+                seen = seen//text
+                if (len(seen) > 64) seen = seen(len(seen) - 63:)
+                ! Without progress, as before an incomplete UTF-8 character at
+                ! the end, the next request waits for more.
+                if (next < length .and. next > from) then
+                    from = next
+                    cycle
+                end if
+                from = next
+            else if (cli_field(body, 'ended') == 'true') then
+                if (printed_live) then
+                    call client_request(cfg%server, 'GET', '/api/v1/jobs/'//id//'/log', &
+                        cfg%token, '', code, body, stat)
+                    if (stat /= 0 .or. code /= 200) call report(code, body, stat)
+                    stored = cli_field(body, 'text')
+                    text = after_offset(stored, from - len(seen, int64))
+                    ! Where the stored log left those bytes out, it is taken as
+                    ! the one printed.
+                    if (index(text, seen) == 1 .or. index(text, '... ') == 1) then
+                        text = after_offset(stored, from)
+                        at = live_earlier_at(text)
+                        if (at > 0) text = text(1:at - 1)
+                        if (index(text, '... ') == 1 .and. last /= new_line('a')) &
+                            text = new_line('a')//text
+                    else
+                        write (output_unit, '(a)') new_line('a')//'--- the log starts again ---'
+                        last = new_line('a')
+                        text = stored
+                    end if
+                    call put_log(text, last)
+                else if (from < length) then
+                    call put_log(text, last)
+                    if (next > from) then
+                        from = next
+                        if (next < length) cycle
+                    end if
+                end if
+                exit
+            end if
+            call proc_sleep_ms(1000)
+        end do
+        if (last /= new_line('a')) write (output_unit, '(a)') ''
+        call client_request(cfg%server, 'GET', '/api/v1/jobs/'//id, cfg%token, '', code, body, &
+            stat)
+        if (stat /= 0 .or. code /= 200) call report(code, body, stat)
+        state = cli_field(body, 'state')
+        if (state == 'landed') then
+            write (output_unit, '(a)') 'landing '//id//' landed as '//cli_field(body, 'commit')
+        else if (state == 'passed') then
+            write (output_unit, '(a)') 'verification '//id//' of '//cli_field(body, 'commit')// &
+                ' passed'
+        else
+            write (output_unit, '(a)') cli_field(body, 'kind')//' '//id//' '//state
+            call quit(1)
+        end if
+
+    end subroutine follow_log
+
+    subroutine put_log(s, last)
+        !! Prints `s` as it is; `last` is the last byte printed.
+        character(len=*), intent(in) :: s
+        character(len=1), intent(inout) :: last
+        if (len(s) == 0) return
+        write (output_unit, '(a)', advance='no') s
+        flush (output_unit)
+        last = s(len(s):)
+    end subroutine put_log
+
+    function after_offset(log, offset) result(rest)
+        !! What the stored log `log` has after byte `offset` of the check's
+        !! output. Each line "... N bytes left out ..." of the log stands for N
+        !! bytes of the output; an offset within them gives such a line for the
+        !! rest of them first.
+        character(len=*), intent(in) :: log
+        integer(int64), intent(in) :: offset
+        character(len=:), allocatable :: rest
+        integer(int64) :: raw, n
+        integer :: pos, m, e
+
+        rest = ''
+        pos = 1
+        raw = 0
+        do
+            call next_gap(log, pos, m, n, e)
+            if (m == 0 .or. offset < raw + (m - pos)) then
+                if (offset - raw < len(log) - pos + 1) rest = log(pos + int(offset - raw):)
+                return
+            end if
+            raw = raw + (m - pos)
+            if (offset < raw + n) then
+                rest = live_gap_line(raw + n - offset)//log(e - 1:)
+                return
+            end if
+            raw = raw + n
+            pos = e
+        end do
+    end function after_offset
+
+    subroutine next_gap(log, pos, m, n, e)
+        !! The first line "... N bytes left out ..." of `log` from `pos` on:
+        !! where it starts (0: none), N, and where the line after it starts.
+        character(len=*), intent(in) :: log
+        integer, intent(in) :: pos
+        integer, intent(out) :: m, e
+        integer(int64), intent(out) :: n
+        character(len=*), parameter :: ENDS = ' bytes left out ...'//new_line('a')
+        integer :: k, d, ios
+
+        m = 0
+        n = 0
+        e = 0
+        k = pos
+        do
+            d = index(log(k:), '... ')
+            if (d == 0) return
+            k = k + d - 1
+            if (k == 1 .or. log(max(1, k - 1):max(1, k - 1)) == new_line('a')) then
+                d = verify(log(k + 4:), '0123456789')
+                if (d > 1) then
+                    if (log(k + 3 + d:min(len(log), k + 2 + d + len(ENDS))) == ENDS) then
+                        read (log(k + 4:k + 2 + d), *, iostat=ios) n
+                        if (ios == 0) then
+                            m = k
+                            e = k + 3 + d + len(ENDS)
+                            return
+                        end if
+                    end if
+                end if
+            end if
+            k = k + 4
+        end do
+    end subroutine next_gap
+
+    integer(int64) function field_int(json, name) result(v)
+        character(len=*), intent(in) :: json, name
+        character(len=:), allocatable :: s
+        integer :: ios
+        v = 0
+        s = cli_field(json, name)
+        read (s, *, iostat=ios) v
+        if (ios /= 0) v = 0
+    end function field_int
+
     subroutine push_head(cfg, repo, branch)
         !! git push of HEAD to BRANCH of REPO on the server. The token and proxy
         !! reach git through its environment, so no command line shows them.
@@ -823,7 +1018,7 @@ contains
     end subroutine cmd_jobs
 
     subroutine cmd_job()
-        !! fy job ID [--wait]: a job's state and log.
+        !! fy job ID [--wait|--follow]: a job's state and log.
         type(config_t) :: cfg
         character(len=:), allocatable :: body, id
         integer :: code, stat
@@ -832,8 +1027,12 @@ contains
         call require_login(cfg)
         id = positional(1)
         if (len(id) == 0) then
-            write (error_unit, '(a)') 'fy: usage: fy job ID [--wait]'
+            write (error_unit, '(a)') 'fy: usage: fy job ID [--wait|--follow]'
             call quit(2)
+        end if
+        if (flag('--follow')) then
+            call follow_log(cfg, id)
+            return
         end if
         if (flag('--wait')) then
             call follow_job(cfg, id)
@@ -1288,8 +1487,8 @@ contains
         do while (i <= command_argument_count())
             if (index(arg(i), '--') == 1) then
                 select case (arg(i))
-                case ('--no-push', '--no-wait', '--wait', '--json', '--init', '--all', &
-                        '--all-repos', '--stats', '--urgent')
+                case ('--follow', '--no-push', '--no-wait', '--wait', '--json', '--init', &
+                        '--all', '--all-repos', '--stats', '--urgent')
                     i = i + 1
                 case default
                     i = i + 2

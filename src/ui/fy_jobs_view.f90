@@ -4,7 +4,12 @@ module fy_jobs_view
     !! state, duration, runner and commit, filtered through the address
     !! (?repo=&kind=&state=). A job's own page has its log. The page
     !! stays current through the server's event stream: each event fetches the
-    !! jobs again, and a timer advances the durations of running jobs.
+    !! jobs again, and a timer advances the durations of running jobs. A
+    !! running job shows the last line its check wrote, which follows the
+    !! events of the topic logs while the page shows running jobs, at most
+    !! every TAILS_EVERY seconds.
+    use, intrinsic :: iso_fortran_env, only: &
+        int64
     use fortui
     use fx_json_parse, only: &
         JSON_ARRAY_END, &
@@ -35,11 +40,12 @@ module fy_jobs_view
         url_encode
     use fy_stream, only: &
         stream_close, &
-        stream_count, &
+        stream_count_of, &
         stream_open
     use fy_time, only: &
         ago, &
         duration, &
+        epoch, &
         seconds_between, &
         seconds_since
     implicit none
@@ -55,7 +61,7 @@ module fy_jobs_view
     type :: job_t
         integer :: id = 0
         character(len=:), allocatable :: repo, branch, account, state, queued, started, &
-            finished, commit, kind, title, runner
+            finished, commit, kind, title, runner, log_tail
         !! The number of its change, and which of the change's entries it is.
         integer :: change = 0, entry = 0, entries = 0
     end type job_t
@@ -82,11 +88,17 @@ module fy_jobs_view
     type(request_t) :: list_req
     type(job_t), allocatable :: jobs(:)
     type(count_t), allocatable :: counts(:)
-    integer :: totals(4) = 0, stream = 0, seen = 0
+    integer :: totals(4) = 0, stream = 0, seen = 0, logs_seen = 0
     character(len=:), allocatable :: state, filter, only_kind, only_state
     !! The server refused the filters of the address: no job matches them.
     logical :: refused = .false.
     logical :: active = .false., loaded = .false., paused = .false.
+    !! The last lines of running jobs are asked for at most every TAILS_EVERY
+    !! seconds, however many checks write: when the list was last asked for
+    !! them, and whether a check wrote since.
+    integer, parameter :: TAILS_EVERY = 5
+    integer(int64) :: tails_at = 0
+    logical :: tails_due = .false.
 
 contains
 
@@ -105,8 +117,9 @@ contains
         state = ''
         call request()
         if (stream == 0) then
-            stream = stream_open('/api/v1/events?topic=jobs', 'jobs')
+            stream = stream_open('/api/v1/events?topic=jobs,logs', 'jobs,logs')
             seen = 0
+            logs_seen = 0
         end if
     end subroutine jobs_view_show
 
@@ -134,11 +147,22 @@ contains
     subroutine jobs_view_receive()
         integer :: n
 
-        ! Each event of the stream means the jobs changed.
+        ! An event of jobs means the jobs changed; one of logs, that a running
+        ! check wrote more, which matters while a running job is shown.
         if (active .and. stream /= 0) then
-            n = stream_count(stream)
+            n = stream_count_of(stream, 'jobs')
             if (n /= seen) then
                 seen = n
+                call request()
+            end if
+            n = stream_count_of(stream, 'logs')
+            if (n /= logs_seen) then
+                logs_seen = n
+                if (running()) tails_due = .true.
+            end if
+            if (tails_due .and. now_seconds() - tails_at >= TAILS_EVERY) then
+                tails_due = .false.
+                tails_at = now_seconds()
                 call request()
             end if
         end if
@@ -222,7 +246,7 @@ contains
         end if
 
         ! Durations of running and waiting jobs advance once a second.
-        if (busy()) call ui_wake_after(1.0)
+        if (busy() .or. tails_due) call ui_wake_after(1.0)
         call text("Jobs", size=HEADING, style=UI_HEADING, id="heading-jobs")
         call filters()
         if (size(jobs) == 0) then
@@ -313,9 +337,25 @@ contains
                     size=SMALL, style=UI_CODE)) call go(route_href(R_COMMIT, j%repo, j%commit))
             end if
             call row_end()
+            if (j%state == 'running' .and. len(j%log_tail) > 0) call text(j%log_tail, size=SMALL, &
+                style=UI_CODE, tone=UI_TONE_MUTED, width=UI_FILL, ellipsis=.true., id="logtail")
             call column_end()
         end associate
     end subroutine job_row
+
+    integer(int64) function now_seconds()
+        integer :: v(8)
+        call date_and_time(values=v)
+        now_seconds = epoch(v(1), v(2), v(3), v(5), v(6), v(7))
+    end function now_seconds
+
+    logical function running()
+        integer :: k
+        running = .false.
+        do k = 1, size(jobs)
+            if (jobs(k)%state == 'running') running = .true.
+        end do
+    end function running
 
     logical function busy()
         integer :: k
@@ -423,6 +463,7 @@ contains
                     case ('kind'); j%kind = ev%string_val
                     case ('title'); j%title = ev%string_val
                     case ('runner'); j%runner = ev%string_val
+                    case ('log_tail'); j%log_tail = ev%string_val
                     case ('repo'); j%repo = ev%string_val
                     case ('branch'); j%branch = ev%string_val
                     case ('account'); j%account = ev%string_val
@@ -476,6 +517,7 @@ contains
             j%kind = ''
             j%title = ''
             j%runner = ''
+            j%log_tail = ''
             j%change = 0
             j%entry = 0
             j%entries = 0

@@ -45,6 +45,7 @@ module fy_server
         change_sync, &
         change_t
     use fy_events, only: &
+        events_forget, &
         events_notify, &
         events_set_dir, &
         events_stream, &
@@ -73,7 +74,18 @@ module fy_server
         land_branch, &
         land_candidate, &
         land_check, &
-        land_hook_install
+        land_hook_install, &
+        land_live_clean, &
+        land_set_live
+    use fy_live, only: &
+        live_append, &
+        live_exists, &
+        live_length, &
+        live_outcome, &
+        live_read, &
+        live_remove, &
+        live_set_dir, &
+        live_tail_line
     use fy_oidc, only: &
         oidc_authorize_url, &
         oidc_check, &
@@ -148,6 +160,8 @@ module fy_server
         store_check_error, &
         store_check_finish, &
         store_check_get, &
+        store_check_holder, &
+        store_check_jobs, &
         store_check_release, &
         store_job, &
         store_job_checks, &
@@ -255,6 +269,10 @@ module fy_server
     !! is withdrawn when one of them is cancelled, and main moves only when
     !! none of them is.
     integer(int64), allocatable :: lander_members(:)
+    !! The jobs whose check runs in the lander itself, and how many bytes of
+    !! its output their live logs hold.
+    integer(int64), allocatable :: live_jobs(:)
+    integer(int64) :: live_sent = 0
     !! Lander processes when runners check the landings.
     integer, parameter :: MAX_LANDERS = 4
     !! Seconds past its check_timeout after which a check whose runner has
@@ -517,6 +535,8 @@ contains
         ! Opened before the first look at the queue, so no landing is missed.
         watch = events_watch_open()
         call store_landing_requeue(db, lander)
+        ! Output files of checks a stopped lander left behind.
+        call land_live_clean()
         call events_notify('jobs')
         do
             call store_landing_next(db, lander, l, found)
@@ -588,6 +608,8 @@ contains
             work = tmp_dir()//'/fy-land-'//itoa(int(l%id))
             has_change = .false.
             if (l%change > 0) call change_by_id(db, l%change, ch, has_change)
+            ! A check that runs here shows its output on the job while it runs.
+            call live_begin([l%id])
             ! The landing's ident is unique across instances and restarts: number
             ! and time of queueing.
             if (has_change) then
@@ -621,6 +643,7 @@ contains
                         min_number=next, check=policy%tests /= 'none', proceed=lander_proceed)
                 end if
             end if
+            call land_set_live()
             call execute_command_line('rm -rf '''//work//'''')
             if (.not. ok) call store_landing_unseal(db, lander_members)
             lander_members = [integer(int64) ::]
@@ -685,6 +708,7 @@ contains
                 work = tmp_dir()//'/fy-land-'//itoa(int(g(held(1))%id))
                 candidate_jobs = g(held)%id
                 lander_members = g(held)%id
+                call live_begin(g(held)%id)
                 if (checks_mode == 'runner') then
                     call land_candidate(repo_path(g(1)%repo), work, g(1)%repo, tip, branches, &
                         holds, upstream, log, ok, runner=runner_check, &
@@ -695,6 +719,7 @@ contains
                         pinned=tips, proceed=lander_proceed)
                 end if
                 deallocate (candidate_jobs)
+                call land_set_live()
                 call execute_command_line('rm -rf '''//work//'''')
                 if (.not. ok) call store_landing_unseal(db, lander_members)
                 lander_members = [integer(int64) ::]
@@ -705,12 +730,12 @@ contains
                 if (ok) then
                     do k = 1, size(held)
                         if (size(held) > 1) then
-                            call finish(g(held(k)), .true., commits(k), 'Landed as '// &
-                                commits(k)//', checked with '//itoa(size(held) - 1)// &
-                                ' other landing(s) in one candidate.'//new_line('a')//log)
+                            call finish(g(held(k)), .true., commits(k), live_outcome(log, &
+                                'Landed as '//commits(k)//', checked with '// &
+                                itoa(size(held) - 1)//' other landing(s) in one candidate.'))
                         else
-                            call finish(g(held(k)), .true., commits(k), log//new_line('a')// &
-                                'Landed as '//commits(k)//'.')
+                            call finish(g(held(k)), .true., commits(k), live_outcome(log, &
+                                'Landed as '//commits(k)//'.'))
                         end if
                         if (g(held(k))%change > 0) then
                             call change_by_id(db, g(held(k))%change, ch, has_change)
@@ -755,6 +780,7 @@ contains
             else
                 call store_landing_finish(db, l%id, 'failed', '', log, found)
             end if
+            call live_forget(db, l)
             ! A cancelled landing keeps its state and the log that says who cancelled it.
             if (.not. found) return
             call audit_landing(l, ok, commit)
@@ -814,6 +840,7 @@ contains
         character(len=*), intent(in) :: dir
         repos_dir = dir//'/repos'
         call oidc_load(dir//'/oidc.conf', oidc)
+        call live_set_dir(dir//'/live')
         call events_set_dir(dir//'/events')
     end subroutine server_set_data_dir
 
@@ -1673,8 +1700,8 @@ contains
     end function releases_dir
 
     subroutine events_route(cfd, req, db)
-        !! GET /api/v1/events?topic=jobs: a server-sent event stream that
-        !! announces each change of the topic, for pages that show it live.
+        !! GET /api/v1/events?topic=jobs[,logs]: a server-sent event stream that
+        !! announces each change of the topics, for pages that show them live.
         integer, intent(in) :: cfd
         type(http_request_t), intent(in) :: req
         type(db_t), intent(in) :: db
@@ -1687,7 +1714,7 @@ contains
         topic = http_query_param(req%query, 'topic')
         if (.not. who%found) then
             call http_send_response(cfd, 401, JSON, '{"error":"missing or invalid token"}')
-        else if (topic /= 'jobs') then
+        else if (.not. topics_ok(topic)) then
             call http_send_response(cfd, 404, JSON, '{"error":"no such topic"}')
         else
             ! Holds this thread until the client leaves; it sleeps in poll(2).
@@ -1696,6 +1723,29 @@ contains
         write (error_unit, '(a,1x,a)') req%method, req%path
         flush (error_unit)
     end subroutine events_route
+
+    logical function topics_ok(topics)
+        !! Topics a page may follow, one or several separated by commas: jobs,
+        !! logs for the growth of running checks' logs, and log-N for that of
+        !! job N's live log.
+        character(len=*), intent(in) :: topics
+        character(len=:), allocatable :: t
+        integer :: a, b
+
+        topics_ok = len(topics) > 0
+        a = 1
+        do while (topics_ok .and. a <= len(topics))
+            b = index(topics(a:), ',')
+            if (b == 0) b = len(topics) - a + 2
+            t = topics(a:a + b - 2)
+            topics_ok = t == 'jobs' .or. t == 'logs'
+            if (len(t) > 4 .and. len(t) <= 24) then
+                if (t(1:4) == 'log-' .and. verify(t(5:), '0123456789') == 0) topics_ok = .true.
+            end if
+            topics_ok = topics_ok .and. b > 1
+            a = a + b
+        end do
+    end function topics_ok
 
     subroutine git_route(cfd, req, rest, db, repo, write)
         !! Clone, fetch and push over HTTP. Git sends the access token as the
@@ -1875,6 +1925,85 @@ contains
         end select
     end subroutine route
 
+    subroutine live_begin(jobs)
+        !! The check the lander runs next belongs to `jobs`: their live logs
+        !! start empty and grow with its output.
+        integer(int64), intent(in) :: jobs(:)
+        integer :: k
+
+        live_jobs = jobs
+        live_sent = 0
+        do k = 1, size(jobs)
+            call live_remove('job-'//itoa64(jobs(k)))
+        end do
+        call land_set_live(lander_live)
+    end subroutine live_begin
+
+    subroutine lander_live(path, used)
+        !! Copies what the check wrote to `path` since the last time into the
+        !! live logs of its jobs, as a runner's appends do; `used`: the bytes
+        !! copied.
+        character(len=*), intent(in) :: path
+        integer(int64), intent(out) :: used
+        character(len=:), allocatable :: bytes
+        integer(int64) :: have, length
+        integer :: u, ios, k, n, stat
+
+        used = live_sent
+        inquire (file=path, size=have)
+        do while (live_sent < have)
+            n = int(min(1048576_int64, have - live_sent))
+            open (newunit=u, file=path, status='old', access='stream', form='unformatted', &
+                action='read', iostat=ios)
+            if (ios /= 0) return
+            allocate (character(len=n) :: bytes)
+            read (u, pos=live_sent + 1, iostat=ios) bytes
+            close (u)
+            if (ios /= 0) return
+            do k = 1, size(live_jobs)
+                call live_append('job-'//itoa64(live_jobs(k)), live_sent, bytes, length, stat)
+            end do
+            live_sent = live_sent + n
+            used = live_sent
+            deallocate (bytes)
+            call notify_logs(live_jobs)
+        end do
+    end subroutine lander_live
+
+    subroutine live_forget(db, l)
+        !! A job that ended keeps its stored log only.
+        type(db_t), intent(in) :: db
+        type(landing_t), intent(in) :: l
+        type(check_t), allocatable :: checks(:)
+        integer :: k
+
+        call live_remove('job-'//itoa64(l%id))
+        call events_forget('log-'//itoa64(l%id))
+        call store_job_checks(db, l, checks)
+        do k = 1, size(checks)
+            call live_remove('check-'//itoa64(checks(k)%id))
+        end do
+    end subroutine live_forget
+
+    subroutine notify_logs(jobs)
+        !! The live logs of `jobs` grew: the page of each job asks for what is
+        !! new, and lists of jobs for their last lines.
+        integer(int64), intent(in) :: jobs(:)
+        integer :: k
+        do k = 1, size(jobs)
+            call events_notify('log-'//itoa64(jobs(k)))
+        end do
+        call events_notify('logs')
+    end subroutine notify_logs
+
+    function itoa64(v) result(s)
+        integer(int64), intent(in) :: v
+        character(len=:), allocatable :: s
+        character(len=24) :: b
+        write (b, '(i0)') v
+        s = trim(b)
+    end function itoa64
+
     subroutine runner_check(repo, ref, passed, log)
         !! Queues a check of `ref` for a runner and sleeps until it reports. A
         !! check no runner takes within an hour fails. A check whose runner has
@@ -1921,9 +2050,9 @@ contains
             if (state == 'passed' .or. state == 'failed') exit
             write (minutes, '(i0)') limit/60
             if (state == 'timeout') then
-                log = 'Reason: timeout. The check reached its time limit (check_timeout '// &
-                    trim(minutes)//' minutes) a second time; the runner ended it, which is'// &
-                    ' no verdict on the change.'//new_line('a')//log
+                log = live_outcome(log, 'Reason: timeout. The check reached its time limit'// &
+                    ' (check_timeout '//trim(minutes)//' minutes) a second time; the runner'// &
+                    ' ended it, which is no verdict on the change.')
                 exit
             end if
             if (state == 'queued' .and. age > 3600) then
@@ -2045,13 +2174,19 @@ contains
                 res%body = ''
                 return
             end if
+            write (num, '(i0)') id
+            ! A check claimed again after its runner restarted starts its log afresh.
+            call live_remove('check-'//trim(num))
             call events_notify('checks')
             ! A job shows its check and runner: its pages ask again.
             call events_notify('jobs')
-            write (num, '(i0)') id
             write (limit, '(i0)') seconds
             res%body = '{"id":'//trim(num)//',"repo":"'//repo//'","ref":"'//ref//'","kind":"'// &
                 kind//'","timeout":'//trim(limit)//'}'
+            return
+        end if
+        if (index(req%path, '/log') == len(req%path) - 3 .and. len(req%path) > 19) then
+            call append_log()
             return
         end if
         k = index(req%path, '/result')
@@ -2085,6 +2220,62 @@ contains
         end if
         call events_notify('checks')
         res%body = '{"recorded":true,"state":"'//state//'"}'
+
+    contains
+
+        subroutine append_log()
+            !! POST /api/v1/checks/N/log?offset=O with the bytes the check wrote
+            !! from offset O on: only from the runner that holds the check.
+            !! Answers the length now held; a gap is refused with 409 and that
+            !! length, so the runner sends again from there.
+            character(len=:), allocatable :: digits, holder, key
+            integer(int64) :: offset, before, length
+            integer(int64), allocatable :: jobs(:)
+            integer :: stat
+
+            digits = req%path(16:len(req%path) - 4)
+            read (digits, *, iostat=ios) id
+            if (ios /= 0 .or. verify(digits, '0123456789') /= 0) then
+                call fail(res, 404, 'not found')
+                return
+            end if
+            key = 'check-'//digits
+            digits = http_query_param(req%query, 'offset')
+            read (digits, *, iostat=ios) offset
+            if (len(digits) == 0 .or. len(digits) > 18 .or. ios /= 0 .or. &
+                verify(digits, '0123456789') /= 0) then
+                call fail(res, 400, 'send offset=N, the offset of the first byte')
+                return
+            end if
+            call store_check_holder(db, id, holder, found)
+            if (.not. found) then
+                call fail(res, 409, 'no running check with that number')
+                return
+            end if
+            if (holder /= who%token_name) then
+                call fail(res, 403, 'only the runner that claimed the check sends its log')
+                return
+            end if
+            before = max(0_int64, live_length(key))
+            call live_append(key, offset, req%body, length, stat)
+            write (num, '(i0)') length
+            if (stat == 1) then
+                res%code = 409
+                res%body = '{"error":"the log has '//trim(num)//' bytes; send from there",'// &
+                    '"length":'//trim(num)//'}'
+                return
+            else if (stat /= 0) then
+                call fail(res, 500, 'the log was not stored')
+                return
+            end if
+            res%body = '{"length":'//trim(num)//'}'
+            ! Pages that show the log fetch what is new.
+            if (length > before) then
+                call store_check_jobs(db, id, jobs)
+                call notify_logs(jobs)
+            end if
+        end subroutine append_log
+
     end subroutine checks_route
 
     subroutine jobs_route(req, db, res)
@@ -2115,8 +2306,14 @@ contains
         if (.not. authenticated(req, db, who, res)) return
         if (.not. method_is(req, 'GET', res)) return
         if (index(req%path, '/api/v1/jobs/') == 1) then
-            read (req%path(14:), *, iostat=ios) id
-            if (ios /= 0 .or. verify(req%path(14:), '0123456789') /= 0) then
+            only = req%path(14:)
+            ! GET /api/v1/jobs/N/log?from=O: the log from byte O on.
+            k = len(only)
+            if (k > 4) then
+                if (only(k - 3:) == '/log') only = only(1:k - 4)
+            end if
+            read (only, *, iostat=ios) id
+            if (ios /= 0 .or. verify(only, '0123456789') /= 0) then
                 call fail(res, 404, 'not found')
                 return
             end if
@@ -2125,7 +2322,11 @@ contains
                 call fail(res, 404, 'no such job')
                 return
             end if
-            res%body = job_json(l, .true.)
+            if (len(only) < len(req%path) - 13) then
+                call log_json(l)
+            else
+                res%body = job_json(l, .true.)
+            end if
             return
         end if
         repo = http_query_param(req%query, 'repo')
@@ -2170,7 +2371,7 @@ contains
         function job_json(j, with_log) result(s)
             type(landing_t), intent(in) :: j
             logical, intent(in) :: with_log
-            character(len=:), allocatable :: s, runner, next_state
+            character(len=:), allocatable :: s, runner, next_state, key
             type(check_t), allocatable :: checks(:)
             integer(int64) :: next
             integer :: c
@@ -2204,6 +2405,16 @@ contains
                     '"exit_status":null}'
             end do
             s = s//']'
+            ! A running job whose check sends its output has a live log.
+            key = live_key(j, checks)
+            if (len(key) > 0) then
+                write (num, '(i0)') max(0_int64, live_length(key))
+                s = s//',"live_log":{"length":'//trim(num)//'}'
+                if (.not. with_log) s = s//',"log_tail":"'// &
+                    json_escape_string(live_tail_line(key))//'"'
+            else
+                s = s//',"live_log":null'
+            end if
             if (with_log) then
                 call store_job_next(db, j%id, next, next_state)
                 if (next > 0) then
@@ -2217,6 +2428,74 @@ contains
             end if
             s = s//'}'
         end function job_json
+
+        function live_key(j, checks) result(key)
+            !! The live log of running job `j`: of its newest check that has one
+            !! (a runner's), else its own (a check the lander runs); '' for none.
+            type(landing_t), intent(in) :: j
+            type(check_t), intent(in) :: checks(:)
+            character(len=:), allocatable :: key
+            integer :: c
+
+            key = ''
+            if (j%state /= 'running') return
+            do c = size(checks), 1, -1
+                write (num, '(i0)') checks(c)%id
+                if (live_exists('check-'//trim(num))) then
+                    key = 'check-'//trim(num)
+                    return
+                end if
+            end do
+            write (num, '(i0)') j%id
+            if (live_exists('job-'//trim(num))) key = 'job-'//trim(num)
+        end function live_key
+
+        subroutine log_json(j)
+            !! {"live":..,"ended":..,"from":..,"next":..,"length":..,"text":..}:
+            !! the bytes from offset `from` of the live log while the job runs
+            !! with one, else of its stored log; "next" is the offset to ask
+            !! for next. A live log also has "begun", which changes when the
+            !! log starts again (the check is run again, or another check of
+            !! the job runs); so does a length below `from`.
+            type(landing_t), intent(in) :: j
+            integer, parameter :: MAX_TEXT = 1048576
+            type(check_t), allocatable :: checks(:)
+            character(len=:), allocatable :: key, digits, text, begun
+            character(len=24) :: a, b, c
+            integer(int64) :: from, next, length
+            logical :: ended, live
+
+            digits = http_query_param(req%query, 'from')
+            from = 0
+            if (len(digits) > 0) then
+                read (digits, *, iostat=ios) from
+                if (ios /= 0 .or. len(digits) > 18 .or. verify(digits, '0123456789') /= 0) then
+                    call fail(res, 400, 'from is a byte offset')
+                    return
+                end if
+            end if
+            ended = j%state /= 'running' .and. j%state /= 'queued'
+            call store_job_checks(db, j, checks)
+            key = live_key(j, checks)
+            live = .false.
+            begun = ''
+            if (len(key) > 0) call live_read(key, from, MAX_TEXT, text, next, length, live, begun)
+            if (.not. live) then
+                length = len(j%log, int64)
+                next = min(max(from, 0_int64), length)
+                text = j%log(next + 1:min(length, next + MAX_TEXT))
+                next = next + len(text, int64)
+            end if
+            write (a, '(i0)') min(from, length)
+            write (b, '(i0)') next
+            write (c, '(i0)') length
+            res%body = '{"live":'//trim(merge('true ', 'false', live))//',"ended":'// &
+                trim(merge('true ', 'false', ended))//',"state":"'//j%state//'","from":'// &
+                trim(a)//',"next":'//trim(b)//',"length":'//trim(c)//',"text":"'// &
+                json_escape_string(text)//'"'
+            if (live) res%body = res%body//',"begun":"'//key//'@'//begun//'"'
+            res%body = res%body//'}'
+        end subroutine log_json
 
         integer function error_line(log) result(n)
             !! The number of the first line of `log` that contains Error or

@@ -7,6 +7,7 @@ module fy_stream
     public :: &
         stream_close, &
         stream_count, &
+        stream_count_of, &
         stream_open
 
 contains
@@ -20,6 +21,12 @@ contains
         integer, intent(in) :: id
         stream_count = 0
     end function stream_count
+
+    integer function stream_count_of(id, topic)
+        integer, intent(in) :: id
+        character(len=*), intent(in) :: topic
+        stream_count_of = 0
+    end function stream_count_of
 
     subroutine stream_close(id)
         integer, intent(in) :: id

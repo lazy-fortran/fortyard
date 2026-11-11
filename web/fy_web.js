@@ -86,12 +86,15 @@ addToLibrary({
     return n;
   },
 
-  // Server-sent event streams (web/fy_stream.f90): each event of the topic
-  // counts and wakes the frame loop.
+  // Server-sent event streams (web/fy_stream.f90): each event of the topics (one
+  // name or several separated by commas) counts and wakes the frame loop.
   fy_stream_open__deps: ['$FY', '$FY_base', '$FUI'],
   fy_stream_open: function (pPtr, pLen, tPtr, tLen) {
-    var id = FY.next++, s = { count: 0, es: new EventSource(FY_base() + UTF8ToString(pPtr, pLen)) };
-    s.es.addEventListener(UTF8ToString(tPtr, tLen), function () { s.count++; FUI.wakeUp(); });
+    var id = FY.next++, s = { count: 0, of: {}, es: new EventSource(FY_base() + UTF8ToString(pPtr, pLen)) };
+    UTF8ToString(tPtr, tLen).split(',').forEach(function (t) {
+      s.of[t] = 0;
+      s.es.addEventListener(t, function () { s.count++; s.of[t]++; FUI.wakeUp(); });
+    });
     FY.streams = FY.streams || new Map();
     FY.streams.set(id, s);
     return id;
@@ -100,6 +103,11 @@ addToLibrary({
   fy_stream_count: function (id) {
     var s = FY.streams && FY.streams.get(id);
     return s ? s.count : 0;
+  },
+  fy_stream_count_of__deps: ['$FY'],
+  fy_stream_count_of: function (id, tPtr, tLen) {
+    var s = FY.streams && FY.streams.get(id);
+    return s ? s.of[UTF8ToString(tPtr, tLen)] || 0 : 0;
   },
   fy_stream_close__deps: ['$FY'],
   fy_stream_close: function (id) {
@@ -146,11 +154,16 @@ addToLibrary({
         try { document.execCommand('copy'); } catch (e) {}
         ta.remove();
         break;
+      case 6:
+        // The end of the page, once the frame that grew it is drawn.
+        requestAnimationFrame(function () { window.scrollTo(0, document.documentElement.scrollHeight); });
+        break;
     }
   },
 
   // The page's path and query (1); the location Back or Forward went to, once
-  // (2); a cookie's value (3); the path prefix the application is served under (4).
+  // (2); a cookie's value (3); the path prefix the application is served under (4);
+  // "1" when the page is scrolled to its end (5).
   // Copied into buf; the result is its length.
   fy_nav_get__deps: ['$FY', '$FUI', '$FY_here', '$FY_base'],
   fy_nav_get: function (what, nPtr, nLen, buf, cap) {
@@ -165,6 +178,8 @@ addToLibrary({
     if (what === 1) s = FY_here();
     if (what === 4) s = FY_base();
     if (what === 2) { s = FY.popped; FY.popped = ''; }
+    // Whether the reader is at the end of the page (5).
+    if (what === 5) s = innerHeight + scrollY >= document.documentElement.scrollHeight - 48 ? '1' : '';
     if (what === 3) {
       var name = UTF8ToString(nPtr, nLen) + '=';
       document.cookie.split('; ').forEach(function (c) {

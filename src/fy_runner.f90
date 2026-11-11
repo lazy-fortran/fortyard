@@ -23,7 +23,11 @@ module fy_runner
         events_wait, &
         events_watch_open
     use fy_land, only: &
-        land_check
+        land_check, &
+        land_live_clean, &
+        land_set_live
+    use fy_live, only: &
+        live_outcome
     use fy_proc, only: &
         proc_readlink, &
         proc_run, &
@@ -34,6 +38,17 @@ module fy_runner
 
     public :: &
         runner_main
+
+    !! Appends are at most this long; the server takes bodies up to 1 MiB.
+    integer, parameter :: LIVE_CHUNK = 524288
+    !! The check whose output is sent while it runs: server, token, number,
+    !! the bytes the server has, the offset at which the output file of the
+    !! current run starts, the length of that file, and the line between a
+    !! failed run and its rerun. `streaming` is false once the server does not
+    !! take appends (an older release, or the check is no longer ours).
+    character(len=:), allocatable :: live_server, live_token, live_id, live_between
+    integer(int64) :: live_sent = 0, live_base = 0, live_have = 0
+    logical :: streaming = .false.
 
 contains
 
@@ -51,6 +66,8 @@ contains
         if (present(class)) cls = class
         ! A check may ask which class of runner it runs on.
         call proc_setenv('FORTYARD_RUNNER_CLASS', cls)
+        ! Output files of checks a stopped runner left behind.
+        call land_live_clean()
         inquire (file=data_dir//'/repos/.', exist=remote)
         remote = .not. remote
         if (remote) then
@@ -233,6 +250,16 @@ contains
             ! A failure is confirmed from an empty build directory before it
             ! is reported, so stale build state can never fail a landing.
             call proc_run([character(len=1024) :: 'touch', w], body, stat, 4096)
+            ! The output goes to the server while the check runs.
+            live_server = server
+            live_token = token
+            live_id = id
+            live_sent = 0
+            live_base = 0
+            live_have = 0
+            live_between = ''
+            streaming = .true.
+            call land_set_live(send_live)
             call land_check(work, out, code, verify=kind == 'verify', limit=limit, &
                 timed_out=timed_out)
             if (timed_out) then
@@ -245,19 +272,25 @@ contains
                     kept = out
                     call proc_run([character(len=1024) :: 'rm', '-rf', trim(w)//'/build'], &
                         body, stat, 4096)
+                    ! The live log and the stored one have the same line between
+                    ! the runs, so that each line keeps its number.
+                    live_between = '--- the check failed with the kept build directory and is '// &
+                        'rerun from an empty build directory ---'//new_line('a')
+                    if (len(kept) > 0) then
+                        if (kept(len(kept):) /= new_line('a')) live_between = new_line('a')// &
+                            live_between
+                    end if
+                    live_base = live_base + live_have + len(live_between, int64)
                     call land_check(work, out, code, verify=kind == 'verify', limit=limit, &
                         timed_out=timed_out)
+                    out = kept//live_between//out
                     if (timed_out) then
                         call report_timeout()
                         return
                     end if
-                    out = 'With the kept build directory the check failed; it was rerun '// &
-                        'from an empty build directory.'//new_line('a')// &
-                        '--- with the kept build directory (end) ---'//new_line('a')// &
-                        tail_text(kept, 4000)//new_line('a')// &
-                        '--- from an empty build directory ---'//new_line('a')//out
                 end if
             end if
+            call land_set_live()
             out = out//new_line('a')//disk_report(trim(tmp), data_dir)
         end if
         call client_request(server, 'POST', '/api/v1/checks/'//id//'/result', token, &
@@ -268,17 +301,106 @@ contains
 
         subroutine report_timeout()
             !! An error, not a result: the server queues the check again, and
-            !! fails the landing with the reason timeout at the second one.
+            !! fails the landing with the reason timeout at the second one. The
+            !! output comes first, as in the live log.
+            call land_set_live()
             write (minutes, '(i0)') limit/60
-            out = 'The time limit ('//trim(minutes)//' min) ended the check: the runner'// &
-                ' stopped it and every process it started. A time limit is no verdict on the'// &
-                ' change; a second one fails the landing or verification with the reason timeout.'// &
-                new_line('a')//'--- output (end) ---'//new_line('a')//tail_text(out, 4000)
+            out = live_outcome(out, 'The time limit ('//trim(minutes)//' min) ended the check:'// &
+                ' the runner stopped it and every process it started. A time limit is no'// &
+                ' verdict on the change; a second one fails the landing or verification with'// &
+                ' the reason timeout.')
             call client_request(server, 'POST', '/api/v1/checks/'//id//'/result', token, &
                 '{"error":"timeout","log":"'//json_escape_string(out)//'"}', code, body, stat)
         end subroutine report_timeout
 
     end subroutine run_one
+
+    subroutine send_live(path, used)
+        !! Sends what the check wrote to `path` since the last time, as appends
+        !! that name their offset, so a repeated or lost one does no harm. A
+        !! request that fails is tried again the next time. `used`: the bytes
+        !! of the file the server has.
+        character(len=*), intent(in) :: path
+        integer(int64), intent(out) :: used
+        character(len=:), allocatable :: bytes
+        integer(int64) :: have, before, at
+        integer :: u, ios, n
+
+        inquire (file=path, size=have)
+        have = max(0_int64, have)
+        used = have
+        live_have = have
+        if (.not. streaming) return
+        ! The line between a failed run and its rerun.
+        if (live_sent < live_base) then
+            at = live_base - len(live_between, int64)
+            ! The server lost what came before it: the final log has it.
+            if (live_sent < at) then
+                streaming = .false.
+                return
+            end if
+            call post_live(live_between(live_sent - at + 1:))
+            if (live_sent < live_base) return
+        end if
+        do while (streaming .and. live_sent < live_base + have)
+            if (live_sent < live_base) then
+                streaming = .false.
+                return
+            end if
+            n = int(min(int(LIVE_CHUNK, int64), live_base + have - live_sent))
+            open (newunit=u, file=path, status='old', access='stream', form='unformatted', &
+                action='read', iostat=ios)
+            if (ios /= 0) exit
+            allocate (character(len=n) :: bytes)
+            read (u, pos=live_sent - live_base + 1, iostat=ios) bytes
+            close (u)
+            if (ios /= 0) exit
+            before = live_sent
+            call post_live(bytes)
+            deallocate (bytes)
+            ! Not taken now: again at the next call, not at once.
+            if (live_sent <= before) exit
+        end do
+        if (streaming) used = max(0_int64, min(have, live_sent - live_base))
+    end subroutine send_live
+
+    subroutine post_live(bytes)
+        !! One append at offset live_sent. The server answers with the length
+        !! it holds; a gap is refused with that length (409), and the runner
+        !! goes on from there. A request that does not reach the server or an
+        !! answer of a server error or a proxy (5xx) leaves live_sent as it is
+        !! for the next try. Any other answer, such as an older server's 404 or
+        !! a 403 for a check that is no longer this runner's, ends the sending:
+        !! the result at the end carries the log anyway.
+        character(len=*), intent(in) :: bytes
+        character(len=:), allocatable :: body
+        character(len=24) :: num
+        integer(int64) :: length
+        integer :: code, stat, s, e, ios
+
+        if (.not. streaming) return
+        write (num, '(i0)') live_sent
+        call client_request(live_server, 'POST', '/api/v1/checks/'//live_id//'/log?offset='// &
+            trim(num), live_token, bytes, code, body, stat)
+        if (stat /= 0 .or. code >= 500) return
+        length = -1
+        s = index(body, '"length":')
+        if (s > 0) then
+            s = s + 9
+            e = s
+            do while (e <= len(body))
+                if (index('0123456789', body(e:e)) == 0) exit
+                e = e + 1
+            end do
+            read (body(s:e - 1), *, iostat=ios) length
+            if (ios /= 0) length = -1
+        end if
+        if ((code == 200 .or. code == 409) .and. length >= 0) then
+            live_sent = length
+        else
+            streaming = .false.
+        end if
+    end subroutine post_live
 
     subroutine expire_state(data_dir)
         !! Work trees and mirrors of repositories not checked for 30 days are
@@ -310,14 +432,5 @@ contains
             'printf "; free %s\\n" "$(df -h "$1" | awk ''NR==2 {print $4}'')"', &
             'disk', tmp, data_dir], text, stat, 4096)
     end function disk_report
-
-    function tail_text(text, n) result(tail)
-        character(len=*), intent(in) :: text
-        integer, intent(in) :: n
-        character(len=:), allocatable :: tail
-
-        tail = text
-        if (len(text) > n) tail = text(len(text) - n + 1:)
-    end function tail_text
 
 end module fy_runner

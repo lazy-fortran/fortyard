@@ -6,11 +6,23 @@ module fy_land
     !! merged history (such as an upstream's) stays an ancestor of `main`. The
     !! commit is made in the bare repository itself, from git's three-way merge
     !! of trees; files are written only for the checks that read them.
+    use, intrinsic :: iso_c_binding, only: &
+        c_char, &
+        c_int, &
+        c_long, &
+        c_null_char
     use, intrinsic :: iso_fortran_env, only: &
         int64
+    use fy_live, only: &
+        live_gap_line, &
+        live_outcome
     use fy_proc, only: &
         proc_find, &
-        proc_run
+        proc_pid, &
+        proc_run, &
+        proc_sleep_ms, &
+        proc_start, &
+        proc_try_wait
     implicit none
     private
 
@@ -22,7 +34,10 @@ module fy_land
         land_git_check, &
         land_git_new_enough, &
         land_hook_install, &
-        land_push_check
+        land_live_clean, &
+        land_live_i, &
+        land_push_check, &
+        land_set_live
 
     abstract interface
         subroutine check_runner_i(repo, ref, passed, log)
@@ -35,9 +50,45 @@ module fy_land
         logical function proceed_i()
             !! Whether main may move now; asked once, right before it moves.
         end function proceed_i
+
+        subroutine land_live_i(path, used)
+            !! Told about the file `path` that the output of a running check
+            !! grows in: at most every LIVE_EVERY_MS while it runs, and once
+            !! when it has ended. `used`: the bytes from the start that it no
+            !! longer needs.
+            import :: int64
+            character(len=*), intent(in) :: path
+            integer(int64), intent(out) :: used
+        end subroutine land_live_i
     end interface
 
+    interface
+        function c_open(path, flags) bind(C, name='open') result(fd)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), value :: flags
+            integer(c_int) :: fd
+        end function c_open
+
+        ! Linux only (fy_platform.c); elsewhere it fails and the bytes stay.
+        function c_punch_hole(fd, offset, length) bind(C, name='fy_punch_hole') result(rc)
+            import :: c_int, c_long
+            integer(c_int), value :: fd
+            integer(c_long), value :: offset, length
+            integer(c_int) :: rc
+        end function c_punch_hole
+
+        function c_close(fd) bind(C, name='close') result(rc)
+            import :: c_int
+            integer(c_int), value :: fd
+            integer(c_int) :: rc
+        end function c_close
+    end interface
+
+    integer(c_int), parameter :: O_WRONLY = 1
+
     integer, parameter :: LOG_BYTES = 65536
+    integer, parameter :: LIVE_EVERY_MS = 2000
     character(len=*), parameter :: NO_CHECK = 'Not checked: the policy of the repository sets tests=none.'
     !! git's empty tree, the base of a first landing.
     character(len=*), parameter :: EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
@@ -114,7 +165,19 @@ module fy_land
         '--stdin --prefix="$PWD/" 2>&1 || exit 1; unset GIT_INDEX_FILE; rm -f .fy-index; '// &
         'IFS="'//new_line('a')//'"; set -f; fo fmt --check $files 2>&1'
 
+    !! Where the output of a check that runs here is announced while it grows;
+    !! none: the check runs to its end first.
+    procedure(land_live_i), pointer :: live => null()
+
 contains
+
+    subroutine land_set_live(sink)
+        !! The checks that run here from now on announce their output to
+        !! `sink` while they run; without `sink` they no longer do.
+        procedure(land_live_i), optional :: sink
+        live => null()
+        if (present(sink)) live => sink
+    end subroutine land_set_live
 
     subroutine land_hook_install(repo, stat)
         !! A pre-receive hook in the bare repository `repo`: pushes may create and
@@ -472,7 +535,7 @@ contains
             call git([character(len=1024) :: 'update-ref', '-d', check_ref(ident)])
             ! Set after the cleanup above, which reuses status and out.
             out = runner_log
-            if (passed) out = 'Checked by a runner.'//new_line('a')//runner_log
+            if (passed) out = live_outcome(runner_log, 'Checked by a runner.')
             status = merge(0, 1, passed)
         else
             call check_out(repo, work//'/check', made, out, status)
@@ -484,12 +547,12 @@ contains
         end if
         log = out
         if (status /= 0) then
-            log = 'The check failed (exit status '//itoa(status)//').'//new_line('a')//out
+            log = live_outcome(out, 'The check failed (exit status '//itoa(status)//').')
             return
         end if
         if (present(proceed)) then
             if (.not. proceed()) then
-                log = log//new_line('a')//'main was not moved: the landing was cancelled.'
+                log = live_outcome(log, 'main was not moved: the landing was cancelled.')
                 return
             end if
         end if
@@ -500,23 +563,23 @@ contains
             call git([character(len=1024) :: 'update-ref', 'refs/heads/main', made, NO_COMMIT])
         end if
         if (status /= 0) then
-            log = log//new_line('a')//'main could not be moved forward.'//new_line('a')//out
+            log = live_outcome(log, 'main could not be moved forward.'//new_line('a')//out)
             return
         end if
         ! Commits pushed to the branch since then stay on it.
         call git([character(len=1024) :: 'update-ref', '-d', 'refs/heads/'//branch, tip])
         commit = made
         ok = .true.
-        log = log//new_line('a')//'Landed as '//commit//'.'
+        log = live_outcome(log, 'Landed as '//commit//'.')
         if (len(upstream) > 0) then
             call run([character(len=1024) :: 'env', 'GIT_TERMINAL_PROMPT=0', 'timeout', '300', &
                 'git', '--git-dir', repo, 'push', '--quiet', upstream, &
                 'refs/heads/main:refs/heads/main'], '')
             if (status == 0) then
-                log = log//new_line('a')//'Pushed to '//upstream//'.'
+                log = live_outcome(log, 'Pushed to '//upstream//'.')
             else
-                log = log//new_line('a')//'Pushing to '//upstream//' failed:'// &
-                    new_line('a')//out
+                log = live_outcome(log, 'Pushing to '//upstream//' failed:'// &
+                    new_line('a')//out)
             end if
         end if
         call run([character(len=1024) :: 'rm', '-rf', work], '')
@@ -634,7 +697,7 @@ contains
         else if (present(runner)) then
             call runner(name, ref, passed, runner_log)
             out = runner_log
-            if (passed) out = 'Checked by a runner.'//new_line('a')//runner_log
+            if (passed) out = live_outcome(runner_log, 'Checked by a runner.')
             status = merge(0, 1, passed)
         else
             call check_out(repo, work, tip, out, status)
@@ -647,13 +710,13 @@ contains
         end if
         log = out
         if (status /= 0) then
-            log = 'The check failed (exit status '//itoa(status)//').'//new_line('a')//out
+            log = live_outcome(out, 'The check failed (exit status '//itoa(status)//').')
             call drop_holds()
             return
         end if
         if (present(proceed)) then
             if (.not. proceed()) then
-                log = log//new_line('a')//'main was not moved: a member was cancelled.'
+                log = live_outcome(log, 'main was not moved: a member was cancelled.')
                 call drop_holds()
                 return
             end if
@@ -666,7 +729,7 @@ contains
         if (status == 0) call git([character(len=1024) :: 'update-ref', 'refs/heads/main', tip, &
             main])
         if (status /= 0) then
-            log = log//new_line('a')//'main could not be moved forward.'//new_line('a')//out
+            log = live_outcome(log, 'main could not be moved forward.'//new_line('a')//out)
             call drop_holds()
             return
         end if
@@ -685,10 +748,10 @@ contains
                 'git', '--git-dir', repo, 'push', '--quiet', upstream, &
                 'refs/heads/main:refs/heads/main'], '')
             if (status == 0) then
-                log = log//new_line('a')//'Pushed to '//upstream//'.'
+                log = live_outcome(log, 'Pushed to '//upstream//'.')
             else
-                log = log//new_line('a')//'Pushing to '//upstream//' failed:'// &
-                    new_line('a')//out
+                log = live_outcome(log, 'Pushing to '//upstream//' failed:'// &
+                    new_line('a')//out)
             end if
         end if
         call run([character(len=1024) :: 'rm', '-rf', work], '')
@@ -790,7 +853,9 @@ contains
         !! The check of a landing commit checked out in `work`: fo build and fo
         !! test for an fpm project (applications built, so tests may run them),
         !! else an executable .fortyard/check; under a memory cap when systemd can
-        !! give one. `out` is its output, `code` its exit status. With `verify`,
+        !! give one. `out` is its output (folded as fold() says; the sink set
+        !! with land_set_live hears of it while it grows), `code` its exit
+        !! status. With `verify`,
         !! the verification of main instead (fy_verify): .fortyard/verify, the
         !! repository's full suite, else for an fpm project every test run
         !! again, without reusing earlier passes. `limit` is the time limit in
@@ -862,23 +927,16 @@ contains
             return
         end if
         ! timeout puts the check in a process group of its own and signals the
-        ! whole group, so compilers and test programs end with it.
-        if (lim > 0) cmd = [character(len=1024) :: 'timeout', '-k', trim(after), trim(seconds), cmd]
+        ! whole group: at the limit, and when the runner or lander that started
+        ! it ends, as the parent death signal reaches timeout, which passes it
+        ! on. So compilers and test programs end with it. A limit of 0 is none.
+        cmd = [character(len=1024) :: 'timeout', '-k', trim(after), trim(seconds), cmd]
         call get_environment_variable('XDG_RUNTIME_DIR', runtime, rn, rs)
         if (rs == 0 .and. len(proc_find('systemd-run')) > 0) cmd = [character(len=1024) :: &
             'systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', &
             'MemorySwapMax=0', cmd]
         call system_clock(started, rate)
-        ! A process the check started in a session of its own escapes the
-        ! group's signals; it is found by a mark in its environment and
-        ! killed once the check ended. The output goes through a file, so
-        ! such a process cannot hold the pipe open past the limit.
-        call proc_run([character(len=1024) :: 'sh', '-c', 'o=$(mktemp) || exit 125; '// &
-            'FORTYARD_CHECK="${FORTYARD_CHECK-}/$$/" "$@" > "$o" 2>&1; s=$?; '// &
-            'for i in 1 2 3 4 5; do p=$(grep -lzs -- "^FORTYARD_CHECK=.*/$$/" '// &
-            '/proc/[0-9]*/environ); [ -n "$p" ] || break; for f in $p; do f=${f#/proc/}; '// &
-            'kill -KILL "${f%/environ}" 2> /dev/null; done; done; '// &
-            'cat "$o"; rm -f "$o"; exit $s', 'check', cmd], out, code, LOG_BYTES, dir=work)
+        call run_live(cmd, work, out, code)
         call system_clock(ended)
         ! 124: timeout ended it with SIGTERM; 137: with SIGKILL after the grace.
         if (present(timed_out)) timed_out = lim > 0 .and. (code == 124 .or. code == 137) .and. &
@@ -894,7 +952,8 @@ contains
             !! when the tree's resident memory passes FY_CHECK_MEMORY GiB
             !! (default 8) it kills the group at once. Every process seen in
             !! the tree, also one that left the group, is killed when the
-            !! check ends.
+            !! check ends. The output goes to the file run_live reads, as on
+            !! Linux.
             character(len=16) :: gib
             integer :: gn, gs, mem, ios
 
@@ -907,12 +966,12 @@ contains
             write (gib, '(i0)') mem
             call system_clock(started, rate)
             ! The script is longer than the other arguments' 1024 characters.
-            call proc_run([character(len=4096) :: 'sh', '-c', &
-                'o=$(mktemp) && seen=$(mktemp) || exit 125; lim=$1 grace=$2 gib=$3; shift 3; '// &
+            call run_live([character(len=4096) :: 'sh', '-c', &
+                'seen=$(mktemp) || exit 125; lim=$1 grace=$2 gib=$3; shift 3; '// &
             ! perl gives the check a process group of its own; sh's job
             ! control does not without a terminal (dash).
                 'perl -e ''setpgrp(0, 0); exec { $ARGV[0] } @ARGV or die "$ARGV[0]: $!\n"'''// &
-                ' "$@" > "$o" 2>&1 & p=$!; t=0 why=; '// &
+                ' "$@" & p=$!; t=0 why=; '// &
                 'while kill -0 "$p" 2> /dev/null; do sleep 1; t=$((t + 1)); '// &
                 'set -- $(ps -A -o pid=,ppid=,rss= | awk -v r="$p" ''{ pp[$1] = $2; rs[$1] = $3 }'// &
                 ' END { d[r] = 1; do { c = 0; for (x in pp) if (!(x in d) && (pp[x] in d)) {'// &
@@ -934,12 +993,10 @@ contains
                 '2> /dev/null; } | awk -v w="$w" ''/^o/ { o[substr($0, 2)] = 1; next } /^s/ '// &
                 '{ s[substr($0, 2)] = 1; next } /^p/ { p = substr($0, 2); next } /^n/ { c = '// &
                 'substr($0, 2); if (c == w || index(c, w "/") == 1) s[p] = 1 } END { for (x in o) '// &
-                'if (x in s) print x }'' | xargs kill -KILL 2> /dev/null; done; cat "$o"; '// &
-                'rm -f "$o" "$seen"; '// &
+                'if (x in s) print x }'' | xargs kill -KILL 2> /dev/null; done; rm -f "$seen"; '// &
                 'case $why in time) exit 124 ;; memory) echo "The check used more than '// &
                 '$gib GiB of memory (FY_CHECK_MEMORY) and was ended."; exit 137 ;; esac; '// &
-                'exit $s', 'check', trim(seconds), trim(after), trim(gib), cmd], out, code, &
-                LOG_BYTES, dir=work)
+                'exit $s', 'check', trim(seconds), trim(after), trim(gib), cmd], work, out, code)
             call system_clock(ended)
             if (present(timed_out)) timed_out = lim > 0 .and. code == 124 .and. &
                 ended - started >= int(lim, int64)*rate
@@ -970,6 +1027,168 @@ contains
             i = j
         end do
     end function words
+
+    subroutine run_live(cmd, work, out, code)
+        !! Runs the check `cmd` in `work` with its output in a file, which
+        !! `live`, when set, is told about while it grows; `out` is the output
+        !! folded as fold() says. No pipe is involved, so a process the check
+        !! left behind cannot hold its end up. Bytes the sink has taken and the
+        !! fold does not need are freed in the file, so a check that writes
+        !! much does not fill the disk.
+        character(len=*), intent(in) :: cmd(:), work
+        character(len=:), allocatable, intent(out) :: out
+        integer, intent(out) :: code
+        character(len=:), allocatable :: file, mark, argv(:)
+        character(len=4096) :: outer
+        character(len=24) :: num
+        integer(int64) :: now, rate, told, have, used
+        integer :: pid, n, stat
+        logical :: done
+
+        call system_clock(now, rate)
+        write (num, '(i0,a,i0)') proc_pid(), '-', now
+        file = tmp_dir()//'/fy-check-'//trim(num)//'.log'
+        ! A process the check started in a session of its own escapes the
+        ! group's signals; it is found by this mark in its environment and
+        ! killed once the check ended. A check inside a check keeps the outer
+        ! marks, so the outer sweep finds its processes too.
+        mark = '/'//trim(num)//'/'
+        call get_environment_variable('FORTYARD_CHECK', outer, n, stat)
+        if (stat /= 0) outer = ''
+        out = ''
+        code = -1
+        allocate (character(len=max(len(cmd), len_trim(outer) + len(mark) + 15)) :: &
+            argv(size(cmd) + 2))
+        argv(1) = 'env'
+        argv(2) = 'FORTYARD_CHECK='//trim(outer)//mark
+        argv(3:) = cmd
+        call proc_start(argv, file, pid, dir=work)
+        if (pid < 0) then
+            call remove(file)
+            return
+        end if
+        told = now
+        do
+            call proc_try_wait(pid, done, code)
+            if (done) exit
+            call proc_sleep_ms(100)
+            call system_clock(now)
+            if ((now - told) * 1000 >= LIVE_EVERY_MS * rate .and. associated(live)) then
+                inquire (file=file, size=have)
+                call live(file, used)
+                call punch(file, LOG_BYTES / 2, min(used, have - LOG_BYTES / 2))
+                told = now
+            end if
+        end do
+        ! Before the last read, so nothing writes to the file any more.
+        call sweep(mark)
+        if (associated(live)) call live(file, used)
+        out = fold(file)
+        call remove(file)
+    end subroutine run_live
+
+    subroutine sweep(mark)
+        !! Kills every process whose environment carries the check mark `mark`.
+        character(len=*), intent(in) :: mark
+        character(len=:), allocatable :: out
+        integer :: stat
+
+        call proc_run([character(len=1024) :: 'sh', '-c', 'for i in 1 2 3 4 5; do '// &
+            'p=$(grep -lzs -- "^FORTYARD_CHECK=.*$1" /proc/[0-9]*/environ); [ -n "$p" ] || '// &
+            'break; for f in $p; do f=${f#/proc/}; kill -KILL "${f%/environ}" 2> /dev/null; '// &
+            'done; done', 'sweep', mark], out, stat, 4096)
+    end subroutine sweep
+
+    function fold(file) result(out)
+        !! The output in `file` when it is at most LOG_BYTES long; else its
+        !! first lines up to LOG_BYTES / 2, a line that says how many bytes were
+        !! left out (as the live log says it) and its last lines up to LOG_BYTES
+        !! / 2. Up to the left-out line, the lines and their numbers are those
+        !! of the live log.
+        character(len=*), intent(in) :: file
+        character(len=:), allocatable :: out, head, tail
+        integer(int64) :: have
+        integer :: k
+
+        out = ''
+        inquire (file=file, size=have)
+        if (have <= 0) return
+        if (have <= LOG_BYTES) then
+            out = bytes_of(file, 0_int64, have)
+            return
+        end if
+        head = bytes_of(file, 0_int64, int(LOG_BYTES / 2, int64))
+        head = head(1:index(head, new_line('a'), back=.true.))
+        tail = bytes_of(file, have - LOG_BYTES / 2, int(LOG_BYTES / 2, int64))
+        k = index(tail, new_line('a'))
+        if (k > 0 .and. k < len(tail)) tail = tail(k + 1:)
+        out = head//live_gap_line(have - len(head, int64) - len(tail, int64))//new_line('a')//tail
+    end function fold
+
+    function bytes_of(file, offset, n) result(bytes)
+        !! Up to `n` bytes of `file` from byte `offset` (0 the first).
+        character(len=*), intent(in) :: file
+        integer(int64), intent(in) :: offset, n
+        character(len=:), allocatable :: bytes
+        integer(int64) :: have
+        integer :: u, ios
+
+        bytes = ''
+        inquire (file=file, size=have)
+        if (have <= offset .or. n <= 0) return
+        open (newunit=u, file=file, status='old', access='stream', form='unformatted', &
+            action='read', iostat=ios)
+        if (ios /= 0) return
+        deallocate (bytes)
+        allocate (character(len=int(min(n, have - offset))) :: bytes)
+        read (u, pos=offset + 1, iostat=ios) bytes
+        close (u)
+        if (ios /= 0) bytes = ''
+    end function bytes_of
+
+    subroutine punch(file, from, upto)
+        !! Frees the disk blocks of bytes `from` to `upto` of `file`; its
+        !! length and the offsets of the bytes after them stay.
+        character(len=*), intent(in) :: file
+        integer, intent(in) :: from
+        integer(int64), intent(in) :: upto
+        integer(int64), parameter :: BLOCK = 4096
+        integer(int64) :: a, b
+        integer(c_int) :: fd, rc
+
+        a = (int(from, int64) + BLOCK - 1) / BLOCK * BLOCK
+        b = upto / BLOCK * BLOCK
+        if (b - a < 16 * BLOCK) return
+        fd = c_open(file//c_null_char, O_WRONLY)
+        if (fd < 0) return
+        rc = c_punch_hole(fd, int(a, c_long), int(b - a, c_long))
+        rc = c_close(fd)
+    end subroutine punch
+
+    subroutine remove(file)
+        character(len=*), intent(in) :: file
+        integer :: u, ios
+        open (newunit=u, file=file, status='old', iostat=ios)
+        if (ios == 0) close (u, status='delete')
+    end subroutine remove
+
+    subroutine land_live_clean()
+        !! Removes the output files of checks whose process is gone, as after a
+        !! runner or lander was stopped during a check.
+        integer :: code
+        call execute_command_line('for f in "'//tmp_dir()//'"/fy-check-*.log; do '// &
+            '[ -e "$f" ] || continue; p=${f##*/fy-check-}; p=${p%%-*}; '// &
+            'kill -0 "$p" 2>/dev/null || rm -f "$f"; done', exitstat=code)
+    end subroutine land_live_clean
+
+    function tmp_dir() result(dir)
+        character(len=:), allocatable :: dir
+        character(len=256) :: tmp
+        integer :: n, stat
+        call get_environment_variable('TMPDIR', tmp, n, stat)
+        if (stat /= 0 .or. n == 0) tmp = '/tmp'
+        dir = trim(tmp)
+    end function tmp_dir
 
     function check_ref(ident) result(ref)
         !! Where a landing commit waits for its runner: refs/fortyard/checks/N.
