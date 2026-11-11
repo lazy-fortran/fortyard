@@ -649,48 +649,58 @@ try {
   await adopted();
 
   // Two entries of one change: the first fails its check, the second lands.
-  const jobState = async (id) => (await (await fetch(url + 'api/v1/jobs/' + id, { headers: auth })).json()).state;
-  const landChange = async () => (await (await fetch(url + 'api/v1/repos/work/changes/1/land',
-    { method: 'POST', headers: auth, body: '{}' })).json()).landing;
+  // Its own change on main, and the token: earlier sections landed change 1
+  // and signed out and in again.
+  const tokenAuth = { Authorization: `Bearer ${admin}`, 'Content-Type': 'application/json' };
+  const jobState = async (id) => (await (await fetch(url + 'api/v1/jobs/' + id, { headers: tokenAuth })).json()).state;
+  wg('fetch', '-q', `http://x:${admin}@127.0.0.1:${port}${base}/work.git`, 'main');
+  wg('checkout', '-q', '-B', 'jobs-demo', 'FETCH_HEAD');
+  writeFileSync(join(wt, 'jobs.txt'), 'jobs\n');
+  wg('add', '-A');
+  wg('commit', '-q', '-m', 'Show the entries of a change');
   const pushCheck = (script) => {
     mkdirSync(join(wt, '.fortyard'), { recursive: true });
     writeFileSync(join(wt, '.fortyard', 'check'), script, { mode: 0o755 });
     wg('add', '-A');
     wg('commit', '-q', '--amend', '--no-edit');
-    wg('push', '-q', '-f', `http://x:${admin}@127.0.0.1:${port}${base}/work.git`, 'HEAD:feature');
+    wg('push', '-q', '-f', `http://x:${admin}@127.0.0.1:${port}${base}/work.git`, 'HEAD:jobs-demo');
   };
+  const landChange = async () => (await (await fetch(url + 'api/v1/repos/work/land',
+    { method: 'POST', headers: tokenAuth, body: JSON.stringify({ branch: 'jobs-demo' }) })).json()).landing;
   pushCheck('#!/bin/sh\necho checking\necho "FAIL: not yet"\nexit 1\n');
-  const first = await landChange();
-  for (let i = 0; i < 200 && await jobState(first) !== 'failed'; i++) await sleep(100);
-  await load('/jobs/' + first);
-  const failedJob = await (await fetch(url + 'api/v1/jobs/' + first, { headers: auth })).json();
-  check(await evaluate(hasText('job ' + first)) && await evaluate(hasText('failed')) &&
-    await evaluate(`document.querySelector(${JSON.stringify(linkTo('/work/-/changes/1'))}).textContent`) === 'work #1 Explain the feature',
+  const firstJob = await landChange();
+  const jobChange = (await (await fetch(url + 'api/v1/repos/work/changes?state=all', { headers: tokenAuth })).json())
+    .changes.find((c) => c.title === 'Show the entries of a change').number;
+  for (let i = 0; i < 200 && await jobState(firstJob) !== 'failed'; i++) await sleep(100);
+  await load('/jobs/' + firstJob);
+  const failedJob = await (await fetch(url + 'api/v1/jobs/' + firstJob, { headers: tokenAuth })).json();
+  check(await evaluate(hasText('job ' + firstJob)) && await evaluate(hasText('failed')) &&
+    await evaluate(`document.querySelector(${JSON.stringify(linkTo('/work/-/changes/' + jobChange))}).textContent`) === `work #${jobChange} Show the entries of a change`,
     'the page of a job names its change and links to it');
   check(failedJob.error_line > 0 &&
     await evaluate(`document.getElementById('L${failedJob.error_line}').textContent.endsWith('FAIL: not yet')`),
     'the first line with Error or FAIL is named');
-  await click(linkTo(`/jobs/${first}#L${failedJob.error_line}`));
+  await click(linkTo(`/jobs/${firstJob}#L${failedJob.error_line}`));
   await until(`location.hash === '#L${failedJob.error_line}'`, 'the line address');
-  check(await path() === '/jobs/' + first, 'and linked at the top: the link leads to the address of that line');
+  check(await path() === '/jobs/' + firstJob, 'and linked at the top: the link leads to the address of that line');
   check(await evaluate(`(document.querySelector(':target') || {}).id`) === 'L' + failedJob.error_line,
     'and the line it leads to is marked as the target');
   // The page is live: the entry that replaces this one appears without input.
   pushCheck('#!/bin/sh\necho checking\n');
-  const second = await landChange();
-  await until(`!!document.querySelector(${JSON.stringify(linkTo('/jobs/' + second))})`, 'the next entry');
-  await until(`document.querySelector(${JSON.stringify(linkTo('/jobs/' + second))}).textContent === 'job ${second}, landed'`, 'its landing');
+  const secondJob = await landChange();
+  await until(`!!document.querySelector(${JSON.stringify(linkTo('/jobs/' + secondJob))})`, 'the next entry');
+  await until(`document.querySelector(${JSON.stringify(linkTo('/jobs/' + secondJob))}).textContent === 'job ${secondJob}, landed'`, 'its landing');
   check(await evaluate(hasText('entry 1 of 2')) && await evaluate(hasText('next entry of this change:')),
     'an open job page learns of the next entry of its change and of its outcome');
-  await click(linkTo('/jobs/' + second));
+  await click(linkTo('/jobs/' + secondJob));
   await until(hasText('entry 2 of 2'), 'the second entry');
-  check(await path() === '/jobs/' + second && await evaluate(hasText('landed')) &&
+  check(await path() === '/jobs/' + secondJob && await evaluate(hasText('landed')) &&
     !await evaluate(hasText('next entry of this change:')), 'the entry that landed is entry 2 of 2 of the same change');
   await load('/jobs?repo=work');
-  const toChange = (id) => `!!document.querySelector('[data-box="row-j${id}"] ' + ${JSON.stringify(linkTo('/work/-/changes/1'))})`;
-  check(await evaluate(toChange(first)) && await evaluate(toChange(second)) &&
-    await evaluate(`[...document.querySelectorAll('[data-box="row-j${first}"] .fui')].some((e) => e.textContent.includes('entry 1 of 2'))`) &&
-    await evaluate(`[...document.querySelectorAll('[data-box="row-j${second}"] .fui')].some((e) => e.textContent.includes('entry 2 of 2'))`),
+  const toChange = (id) => `!!document.querySelector('[data-box="row-j${id}"] ' + ${JSON.stringify(linkTo('/work/-/changes/' + jobChange))})`;
+  check(await evaluate(toChange(firstJob)) && await evaluate(toChange(secondJob)) &&
+    await evaluate(`[...document.querySelectorAll('[data-box="row-j${firstJob}"] .fui')].some((e) => e.textContent.includes('entry 1 of 2'))`) &&
+    await evaluate(`[...document.querySelectorAll('[data-box="row-j${secondJob}"] .fui')].some((e) => e.textContent.includes('entry 2 of 2'))`),
     'the rows of the jobs page link to the change and show the two entries of it');
   // A change with a title of ordinary length whose check prints CR LF line
   // ends and fails; its check is recorded with a runner (no runner runs here).
@@ -701,10 +711,10 @@ try {
   wg('add', '-A');
   wg('commit', '-q', '-m', longTitle);
   wg('push', '-q', `http://x:${admin}@127.0.0.1:${port}${base}/work.git`, 'HEAD:long');
-  const changes = await (await fetch(url + 'api/v1/repos/work/changes', { headers: auth })).json();
+  const changes = await (await fetch(url + 'api/v1/repos/work/changes', { headers: tokenAuth })).json();
   const longChange = changes.changes.find((c) => c.title === longTitle).number;
   const third = (await (await fetch(url + `api/v1/repos/work/changes/${longChange}/land`,
-    { method: 'POST', headers: auth, body: '{}' })).json()).landing;
+    { method: 'POST', headers: tokenAuth, body: '{}' })).json()).landing;
   for (let i = 0; i < 200 && await jobState(third) !== 'failed'; i++) await sleep(100);
   execFileSync('sqlite3', [join(data, 'd', 'fortyard.db'), `INSERT INTO checks (repo, ref, state, runner, created_at,
     claimed_at, finished_at) VALUES ('work', 'refs/fortyard/checks/${third}', 'failed', 'faepkub4',
@@ -720,7 +730,7 @@ try {
     !await evaluate(hasText('Loading...')), 'an unknown kind in the address matches no job');
   await send('Emulation.setDeviceMetricsOverride', { width: 375, height: 740, deviceScaleFactor: 2, mobile: true });
   wide = [];
-  for (const to of ['/jobs', '/jobs/' + first]) {
+  for (const to of ['/jobs', '/jobs/' + firstJob]) {
     await load(to);
     await adopted();
     if (!await evaluate(noOverflow)) wide.push(to);
