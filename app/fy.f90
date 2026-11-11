@@ -12,6 +12,7 @@ program fy
         FY_VERSION
     use fy_cli, only: &
         cli_field, &
+        cli_stats, &
         cli_table, &
         cli_tail
     use fy_client, only: &
@@ -62,6 +63,8 @@ program fy
     select case (command)
     case ('audit')
         call cmd_audit()
+    case ('board')
+        call cmd_stats(.true.)
     case ('change')
         call cmd_change()
     case ('git-credential')
@@ -88,6 +91,8 @@ program fy
         call cmd_runner()
     case ('serve')
         call cmd_serve()
+    case ('stats')
+        call cmd_stats(.false.)
     case ('token')
         call cmd_token()
     case ('verify')
@@ -178,6 +183,12 @@ contains
             '  verify [REPO] [--no-wait]', &
             '                      verify main''s newest commit with the full suite', &
             '  job ID [--wait]     a job''s state and log; --wait follows it', &
+            '  stats [REPO] [--days N]', &
+            '                      queue numbers of the last 1, 7 or 30 days (7 unless N', &
+            '                      says so) of a repository or of all: time from fy land', &
+            '                      to main, landings per hour, failed entries, checks', &
+            '  board --stats [REPO] [--days N]', &
+            '                      the same for one repository, the checkout''s by default', &
             '                      (--json: the answer of the API instead of text)', &
         ! the audit log
             '  audit list [--before ID] [--limit N] [--json]', &
@@ -608,6 +619,42 @@ contains
         flush (output_unit)
         if (.not. flag('--no-wait')) call follow_job(cfg, id)
     end subroutine cmd_verify
+
+    subroutine cmd_stats(board)
+        !! fy stats [REPO] [--days N]: the queue numbers of a repository, or of
+        !! the instance without one. fy board --stats [REPO] [--days N]: those
+        !! of a repository, the checkout's without one.
+        logical, intent(in) :: board
+        type(config_t) :: cfg
+        character(len=:), allocatable :: body, repo, path, days
+        integer :: code, stat
+
+        if (board .and. .not. flag('--stats')) then
+            write (error_unit, '(a)') 'fy: usage: fy board --stats [REPO] [--days N]'
+            call quit(2)
+        end if
+        days = option('--days', '')
+        if (verify(days, '0123456789') /= 0) then
+            write (error_unit, '(a)') 'fy: --days takes 1, 7 or 30'
+            call quit(2)
+        end if
+        call config_load(cfg)
+        call require_login(cfg)
+        repo = positional(1)
+        if (board) then
+            if (len(repo) == 0) repo = remote_repo(cfg%server)
+            path = '/api/v1/repos/'//repo//'/board?stats=1'
+        else
+            path = '/api/v1/stats?repo='//repo
+        end if
+        if (len(days) > 0) path = path//'&days='//days
+        call client_request(cfg%server, 'GET', path, cfg%token, '', code, body, stat)
+        if (stat /= 0 .or. code /= 200 .or. flag('--json')) then
+            call report(code, body, stat)
+            return
+        end if
+        write (output_unit, '(a)', advance='no') cli_stats(body)
+    end subroutine cmd_stats
 
     subroutine cmd_landings()
         !! fy landings [REPO]: recent landings of a repository.
@@ -1087,7 +1134,7 @@ contains
         do while (i <= command_argument_count())
             if (index(arg(i), '--') == 1) then
                 select case (arg(i))
-                case ('--no-push', '--no-wait', '--wait', '--json', '--init', '--all')
+                case ('--no-push', '--no-wait', '--wait', '--json', '--init', '--all', '--stats')
                     i = i + 1
                 case default
                     i = i + 2

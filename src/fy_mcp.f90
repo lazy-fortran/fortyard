@@ -73,6 +73,7 @@ module fy_mcp
     ! jobs
         'jobs', 'Running, waiting and recent jobs', 'repo?', &
         'job', 'A job: its state and the end of its log', 'id lines?', &
+        'stats', 'Queue numbers of the last 1, 7 (default) or 30 days', 'repo? days?', &
         'verify', 'Queue a verification of main with the full suite (admin)', 'repo']
     integer, parameter :: N_TOOLS = size(TOOL_LINES) / 3
     character(len=*), parameter :: TOOLS(3, N_TOOLS) = reshape(TOOL_LINES, [3, N_TOOLS])
@@ -264,6 +265,7 @@ contains
         case ('body'); json = text_arg('Text, Markdown')
         case ('title'); json = text_arg('Title')
         case ('branch'); json = text_arg('Branch on the server')
+        case ('days'); json = number_arg('Days of the window: 1, 7 (default) or 30')
         case ('id'); json = number_arg('Job id')
         case ('lines'); json = number_arg('Lines from the end of the log, 40 by default')
         case default; json = '{"type":"string"}'
@@ -315,7 +317,7 @@ contains
             select case (name)
             case ('repo'); if (len(value) > 0) found = repo_name_ok(value)
             case ('branch'); if (len(value) > 0) found = repo_ref_ok(value)
-            case ('number', 'id', 'lines', 'version', 'from')
+            case ('days', 'number', 'id', 'lines', 'version', 'from')
                 found = found .and. verify(value, '0123456789') == 0
             case ('state')
                 ! The server answers a state it does not know with an empty list.
@@ -343,6 +345,10 @@ contains
             if (len(repo) > 0) path = path//'?repo='//repo
         case ('job'); path = '/api/v1/jobs/'//argument(message, 'id')
         case ('landings'); path = '/api/v1/repos/'//repo//'/landings'
+        case ('stats')
+            path = '/api/v1/stats?repo='//repo
+            value = argument(message, 'days')
+            if (len(value) > 0) path = path//'&days='//value
         case ('changes', 'issues')
             path = '/api/v1/repos/'//repo//'/'//tool
             value = argument(message, 'state')

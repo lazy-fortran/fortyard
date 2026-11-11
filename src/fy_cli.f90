@@ -1,6 +1,8 @@
 module fy_cli
     !! Text output of the command line client: API answers as aligned tables
     !! and single fields, for people rather than for scripts.
+    use, intrinsic :: iso_fortran_env, only: &
+        int64
     use fx_json_parse, only: &
         JSON_ARRAY_END, &
         JSON_ARRAY_START, &
@@ -23,6 +25,7 @@ module fy_cli
 
     public :: &
         cli_field, &
+        cli_stats, &
         cli_table, &
         cli_tail
 
@@ -139,6 +142,117 @@ contains
             end select
         end do
     end function cli_field
+
+    function cli_stats(body) result(text)
+        !! The queue numbers of GET /api/v1/stats, one line per measure the
+        !! answer has; a measure it lacks has no line.
+        character(len=*), intent(in) :: body
+        character(len=:), allocatable :: text, repo, line, field
+        character(len=1), parameter :: NL = new_line('a')
+
+        repo = cli_field(body, 'repo')
+        if (len(repo) == 0) repo = 'all repositories'
+        text = 'Queue numbers · '//repo//' · '//cli_field(body, 'days')//' days'//NL
+        if (.not. has('landings_per_hour')) then
+            text = text//'No landings in this window.'//NL
+        else
+            text = text//' landed          '//cli_field(body, 'landed')//'   '// &
+                decimal('landings_per_hour', 2)//' per hour, '// &
+                decimal('landings_per_day', 1)//' per day'//NL// &
+                ' land to main    p50 '//duration('land_to_main_p50_seconds')//'   p95 '// &
+                duration('land_to_main_p95_seconds')//NL
+        end if
+        if (has('first_entry_share')) text = text//' first entry     '// &
+            percent('first_entry_share')//' landed with their first entry'//NL
+        if (has('failed')) text = text//' failed entries  '//cli_field(body, 'failed')//'   '// &
+            percent('failed_share')//' of the finished entries'//NL
+        if (has('checks')) then
+            line = ' checks          wait p50 '//duration('check_wait_p50_seconds')//'  p95 '// &
+                duration('check_wait_p95_seconds')//'   run p50 '// &
+                duration('check_run_p50_seconds')//'  p95 '//duration('check_run_p95_seconds')
+            if (has('checks_per_landed_change')) line = line//'   '// &
+                decimal('checks_per_landed_change', 2)//' checks per landed change'
+            text = text//line//NL
+        end if
+        if (has('verifications')) then
+            line = ' main            '//cli_field(body, 'verifications_failed')//' of '// &
+                cli_field(body, 'verifications')//' verifications failed'
+            if (has('failed_verifications_per_100_landings')) line = line//', '// &
+                decimal('failed_verifications_per_100_landings', 1)//' per 100 landings'
+            text = text//line//NL
+        end if
+        if (has('flagged_undecided')) text = text//' review          '// &
+            cli_field(body, 'flagged_undecided')//' flagged undecided'//NL
+
+    contains
+
+        logical function has(name)
+            character(len=*), intent(in) :: name
+            has = len(cli_field(body, name)) > 0
+        end function has
+
+        function duration(name) result(s)
+            !! Seconds in words: 16 s, 1 min 3 s, 2 h 5 min.
+            character(len=*), intent(in) :: name
+            character(len=:), allocatable :: s
+            integer(int64) :: t
+            integer :: ios
+
+            field = cli_field(body, name)
+            read (field, *, iostat=ios) t
+            if (ios /= 0) t = 0
+            if (t < 60) then
+                s = itoa(t)//' s'
+            else if (t < 3600) then
+                s = itoa(t/60)//' min'
+                if (mod(t, 60_int64) > 0) s = s//' '//itoa(mod(t, 60_int64))//' s'
+            else
+                s = itoa(t/3600)//' h'
+                if (mod(t, 3600_int64) >= 60) s = s//' '//itoa(mod(t, 3600_int64)/60)//' min'
+            end if
+        end function duration
+
+        function decimal(name, places) result(s)
+            !! A real of the answer with `places` decimal places.
+            character(len=*), intent(in) :: name
+            integer, intent(in) :: places
+            character(len=:), allocatable :: s
+            character(len=32) :: b
+            character(len=8) :: fmt
+            real :: x
+            integer :: ios
+
+            field = cli_field(body, name)
+            read (field, *, iostat=ios) x
+            if (ios /= 0) x = 0
+            write (fmt, '(a,i0,a)') '(f0.', places, ')'
+            write (b, fmt) x
+            s = trim(b)
+            ! f0 leaves out the zero before the point.
+            if (s(1:1) == '.') s = '0'//s
+        end function decimal
+
+        function percent(name) result(s)
+            character(len=*), intent(in) :: name
+            character(len=:), allocatable :: s
+            real :: share
+            integer :: ios
+
+            field = cli_field(body, name)
+            read (field, *, iostat=ios) share
+            if (ios /= 0) share = 0
+            s = itoa(nint(100*share, int64))//' %'
+        end function percent
+
+        function itoa(v) result(s)
+            integer(int64), intent(in) :: v
+            character(len=:), allocatable :: s
+            character(len=24) :: b
+            write (b, '(i0)') v
+            s = trim(b)
+        end function itoa
+
+    end function cli_stats
 
     function cli_tail(text, lines) result(tail)
         !! The last `lines` lines of `text`.

@@ -128,6 +128,9 @@ module fy_server
     use fy_sqlite, only: &
         db_close, &
         db_t
+    use fy_stats, only: &
+        stats_days_ok, &
+        stats_json
     use fy_store, only: &
         landing_t, &
         random_token, &
@@ -847,6 +850,15 @@ contains
                 return
             end if
         end if
+        if (len(rest) > 6) then
+            ! The board's queue numbers; the board itself is not built yet.
+            if (rest(len(rest) - 5:) == '/board' .and. &
+                http_query_param(req%query, 'stats') == '1') then
+                if (.not. method_is(req, 'GET', res)) return
+                call stats_route(req, db, rest(1:len(rest) - 6), res, named=.true.)
+                return
+            end if
+        end if
         if (len(rest) > 9) then
             if (rest(len(rest) - 8:) == '/landings') then
                 if (.not. method_is(req, 'GET', res)) return
@@ -1563,6 +1575,10 @@ contains
             else
                 call fail(res, 405, 'use POST or DELETE')
             end if
+        case ('/api/v1/stats')
+            if (.not. method_is(req, 'GET', res)) return
+            if (.not. authenticated(req, db, who, res)) return
+            call stats_route(req, db, http_query_param(req%query, 'repo'), res)
         case ('/api/v1/tokens')
             if (req%method == 'GET') then
                 if (.not. authenticated(req, db, who, res)) return
@@ -1824,6 +1840,43 @@ contains
         end function itoa
 
     end subroutine jobs_route
+
+    subroutine stats_route(req, db, repo, res, named)
+        !! GET /api/v1/stats[?repo=NAME][&days=1|7|30] and
+        !! GET /api/v1/repos/NAME/board?stats=1[&days=]: the queue numbers
+        !! (fy_stats) of a repository, or of the instance without one, over 7
+        !! days unless `days` says otherwise. `named`: the path names the
+        !! repository, so there must be one.
+        type(http_request_t), intent(in) :: req
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: repo
+        type(response_t), intent(inout) :: res
+        logical, intent(in), optional :: named
+        type(policy_t) :: policy
+        character(len=:), allocatable :: text
+        integer :: days, ios
+        logical :: found
+
+        found = len(repo) == 0
+        if (present(named)) found = found .and. .not. named
+        if (len(repo) > 0 .and. repo_name_ok(repo)) call policy_get(db, repo, policy, found)
+        if (.not. found) then
+            call fail(res, 404, 'no such repository')
+            return
+        end if
+        days = 7
+        text = http_query_param(req%query, 'days')
+        if (len(text) > 0) then
+            ios = 1
+            if (len(text) <= 2 .and. verify(text, '0123456789') == 0) &
+                read (text, *, iostat=ios) days
+            if (ios /= 0 .or. .not. stats_days_ok(days)) then
+                call fail(res, 400, 'days is 1, 7 or 30')
+                return
+            end if
+        end if
+        res%body = stats_json(db, repo, days)
+    end subroutine stats_route
 
     subroutine audit_route(req, db, res)
         !! GET /api/v1/audit[?before=ID][&limit=N]: the audit log, newest entry

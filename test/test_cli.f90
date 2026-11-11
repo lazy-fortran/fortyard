@@ -98,6 +98,34 @@ program test_cli
     call check(index(out, '\"changes\":[') > 0 .and. index(out, '"isError":false') > 0, &
         'fy mcp lists the changes of a repository: '//out)
 
+    ! The queue numbers of the one landed and the one failed entry.
+    call run(env//fy//' stats')
+    call check(stat == 0 .and. index(out, 'Queue numbers · all repositories · 7 days') == 1 &
+        .and. index(out, ' landed          1   ') > 0 .and. index(out, ' land to main    p50 ') > 0 &
+        .and. index(out, ' failed entries  1   50 % of the finished entries') > 0 .and. &
+        index(out, ' first entry     100 % landed') > 0, 'fy stats prints the numbers: '//out)
+    call run(env//fy//' stats demo --days 30 --json')
+    call check(stat == 0 .and. index(out, '{"repo":"demo","days":30,') == 1 .and. &
+        index(out, '"landed":1,') > 0, 'fy stats REPO --days N --json prints the answer: '//out)
+    call run('cd '//work//' && '//env//fy//' board --stats --days 1')
+    call check(stat == 0 .and. index(out, 'Queue numbers · demo · 1 days') == 1 .and. &
+        index(out, ' landed          1   ') > 0, &
+        'fy board --stats prints those of the checkout''s repository: '//out)
+    call run(env//fy//' stats --days 5')
+    call check(stat /= 0 .and. index(out, 'days is 1, 7 or 30') > 0, &
+        'fy stats refuses another window: '//out)
+    call run(env//fy//' stats nowhere')
+    call check(stat /= 0 .and. index(out, 'no such repository') > 0, &
+        'fy stats refuses a repository that is not there: '//out)
+    call run('printf "%s\n" ''{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":'// &
+        '"stats","arguments":{"repo":"demo","days":30}}}'' | '//env//fy//' mcp')
+    call check(index(out, '\"days\":30') > 0 .and. index(out, '\"landed\":1') > 0 .and. &
+        index(out, '"isError":false') > 0, 'the MCP tool stats answers the numbers: '//out)
+    call run('printf "%s\n" ''{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":'// &
+        '"stats","arguments":{}}}'' | '//env//fy//' mcp')
+    call check(index(out, '\"repo\":\"\",\"days\":7') > 0 .and. index(out, '"isError":false') > 0, &
+        'the MCP tool stats without arguments answers for the instance: '//out)
+
     ! fy push refuses a file over 1 MiB before it sends anything, unless
     ! .fortyard/allow-large allows it.
     call run('cd '//work//' && git checkout -q -b heavy FETCH_HEAD && head -c 2000000 '// &
