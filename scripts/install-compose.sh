@@ -33,22 +33,27 @@ if [ ! -e "$home/data/fortyard.db" ]; then
     chmod 600 "$home/bootstrap-token"
 fi
 docker compose -f "$home/compose.yaml" up -d
+# A token named after its use, the time and this run, as a name is taken for
+# good, also after the token in a lost file is revoked; written only when made.
+mint() {
+    reply=$(docker exec fortyard curl -fsS -H "Authorization: Bearer $(cat "$home/bootstrap-token")" \
+        -H 'Content-Type: application/json' -d "{\"name\":\"$1 $(date -u +%Y-%m-%dT%H:%M:%SZ) $$\"}" \
+        http://127.0.0.1:8740/api/v1/tokens)
+    token=$(printf '%s\n' "$reply" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+    [ -n "$token" ] || { echo "install-compose: no $1 token: $reply" >&2; exit 1; }
+    (umask 077 && printf '%s' "$token" > "$2")
+    chmod 600 "$2"
+}
 if [ ! -s "$home/update-token" ]; then
     i=0
     until docker exec fortyard curl -fsS -m 2 http://127.0.0.1:8740/healthz >/dev/null 2>&1; do
         i=$((i + 1)); [ $i -lt 50 ] || exit 1; sleep 0.2
     done
-    docker exec fortyard curl -fsS -H "Authorization: Bearer $(cat "$home/bootstrap-token")" \
-        -H 'Content-Type: application/json' -d '{"name":"self-update"}' \
-        http://127.0.0.1:8740/api/v1/tokens | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' > "$home/update-token"
-    chmod 600 "$home/update-token"
+    mint self-update "$home/update-token"
 fi
 # The runner's token; the runner (re)starts once it exists.
 if [ ! -s "$home/runner-token" ]; then
-    docker exec fortyard curl -fsS -H "Authorization: Bearer $(cat "$home/bootstrap-token")" \
-        -H 'Content-Type: application/json' -d '{"name":"runner"}' \
-        http://127.0.0.1:8740/api/v1/tokens | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' > "$home/runner-token"
-    chmod 600 "$home/runner-token"
+    mint runner "$home/runner-token"
     docker restart fortyard-runner >/dev/null
 fi
 echo "fortyard runs below $base; bootstrap token in $home/bootstrap-token"

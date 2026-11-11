@@ -427,8 +427,8 @@ contains
 
     ! ---- composing -----------------------------------------------------------------------
 
-    subroutine change_view_compose(admin, narrow)
-        logical, intent(in) :: admin, narrow
+    subroutine change_view_compose(may_land, narrow)
+        logical, intent(in) :: may_land, narrow
 
         if (.not. allocated(rows)) call init()
         if (len(message) > 0) call text(message, size=BODY, tone=UI_TONE_NEGATIVE, id="cvmessage")
@@ -443,7 +443,7 @@ contains
             if (tab == 'new') then
                 call new_issue_view()
             else
-                call item_view(admin, narrow)
+                call item_view(may_land, narrow)
             end if
         end select
     end subroutine change_view_compose
@@ -509,8 +509,8 @@ contains
         call column_end()
     end subroutine list_view
 
-    subroutine item_view(admin, narrow)
-        logical, intent(in) :: admin, narrow
+    subroutine item_view(may_land, narrow)
+        logical, intent(in) :: may_land, narrow
         character(len=:), allocatable :: base_path
         integer :: k
 
@@ -596,7 +596,7 @@ contains
         call row_end()
 
         call row_begin(GAP, id="actions")
-        if (kind == R_CHANGE .and. i_state == 'open' .and. admin) then
+        if (kind == R_CHANGE .and. i_state == 'open' .and. may_land) then
             if (button("land", "Land", height=ROW_H, size=BODY)) &
                 call fetch_start(action_req, 'POST', item_of//'/land', '{}')
         end if

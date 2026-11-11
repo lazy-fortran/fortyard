@@ -268,7 +268,9 @@ contains
         else
             select case (page)
             case (R_CHANGE, R_CHANGES, R_ISSUE, R_ISSUES)
-                call change_view_compose(index(scopes, 'admin') > 0, page_w < 600.0)
+                ! The land scope lands without admin.
+                call change_view_compose(index(' '//scopes//' ', ' admin ') > 0 .or. &
+                    index(' '//scopes//' ', ' land ') > 0, page_w < 600.0)
             case (R_JOBS)
                 call jobs_view_compose(page_w < 600.0)
             case (R_MISSING)

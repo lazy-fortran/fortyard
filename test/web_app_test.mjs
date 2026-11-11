@@ -339,6 +339,26 @@ try {
     'a session with write and without admin is offered no token form');
   await until(hasText('agent-1'), 'its token');
   check(!(await evaluate(hasText('bootstrap'))), 'such a session lists only its own token');
+  const landButton = `!!document.querySelector('[data-id$="/land"]')`;
+  await load('/work/-/changes/1');
+  await until(hasText('Why it matters for the study.'), 'the change page for a write session');
+  check(!(await evaluate(landButton)), 'a session without the land scope is offered no Land button');
+
+  // The land scope lands without admin, so its session gets the button.
+  const lands = await (await fetch(url + 'api/v1/tokens', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${admin}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'agent-2', scopes: 'land' }),
+  })).json();
+  await click('[data-box="sidebar"] [data-id$="/signout"]');
+  await until(`!!document.querySelector('[data-id$="/token"]')`, 'signed out of the write session');
+  await click('[data-id$="/token"]');
+  await send('Input.insertText', { text: lands.token });
+  await click('[data-id$="/signin"]');
+  await until(hasText('admin'), 'signed in with a land token');
+  await load('/work/-/changes/1');
+  await until(landButton, 'the Land button for a land session');
+  check(true, 'a session with the land scope and without admin is offered the Land button');
 } catch (e) {
   check(false, e.message);
 } finally {

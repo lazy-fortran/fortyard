@@ -19,6 +19,8 @@ module fy_server
         json_escape_string
     use fx_json_parse, only: &
         json_extract_string
+    use fx_string, only: &
+        to_lower
     use fy_audit, only: &
         audit_append, &
         audit_json, &
@@ -199,8 +201,16 @@ module fy_server
     character(len=*), parameter :: LOGIN_COOKIE = 'fy_login'
     integer, parameter :: SESSION_DAYS = 14
     character(len=*), parameter :: SESSION_MAX_AGE = '1209600'
-    !! Name of the tokens that are browser sessions.
+    !! Name of the tokens that are browser sessions, and the start of the
+    !! name of one opened through the provider; no token takes such a name.
     character(len=*), parameter :: SESSION_NAME = 'browser session'
+    !! The scopes the server checks; a token names no other.
+    character(len=*), parameter :: KNOWN_SCOPES(*) = [character(len=7) :: &
+        'admin', &
+        'land', &
+        'release', &
+        'runner', &
+        'write']
     !! Preferences the browser keeps in cookies, read for the first frame.
     character(len=*), parameter :: SIDEBAR_COOKIE = 'fy_sidebar', THEME_COOKIE = 'fy_theme'
     character(len=2), parameter :: CRLF = achar(13)//achar(10)
@@ -269,6 +279,7 @@ contains
             slots = slots + 1
             review_slot = slots
         end if
+        if (allocated(repos_dir)) call hooks_refresh(db_path)
         do i = 1, slots
             call spawn(i)
         end do
@@ -358,6 +369,28 @@ contains
 
     end subroutine server_supervise
 
+    subroutine hooks_refresh(db_path)
+        !! Gives every primary repository the current pre-receive hook before
+        !! any worker takes a push: a hook from before an upgrade may let a
+        !! write token move what only an administrator may.
+        character(len=*), intent(in) :: db_path
+        type(db_t) :: db
+        type(repo_info_t), allocatable :: repos(:)
+        integer :: stat, i, status
+        logical :: exists
+
+        call store_open(db_path, db, stat)
+        if (stat /= 0) return
+        call store_repo_list(db, repos, stat)
+        call db_close(db)
+        if (.not. allocated(repos)) return
+        do i = 1, size(repos)
+            if (repos(i)%mode /= 'primary') cycle
+            inquire (file=repo_path(repos(i)%name)//'/HEAD', exist=exists)
+            if (exists) call land_hook_install(repo_path(repos(i)%name), status)
+        end do
+    end subroutine hooks_refresh
+
     subroutine mirror_main(db_path)
         !! Clones repositories that have no mirror yet and fetches the others
         !! every mirror interval; a failed fetch is recorded and retried then.
@@ -384,10 +417,6 @@ contains
                         ! Due at once: fetch in the first round after a start.
                         last = [last, now - int(mirror_interval, int64) * rate]
                         k = size(names)
-                        ! A repository from before a change of the hook gets the new one.
-                        inquire (file=repo_path(repos(i)%name)//'/HEAD', exist=exists)
-                        if (exists .and. repos(i)%mode == 'primary') &
-                            call land_hook_install(repo_path(repos(i)%name), status)
                     end if
                     call system_clock(now, rate)
                     inquire (file=repo_path(repos(i)%name)//'/HEAD', exist=exists)
@@ -2057,28 +2086,35 @@ contains
     end function text_or_null
 
     subroutine create_token(req, db, who, res)
-        !! A token can mint tokens for its own account with at most its scopes:
-        !! all of them, or the subset named in "scopes" (separated by spaces or
-        !! commas), so a runner on another host carries only the runner scope.
-        !! A token that writes or lands without admin mints none: its name is
-        !! the session the lists show, which a session must not multiply.
+        !! An admin token mints tokens for its own account with the scopes named
+        !! in "scopes" (separated by spaces or commas), or with its own, so a
+        !! runner on another host carries only the runner scope. No other token
+        !! mints any: a name is taken for good, also after revocation, so a
+        !! machine token could otherwise take the name of a later session.
         type(http_request_t), intent(in) :: req
         type(db_t), intent(in) :: db
         type(token_identity_t), intent(in) :: who
         type(response_t), intent(inout) :: res
         character(len=:), allocatable :: name, token, scopes, word
         logical :: found
-        integer :: stat, at, space
+        integer :: stat, at, space, i
 
-        if (.not. has_scope(who, 'admin') .and. (has_scope(who, 'write') .or. &
-            has_scope(who, 'land'))) then
-            call fail(res, 403, 'a token with the write or land scope creates no tokens;'// &
-                ' that needs the admin scope')
+        if (.not. has_scope(who, 'admin')) then
+            call fail(res, 403, 'creating tokens needs the admin scope')
             return
         end if
         call json_extract_string(req%body, 'name', name, found)
         if (.not. found .or. len(name) == 0 .or. len(name) > 100) then
             call fail(res, 400, 'body must be {"name":"..."}')
+            return
+        end if
+        ! A blank at either end would make a name that looks like another.
+        if (iachar(name(1:1)) <= 32 .or. iachar(name(len(name):len(name))) <= 32) then
+            call fail(res, 400, 'a token name has no blank at its start or end')
+            return
+        end if
+        if (index(to_lower(name), SESSION_NAME) == 1) then
+            call fail(res, 400, 'the name '//SESSION_NAME//' is kept for browser sessions')
             return
         end if
         call json_extract_string(req%body, 'scopes', scopes, found)
@@ -2102,16 +2138,25 @@ contains
                     word = scopes(at:at + space - 2)
                     at = at + space
                 end if
-                ! admin permits everything, so it may grant any narrower scope.
-                if (index(' '//who%scopes//' ', ' '//word//' ') == 0 .and. &
-                    index(' '//who%scopes//' ', ' admin ') == 0) then
-                    call fail(res, 403, 'a token cannot grant the scope '//word//' it lacks')
+                ! A mistyped scope would give a token that may do nothing.
+                if (findloc(KNOWN_SCOPES, word, 1) == 0) then
+                    word = 'there is no scope '//word//'; the scopes are'
+                    do i = 1, size(KNOWN_SCOPES)
+                        word = word//' '//trim(KNOWN_SCOPES(i))
+                    end do
+                    call fail(res, 400, word)
                     return
                 end if
             end do
         end if
-        call store_token_create(db, who%account_id, name, scopes, token, stat)
-        if (stat /= 0) then
+        ! Versions, landings and jobs record only the name, so it must name one
+        ! token, also after that one is revoked.
+        call store_token_create(db, who%account_id, name, scopes, token, stat, unique=.true.)
+        if (stat == 2) then
+            call fail(res, 409, 'a token named '//name//' exists; the name identifies'// &
+                ' the session in every list, so choose another')
+            return
+        else if (stat /= 0) then
             call fail(res, 500, 'token not created')
             return
         end if
@@ -2183,7 +2228,7 @@ contains
                 '","revoked":'//json_bool(tokens(i)%revoked)// &
                 ',"current":'//json_bool(tokens(i)%id == who%token_id)// &
                 ',"expired":'//json_bool(tokens(i)%expired)//',"kind":"'// &
-                trim(merge('session', 'token  ', tokens(i)%name == SESSION_NAME))//'"}'
+                trim(merge('session', 'token  ', index(tokens(i)%name, SESSION_NAME) == 1))//'"}'
         end do
         res%body = res%body//']}'
     end subroutine list_tokens
@@ -2306,7 +2351,7 @@ contains
         type(db_t), intent(in) :: db
         type(response_t), intent(inout) :: res
         character(len=:), allocatable :: pending, state, verifier, nonce, code, id_token, &
-            error, kind, session
+            error, kind, session, person
         type(oidc_claims_t) :: claims
         integer(int64) :: account_id
         integer :: d1, d2, stat
@@ -2360,8 +2405,11 @@ contains
             call login_page(res, 500, 'The administrator account is missing.')
             return
         end if
-        call store_token_create(db, account_id, SESSION_NAME, kind, session, stat, &
-            days=SESSION_DAYS)
+        ! Named after the person, so lists tell apart who pushed and landed.
+        person = claims%username
+        if (len(person) == 0) person = claims%sub
+        call store_token_create(db, account_id, SESSION_NAME//' of '//person, kind, session, &
+            stat, days=SESSION_DAYS)
         if (stat /= 0) then
             call login_page(res, 500, 'The session could not be created.')
             return

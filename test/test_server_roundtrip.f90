@@ -56,8 +56,9 @@ program test_server_roundtrip
     narrow = reply(index(reply, '"token":"') + 9:)
     narrow = narrow(1:index(narrow, '"') - 1)
     reply = exchange('POST /api/v1/tokens HTTP/1.1'//CRLF//'Authorization: Bearer '// &
-        narrow//CRLF//'Content-Length: 35'//CRLF//CRLF//'{"name":"other-1","scopes":"admin"}')
-    call check(index(reply, 'HTTP/1.1 403') == 1, 'a scope the creator lacks is refused')
+        narrow//CRLF//'Content-Length: 36'//CRLF//CRLF//'{"name":"other-1","scopes":"runner"}')
+    call check(index(reply, 'HTTP/1.1 403') == 1, &
+        'a token without admin creates none, not even with its own scopes')
 
     call check_cache()
 

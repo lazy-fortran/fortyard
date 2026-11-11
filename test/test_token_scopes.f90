@@ -5,7 +5,10 @@ program test_token_scopes
     !! needs the admin scope. Versions and landings carry the name of the
     !! token that made them as "session", null where it was not recorded.
     !! A token without admin moves branches only, opens browser sessions under
-    !! its own name, and sees and revokes no token but itself.
+    !! its own name, and sees and revokes no token but itself. A token name is
+    !! taken once per account in any case, only an admin token creates tokens,
+    !! a scope is one the server knows, and after a restart the first push
+    !! already meets the current pre-receive hook.
     use, intrinsic :: iso_fortran_env, only: int64
     use fy_posix, only: tcp_listen, sock_close, sock_bound_port
     use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, SIGTERM
@@ -20,13 +23,14 @@ program test_token_scopes
         ' -c credential.helper= '
     type(db_t) :: db
     character(len=:), allocatable :: admin, writer, lander, both, server, host, fy, env, out, in
-    character(len=:), allocatable :: tokens(:), fetch_main, cookie
+    character(len=:), allocatable :: tokens(:), fetch_main, cookie, builder
     character(len=4096) :: cwd
     character(len=16) :: num
-    integer :: lfd, stat, sup, i
+    integer :: lfd, stat, sup, i, stall, holder
     logical :: exists
 
     sup = 0
+    holder = 0
     call getcwd(cwd)
     call execute_command_line('rm -rf '//data//' '//work//' && mkdir -p '//data, exitstat=stat)
     call store_open(data//'/fortyard.db', db, stat)
@@ -195,6 +199,33 @@ program test_token_scopes
         'the API takes scopes separated by commas: '//out)
     call api(admin, 'POST', '/api/v1/tokens', '{"name":"agent-x","scopes":"Write;land"}')
     call check(index(out, 'HTTP 400') > 0, 'and refuses what is no list of scopes: '//out)
+    call api(admin, 'POST', '/api/v1/tokens', '{"name":"agent-t","scopes":"wirte,lnad"}')
+    call check(index(out, 'HTTP 400') > 0 .and. index(out, 'no scope wirte') > 0, &
+        'nor a scope it does not know: '//out)
+    call api(admin, 'POST', '/api/v1/tokens', '{"name":"agent-c","scopes":"write"}')
+    call check(index(out, 'HTTP 409') > 0, 'a second token of the same name is refused: '//out)
+    call api(admin, 'POST', '/api/v1/tokens', '{"name":"browser session","scopes":"write"}')
+    call check(index(out, 'HTTP 400') > 0, 'and so is the name of browser sessions: '//out)
+    call api(admin, 'POST', '/api/v1/tokens', '{"name":"Agent-C","scopes":"write"}')
+    call check(index(out, 'HTTP 409') > 0, 'also when it differs in case only: '//out)
+    call api(admin, 'POST', '/api/v1/tokens', '{"name":"agent-c ","scopes":"write"}')
+    call check(index(out, 'HTTP 400') > 0, 'a name does not end in a blank: '//out)
+    call api(admin, 'POST', '/api/v1/tokens', '{"name":" browser session of tester"}')
+    call check(index(out, 'HTTP 400') > 0, 'nor start with one: '//out)
+    call api(admin, 'POST', '/api/v1/tokens', '{"name":"Browser Session of tester"}')
+    call check(index(out, 'HTTP 400') > 0, 'the name of browser sessions is kept in any case: '//out)
+    call api(admin, 'POST', '/api/v1/tokens', '{"name":"builder","scopes":"release"}')
+    call check(index(out, 'HTTP 201') > 0, 'a release token: '//out)
+    builder = out(index(out, '"token":"') + 9:)
+    builder = builder(1:index(builder, '"') - 1)
+    call api(builder, 'POST', '/api/v1/tokens', '{"name":"agent-9","scopes":"release"}')
+    call check(index(out, 'HTTP 403') > 0, &
+        'takes no name a session may get later, as it creates no token: '//out)
+    call api(admin, 'GET', '/api/v1/tokens', '')
+    call check(index(out, '"name":"agent-t"') == 0 .and. count_of(out, '"name":"agent-c"') == 1 &
+        .and. index(out, '"name":"browser session"') == 0 .and. index(out, '"name":"agent-c ') == 0 &
+        .and. index(out, 'of tester') == 0 .and. index(out, 'Agent-C') == 0 .and. &
+        index(out, 'agent-9') == 0, 'none of these is created: '//out)
 
     ! A push with the write scope moves branches only: not what the server
     ! records, checks and lands under refs/fortyard/, and no tags.
@@ -249,6 +280,48 @@ program test_token_scopes
     call check(index(out, 'HTTP 200') > 0, 'a token revokes itself: '//out)
     call api(cookie, 'GET', '/api/v1/whoami', '')
     call check(index(out, 'HTTP 401') > 0, 'which ends its browser session: '//out)
+    call api(admin, 'POST', '/api/v1/tokens', '{"name":"agent-w","scopes":"write"}')
+    call check(index(out, 'HTTP 409') > 0, &
+        'its name stays taken, as versions and landings record it: '//out)
+
+    ! After an upgrade the first push already meets the current hook, even
+    ! while the mirror process hangs on an upstream that never answers.
+    call proc_kill(sup, SIGTERM)
+    call proc_wait(sup, stat)
+    sup = 0
+    ! Held by a process of its own, so the server and its git children do not
+    ! inherit it and a clone ends when that process does.
+    call tcp_listen('127.0.0.1', 0, stall, stat)
+    write (num, '(i0)') sock_bound_port(stall)
+    holder = proc_fork()
+    if (holder == 0) then
+        do
+            call proc_sleep_ms(1000)
+        end do
+    end if
+    call sock_close(stall)
+    call store_open(data//'/fortyard.db', db, stat)
+    call store_repo_add(db, 'aaa', 'http://127.0.0.1:'//trim(num)//'/aaa.git', stat)
+    call db_close(db)
+    call execute_command_line('printf ''#!/bin/sh\nwhile read old new ref; do'// &
+        ' [ "$ref" = refs/heads/main ] && exit 1; done\nexit 0\n'' > '//data// &
+        '/repos/demo.git/hooks/pre-receive', exitstat=stat)
+    call check(stat == 0, 'a hook as from before')
+    call tcp_listen('127.0.0.1', 0, lfd, stat)
+    write (num, '(i0)') sock_bound_port(lfd)
+    host = '127.0.0.1:'//trim(num)
+    sup = proc_fork()
+    if (sup == 0) then
+        call server_supervise(lfd, data//'/fortyard.db', 1, 2)
+        call proc_exit(0)
+    end if
+    call sock_close(lfd)
+    call run(in//push(both)//' HEAD:refs/tags/v10')
+    call check(stat /= 0 .and. index(out, 'needs the admin scope') > 0, &
+        'a write token pushes no tag right after a restart: '//out)
+    call proc_kill(holder, SIGTERM)
+    call proc_wait(holder, stat)
+    holder = 0
 
     call proc_kill(sup, SIGTERM)
     call proc_wait(sup, stat)
@@ -339,6 +412,7 @@ contains
         if (.not. ok) then
             write (*, '(a)') 'FAIL: '//what
             if (sup > 0) call proc_kill(sup, SIGTERM)
+            if (holder > 0) call proc_kill(holder, SIGTERM)
             error stop 1
         end if
     end subroutine check

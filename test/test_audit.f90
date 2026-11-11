@@ -83,7 +83,7 @@ program test_audit
         '/api/v1/tokens/4/revoke')
     call check(index(out, '"revoked":true') > 0, 'a token is revoked: '//out)
     ! A NUL byte in a name ends the text a reader of the store gets.
-    call run(curl//'-H "Authorization: Bearer '//reader//'" -d ''{"name":"x\u0000y"}'' '// &
+    call run(curl//'-H "Authorization: Bearer '//admin//'" -d ''{"name":"x\u0000y"}'' '// &
         server//'/api/v1/tokens')
     call check(index(out, '"token":') > 0, 'a token with a NUL byte in its name: '//out)
     call run(curl//'-c '//data//'/jar -d ''{"token":"'//admin//'"}'' '//server// &

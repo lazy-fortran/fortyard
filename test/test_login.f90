@@ -87,6 +87,12 @@ program test_login
         CRLF//CRLF)
     call check(index(reply, 'HTTP/1.1 200') == 1 .and. index(reply, '"account":"admin"') > 0, &
         'the session identifies the administrator')
+    call check(index(reply, '"session":"browser session of tester"') > 0, &
+        'and is named after the person, as pushes and landings record it')
+    reply = exchange('GET /api/v1/tokens HTTP/1.1'//CRLF//'Cookie: fy_session='//session// &
+        CRLF//CRLF)
+    call check(index(reply, '"name":"browser session of tester",') > 0 .and. &
+        index(reply, '"kind":"session"') > 0, 'the token list shows it as a session')
 
     call answer('someone-else', 'fortyard', nonce, 300)
     reply = callback()

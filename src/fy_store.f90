@@ -554,10 +554,12 @@ contains
         call stmt_finalize(st)
     end subroutine store_account_find
 
-    subroutine store_token_create(db, account_id, name, scopes, token, stat, days, parent)
+    subroutine store_token_create(db, account_id, name, scopes, token, stat, days, parent, unique)
         !! A token that expires after `days`, or never when absent. A browser
         !! session names as `parent` the token it was opened with and is valid
-        !! only as long as that one.
+        !! only as long as that one. With `unique`, stat is 2 and nothing is
+        !! created when the account has a token of that name in any case of its
+        !! letters, revoked or not.
         type(db_t), intent(in) :: db
         integer(int64), intent(in) :: account_id
         character(len=*), intent(in) :: name, scopes
@@ -565,9 +567,11 @@ contains
         integer, intent(out) :: stat
         integer, intent(in), optional :: days
         integer(int64), intent(in), optional :: parent
+        logical, intent(in), optional :: unique
         type(stmt_t) :: st
         integer(int64) :: lifetime
-        character(len=:), allocatable :: column, value
+        character(len=:), allocatable :: column, value, guard
+        integer :: step
 
         lifetime = -1
         if (present(days)) lifetime = days
@@ -579,11 +583,17 @@ contains
             column = ', parent'
             value = ', ?6'
         end if
+        ! In the statement, so two workers creating the same name cannot both pass.
+        guard = ''
+        if (present(unique)) then
+            if (unique) guard = ' WHERE NOT EXISTS (SELECT 1 FROM tokens'// &
+                ' WHERE account_id = ?1 AND lower(name) = lower(?2))'
+        end if
         token = random_token()
         call db_prepare(db, 'INSERT INTO tokens (account_id, name, hash, scopes, created_at,'// &
-            ' expires_at'//column//') VALUES (?1, ?2, ?3, ?4, '//NOW//', CASE WHEN ?5 < 0 THEN NULL'// &
+            ' expires_at'//column//') SELECT ?1, ?2, ?3, ?4, '//NOW//', CASE WHEN ?5 < 0 THEN NULL'// &
             " ELSE strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '+' || ?5 || ' days') END"// &
-            value//');', st, stat)
+            value//guard//' RETURNING id;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, account_id, stat)
         call stmt_bind_text(st, 2, name, stat)
@@ -591,8 +601,13 @@ contains
         call stmt_bind_text(st, 4, scopes, stat)
         call stmt_bind_int(st, 5, lifetime, stat)
         if (present(parent)) call stmt_bind_int(st, 6, parent, stat)
+        step = stmt_step(st)
         stat = SQLITE_OK
-        if (stmt_step(st) /= SQLITE_DONE) stat = 1
+        if (step == SQLITE_DONE) then
+            stat = 2
+        else if (step /= SQLITE_ROW) then
+            stat = 1
+        end if
         call stmt_finalize(st)
         if (stat /= SQLITE_OK) token = ''
     end subroutine store_token_create
