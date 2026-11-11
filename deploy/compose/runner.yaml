@@ -22,14 +22,15 @@ services:
       # oldest entries themselves). Runners of one host share them, as both
       # take concurrent users; base_dir lets their work trees share hits.
       CCACHE_DIR: "@CACHE@/ccache"
-      CCACHE_MAXSIZE: "20G"
+      CCACHE_MAXSIZE: "@CACHE_SIZE@"
       CCACHE_BASEDIR: "@HOME@/tmp/fy-work"
       FO_CACHE_DIR: "@CACHE@/fo"
-      FO_CACHE_MAX_SIZE: "20G"
+      FO_CACHE_MAX_SIZE: "@CACHE_SIZE@"
     volumes:
       - "@HOME@:@HOME@"
       - "@CACHE@:@CACHE@"
     entrypoint: ["@HOME@/bin/remote-runner.sh"]
     mem_limit: "@MEMORY@"
     cpus: "@CPUS@"
+    cpu_shares: @SHARES@
     pids_limit: 2048
