@@ -9,7 +9,7 @@ module fy_repo
 
     public :: repo_name_ok, repo_ref_ok, repo_path_ok
     public :: repo_log_json, repo_tree_json, repo_blob, repo_commit_json, repo_refs_json
-    public :: repo_fetch, repo_clone, repo_init
+    public :: repo_fetch, repo_clone, repo_init, repo_push_tags
 
     integer, parameter, public :: BLOB_MAX = 1048576
     integer, parameter, public :: DIFF_MAX = 524288
@@ -278,6 +278,60 @@ contains
         call proc_run([character(len=1024) :: 'env', 'GIT_TERMINAL_PROMPT=0', 'timeout', &
             '300', 'git', '--git-dir', repo, 'fetch', '--quiet', '--prune'], out, status, 65536)
     end subroutine repo_fetch
+
+    subroutine repo_push_tags(repo, upstream, status)
+        !! Pushes the tags of the primary repository `repo` to its upstream when
+        !! they changed since the last push that succeeded. A tag that moved is
+        !! refused by the upstream, never forced. A failure is retried on the
+        !! next call and reported once per set of tags.
+        character(len=*), intent(in) :: repo, upstream
+        integer, intent(out) :: status
+        character(len=:), allocatable :: tags, out
+        integer :: stat
+
+        status = 0
+        call proc_run([character(len=1024) :: 'git', '--git-dir', repo, 'for-each-ref', &
+            '--format=%(objectname) %(refname)', 'refs/tags'], tags, stat, 4194304)
+        if (stat /= 0) return
+        if (tags == slurp(repo//'/fortyard-tags-pushed')) return
+        call proc_run([character(len=1024) :: 'env', 'GIT_TERMINAL_PROMPT=0', 'timeout', &
+            '300', 'git', '--git-dir', repo, 'push', '--quiet', upstream, &
+            'refs/tags/*:refs/tags/*'], out, stat, 65536)
+        if (stat == 0) then
+            call spit(repo//'/fortyard-tags-pushed', tags)
+        else if (tags /= slurp(repo//'/fortyard-tags-failed')) then
+            call spit(repo//'/fortyard-tags-failed', tags)
+            status = stat
+        end if
+
+    contains
+
+        function slurp(path) result(s)
+            character(len=*), intent(in) :: path
+            character(len=:), allocatable :: s
+            integer :: u, ios, n
+
+            s = ''
+            open (newunit=u, file=path, access='stream', form='unformatted', status='old', &
+                action='read', iostat=ios)
+            if (ios /= 0) return
+            inquire (unit=u, size=n)
+            allocate (character(len=n) :: s)
+            if (n > 0) read (u, iostat=ios) s
+            close (u)
+        end function slurp
+
+        subroutine spit(path, s)
+            character(len=*), intent(in) :: path, s
+            integer :: u, ios
+
+            open (newunit=u, file=path, access='stream', form='unformatted', status='replace', &
+                action='write', iostat=ios)
+            if (ios /= 0) return
+            write (u, iostat=ios) s
+            close (u)
+        end subroutine spit
+    end subroutine repo_push_tags
 
     function field(rec, n) result(s)
         !! Field n of a record separated by US.

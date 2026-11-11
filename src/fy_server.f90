@@ -23,7 +23,7 @@ module fy_server
     use fy_fetch, only: fetch_serve, fetch_served_json
     use fy_route, only: route_is_page, route_set_base
     use fy_repo, only: repo_name_ok, repo_ref_ok, repo_path_ok, repo_log_json, repo_tree_json, &
-        repo_blob, repo_commit_json, repo_refs_json, repo_clone, repo_fetch, repo_init
+        repo_blob, repo_commit_json, repo_refs_json, repo_clone, repo_fetch, repo_init, repo_push_tags
     use fy_posix, only: tcp_accept, sock_close, sock_set_timeouts, sock_recv
     use fy_sqlite, only: db_t
     use fy_oidc, only: oidc_config_t, oidc_load, oidc_authorize_url, oidc_exchange, &
@@ -246,7 +246,19 @@ contains
                     inquire (file=repo_path(repos(i)%name)//'/HEAD', exist=exists)
                     if (repos(i)%mode == 'primary') then
                         ! Pushed to fortyard, never fetched; created empty once.
-                        if (exists) cycle
+                        if (exists) then
+                            if (len(repos(i)%upstream) == 0) cycle
+                            if (now - last(k) < int(mirror_interval, int64) * rate) cycle
+                            last(k) = now
+                            call repo_push_tags(repo_path(repos(i)%name), repos(i)%upstream, &
+                                status)
+                            if (status /= 0) then
+                                write (error_unit, '(a,i0)') 'fy: pushing the tags of '// &
+                                    repos(i)%name//' failed with status ', status
+                                flush (error_unit)
+                            end if
+                            cycle
+                        end if
                         call repo_init(repo_path(repos(i)%name), status)
                         if (status == 0) call land_hook_install(repo_path(repos(i)%name), status)
                     else if (.not. exists) then

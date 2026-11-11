@@ -80,6 +80,16 @@ program test_git_http
         '"$(git --git-dir='//data//'/repos/demo.git rev-parse main)" && ! git --git-dir='// &
         data//'/repos/demo.git rev-parse -q --verify first', exitstat=stat)
     call check(stat == 0, 'main went to the mirror target and the branch is gone')
+    call execute_command_line(git//'-C '//work//' tag v1 && '//git//'-C '//work// &
+        ' push -q '//url//' v1', exitstat=stat)
+    call check(stat == 0, 'an administrator pushes a tag')
+    do i = 1, 100
+        call execute_command_line('git --git-dir='//target//' rev-parse -q --verify'// &
+            ' refs/tags/v1 >/dev/null', exitstat=stat)
+        if (stat == 0) exit
+        call proc_sleep_ms(100)
+    end do
+    call check(stat == 0, 'the tag went to the mirror target')
     reply = get('/api/v1/jobs')
     call check(index(reply, '"totals":{"running":0,"queued":0,"landed":1,"failed":0}') > 0 .and. &
         index(reply, '"id":1,"kind":"landing","repo":"demo","branch":"first"') > 0 .and. &
