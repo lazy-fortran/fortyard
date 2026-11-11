@@ -20,6 +20,7 @@ module fy_land
     end interface
 
     integer, parameter :: LOG_BYTES = 65536
+    character(len=*), parameter :: NO_CHECK = 'Not checked: the policy of the repository sets tests=none.'
     !! git's empty tree, the base of a first landing.
     character(len=*), parameter :: EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
     !! The repository's size limit in bytes, read into $lim from the text of
@@ -133,7 +134,7 @@ contains
     end subroutine land_push_check
 
     subroutine land_branch(repo, work, name, branch, ident, base_url, upstream, commit, log, ok, &
-            runner, number, message_in, min_number, onto, hold, alone)
+            runner, number, message_in, min_number, onto, hold, alone, check, expect)
         !! Lands `branch` of the bare repository `repo` (called `name` in URLs),
         !! using the scratch directory `work`. `ident` names this landing uniquely
         !! and goes into the commit as a `Landing:` trailer. The commit is numbered
@@ -154,6 +155,11 @@ contains
         !! first commit of main) sets `alone` instead and is left untouched.
         character(len=*), intent(in), optional :: onto, hold
         logical, intent(out), optional :: alone
+        !! False when the policy of the repository asks for no check (tests=none).
+        logical, intent(in), optional :: check
+        !! The commit the branch has to be at, when not empty: the version of
+        !! its change that was reviewed (review=before).
+        character(len=*), intent(in), optional :: expect
         logical :: passed
         character(len=:), allocatable :: runner_log
         character(len=:), allocatable :: out, subjects, message, num
@@ -162,11 +168,14 @@ contains
         character(len=1024) :: range, author
         character(len=40) :: base
         character(len=:), allocatable :: merged
+        character(len=:), allocatable :: tip
         integer :: status, k, n
-        logical :: has_main
+        logical :: has_main, checked
 
         ok = .false.
         commit = ''
+        checked = .true.
+        if (present(check)) checked = check
         log = ''
         call run([character(len=1024) :: 'rm', '-rf', work], '')
         call run([character(len=1024) :: 'git', 'clone', '--quiet', '--shared', repo, work], '')
@@ -186,9 +195,19 @@ contains
             log = 'There is no branch '//branch//'.'
             return
         end if
+        tip = first_line(out)
         call git([character(len=1024) :: 'rev-parse', '--verify', '--quiet', 'origin/main'])
         has_main = status == 0
         if (present(alone)) alone = .false.
+        if (present(expect)) then
+            if (len(expect) > 0 .and. tip /= expect) then
+                log = 'The branch '//branch//' is at '//tip//', which is not the reviewed'// &
+                    ' version '//expect//' of its change, and the policy of the repository'// &
+                    ' asks for a review before landing (review=before). Have the newest'// &
+                    ' version reviewed, or push the reviewed one again.'
+                return
+            end if
+        end if
         if (present(hold)) then
             call git([character(len=1024) :: 'rev-parse', '--verify', '--quiet', &
                 'origin/'//branch//'^2'])
@@ -335,7 +354,10 @@ contains
         end if
         ! The check runs on exactly the commit that will become main: by a runner
         ! (its own container and limits) when there is one, else here.
-        if (present(runner)) then
+        if (.not. checked) then
+            out = NO_CHECK
+            status = 0
+        else if (present(runner)) then
             call run([character(len=1024) :: 'env', 'FY_LANDING=1', 'git', 'push', '--quiet', &
                 'origin', 'HEAD:'//check_ref(ident)], work)
             call runner(name, check_ref(ident), passed, runner_log)
@@ -454,7 +476,8 @@ contains
 
     end subroutine land_branch
 
-    subroutine land_candidate(repo, work, name, ref, branches, holds, upstream, log, ok, runner)
+    subroutine land_candidate(repo, work, name, ref, branches, holds, upstream, log, ok, runner, &
+            check)
         !! Checks the queue candidate at the ref `ref` of the bare repository
         !! `repo` once and, when it passes, moves main to it and removes the
         !! landed `branches`. The refs `holds` of the candidate's commits are
@@ -464,13 +487,16 @@ contains
         character(len=:), allocatable, intent(out) :: log
         logical, intent(out) :: ok
         procedure(check_runner_i), optional :: runner
+        logical, intent(in), optional :: check
         character(len=:), allocatable :: out, runner_log
         character(len=1024), allocatable :: argv(:)
         integer :: status, i
-        logical :: passed
+        logical :: passed, checked
 
         ok = .false.
         log = ''
+        checked = .true.
+        if (present(check)) checked = check
         call run([character(len=1024) :: 'rm', '-rf', work], '')
         call run([character(len=1024) :: 'git', 'clone', '--quiet', '--shared', repo, work], '')
         if (status == 0) call run([character(len=1024) :: 'git', 'fetch', '--quiet', 'origin', &
@@ -482,7 +508,10 @@ contains
             call drop_holds()
             return
         end if
-        if (present(runner)) then
+        if (.not. checked) then
+            out = NO_CHECK
+            status = 0
+        else if (present(runner)) then
             call runner(name, ref, passed, runner_log)
             out = runner_log
             if (passed) out = 'Checked by a runner.'//new_line('a')//runner_log

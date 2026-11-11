@@ -8,6 +8,7 @@ program fy
     use fy_client, only: client_request, config_t, config_load, config_save, client_set_proxy
     use fy_cli, only: cli_table, cli_field, cli_tail
     use fy_land, only: land_push_check
+    use fy_policy, only: policy_t, policy_set, POLICY_KEYS
     use fy_proc, only: proc_setenv, proc_sleep_ms
     use fy_posix, only: tcp_listen, activated_listen_fd, sock_bound_port
     use fy_server, only: server_supervise, server_set_web_dir, server_set_data_dir, &
@@ -86,6 +87,18 @@ contains
             '  repo create NAME    create an empty repository that takes pushes (admin)', &
             '  repo mode NAME MODE primary: take pushes; mirror: follow upstream (admin)', &
             '  repo numbers NAME N number the next change or issue N and count on (admin)', &
+            '  repo policy NAME [KEY=VALUE ...]', &
+            '                      show the policy of a repository, or set (admin):', &
+            '                      tests=full|affected|none  the check before landing', &
+            '                        (affected behaves as full until results exist', &
+            '                        per test case; none lands unchecked)', &
+            '                      review=after|before  before: a change lands only', &
+            '                        in a version that is reviewed (fy change', &
+            '                        reviewed N, or the review agent without a flag)', &
+            '                      bisect=on|off  bisect a failing verification of main', &
+            '                      batch=N  most landings checked as one candidate (1..64)', &
+            '                      unreviewed_limit=N  refuse landings while N landed', &
+            '                        changes wait for a review (0: no limit)', &
             '  repo list           list repositories', &
             '                      clone and push: git clone http://x:TOKEN@HOST/NAME.git', &
             '  runner --server URL --token-file F --data DIR [--follow LINK]', &
@@ -1086,14 +1099,51 @@ contains
             call client_request(cfg%server, 'POST', '/api/v1/repos/'//arg(3)//'/numbers', &
                 cfg%token, '{"next":"'//json_escape_string(arg(4))//'"}', code, body, stat)
             call report(code, body, stat)
+        case ('policy')
+            if (len(arg(3)) == 0) then
+                write (error_unit, '(a)') 'fy: usage: fy repo policy NAME [KEY=VALUE ...]'
+                call quit(2)
+            end if
+            call require_login(cfg)
+            if (len(arg(4)) == 0) then
+                call client_request(cfg%server, 'GET', '/api/v1/repos/'//arg(3)//'/policy', &
+                    cfg%token, '', code, body, stat)
+            else
+                call client_request(cfg%server, 'PUT', '/api/v1/repos/'//arg(3)//'/policy', &
+                    cfg%token, policy_payload(), code, body, stat)
+            end if
+            call report(code, body, stat)
         case ('list')
             call cmd_get('/api/v1/repos')
         case default
             write (error_unit, '(a)') 'fy: usage: fy repo add NAME URL | create NAME |'// &
-                ' mode NAME MODE | numbers NAME N | list'
+                ' mode NAME MODE | numbers NAME N | policy NAME [KEY=VALUE ...] | list'
             call quit(2)
         end select
     end subroutine cmd_repo
+
+    function policy_payload() result(payload)
+        !! The settings KEY=VALUE from the fourth argument on, as a JSON object;
+        !! one that is not a setting ends the command.
+        character(len=:), allocatable :: payload, pair, error
+        type(policy_t) :: policy
+        integer :: i, eq
+
+        payload = '{'
+        do i = 4, command_argument_count()
+            pair = arg(i)
+            eq = index(pair, '=')
+            error = 'settings are KEY=VALUE: '//POLICY_KEYS
+            if (eq > 1) call policy_set(policy, pair(1:eq - 1), pair(eq + 1:), error)
+            if (len(error) > 0) then
+                write (error_unit, '(a)') 'fy: '//error
+                call quit(2)
+            end if
+            if (i > 4) payload = payload//','
+            payload = payload//'"'//pair(1:eq - 1)//'":"'//pair(eq + 1:)//'"'
+        end do
+        payload = payload//'}'
+    end function policy_payload
 
     subroutine require_login(cfg)
         type(config_t), intent(in) :: cfg

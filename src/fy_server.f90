@@ -12,6 +12,8 @@ module fy_server
     use fy_land, only: land_branch, land_candidate, land_hook_install, land_check
     use fy_issue, only: issue_api
     use fy_audit, only: audit_t, audit_append, audit_list, audit_verify, audit_json
+    use fy_policy, only: policy_t, policy_get, policy_put, policy_from_json, policy_json, &
+        policy_refusal, policy_queue
     use fy_verify, only: verifier_main, verify_request
     use fy_change, only: change_t, change_sync, change_by_id, change_by_branch, change_landed, &
         change_next_number, change_api, change_message
@@ -302,13 +304,13 @@ contains
         !! one repository together.
         character(len=*), intent(in) :: db_path
         integer, intent(in) :: lander
-        !! Most landings that share one candidate.
-        integer, parameter :: LAND_BATCH = 8
         type(db_t) :: db
         type(landing_t) :: l, more
         type(landing_t), allocatable :: group(:)
         type(repo_info_t), allocatable :: repos(:)
         character(len=:), allocatable :: upstream, mode, base
+        type(policy_t) :: policy
+        character(len=:), allocatable :: refusal
         character(len=1024) :: url
         integer :: stat, i, n, watch
         logical :: found, changed
@@ -347,14 +349,27 @@ contains
                 cycle
             end if
             lander_db = db
-            ! Queued landings of one repository share a candidate and its check.
-            group = [l]
-            do while (size(group) < LAND_BATCH)
+            call policy_get(db, l%repo, policy)
+            ! Queued landings of one repository share a candidate and its check,
+            ! at most as many as its policy says. A change whose review was
+            ! due before landing and is missing by now does not land.
+            if (allocated(group)) deallocate (group)
+            allocate (group(0))
+            more = l
+            do
+                refusal = policy_refusal(db, more%repo, more%change, .false.)
+                if (len(refusal) > 0) then
+                    call finish(more, .false., '', refusal)
+                else
+                    group = [group, more]
+                end if
+                if (size(group) >= policy%batch) exit
                 call store_landing_take(db, lander, l%repo, more, found)
                 if (.not. found) exit
-                group = [group, more]
             end do
-            if (size(group) == 1) then
+            if (size(group) == 0) then
+                cycle
+            else if (size(group) == 1) then
                 call land_one(group(1))
             else
                 call land_group(group)
@@ -384,11 +399,14 @@ contains
                 if (checks_mode == 'runner') then
                     call land_branch(repo_path(l%repo), work, l%repo, l%branch, &
                         itoa(int(l%id))//'@'//l%created, base, upstream, commit, log, ok, &
-                        runner=runner_check, number=ch%number, message_in=change_message(ch, change_url))
+                        runner=runner_check, number=ch%number, &
+                        message_in=change_message(ch, change_url), check=policy%tests /= 'none', &
+                        expect=reviewed(ch))
                 else
                     call land_branch(repo_path(l%repo), work, l%repo, l%branch, &
                         itoa(int(l%id))//'@'//l%created, base, upstream, commit, log, ok, &
-                        number=ch%number, message_in=change_message(ch, change_url))
+                        number=ch%number, message_in=change_message(ch, change_url), &
+                        check=policy%tests /= 'none', expect=reviewed(ch))
                 end if
                 if (ok) call change_landed(db, ch%id, commit)
             else
@@ -397,11 +415,11 @@ contains
                 if (checks_mode == 'runner') then
                     call land_branch(repo_path(l%repo), work, l%repo, l%branch, &
                         itoa(int(l%id))//'@'//l%created, base, upstream, commit, log, ok, &
-                        runner=runner_check, min_number=next)
+                        runner=runner_check, min_number=next, check=policy%tests /= 'none')
                 else
                     call land_branch(repo_path(l%repo), work, l%repo, l%branch, &
                         itoa(int(l%id))//'@'//l%created, base, upstream, commit, log, ok, &
-                        min_number=next)
+                        min_number=next, check=policy%tests /= 'none')
                 end if
             end if
             call execute_command_line('rm -rf '''//work//'''')
@@ -436,7 +454,7 @@ contains
                     call land_branch(repo_path(g(i)%repo), work, g(i)%repo, g(i)%branch, &
                         itoa(int(g(i)%id))//'@'//g(i)%created, base, upstream, commit, log, ok, &
                         number=ch%number, message_in=change_message(ch, change_url), &
-                        onto=tip, hold=hold, alone=alone)
+                        onto=tip, hold=hold, alone=alone, expect=reviewed(ch))
                 else
                     next = change_next_number(db, g(i)%repo, repo_path(g(i)%repo))
                     call land_branch(repo_path(g(i)%repo), work, g(i)%repo, g(i)%branch, &
@@ -460,10 +478,11 @@ contains
                 work = tmp_dir()//'/fy-land-'//itoa(int(g(held(1))%id))
                 if (checks_mode == 'runner') then
                     call land_candidate(repo_path(g(1)%repo), work, g(1)%repo, tip, branches, &
-                        holds, upstream, log, ok, runner=runner_check)
+                        holds, upstream, log, ok, runner=runner_check, &
+                        check=policy%tests /= 'none')
                 else
                     call land_candidate(repo_path(g(1)%repo), work, g(1)%repo, tip, branches, &
-                        holds, upstream, log, ok)
+                        holds, upstream, log, ok, check=policy%tests /= 'none')
                 end if
                 call execute_command_line('rm -rf '''//work//'''')
                 if (ok) then
@@ -493,6 +512,17 @@ contains
                 call land_one(g(single(k)))
             end do
         end subroutine land_group
+
+        function reviewed(ch) result(head)
+            !! The commit the branch of `ch` has to be at to land: the version
+            !! that was reviewed when the policy asks for a review first, so a
+            !! push after the review does not land with it; else '' (any).
+            type(change_t), intent(in) :: ch
+            character(len=:), allocatable :: head
+
+            head = ''
+            if (policy%review == 'before') head = ch%reviewed_head
+        end function reviewed
 
         subroutine finish(l, ok, commit, log)
             type(landing_t), intent(in) :: l
@@ -565,7 +595,7 @@ contains
     end subroutine server_set_data_dir
 
     subroutine repos_route(req, db, res)
-        !! /api/v1/repos and /api/v1/repos/NAME/{refs,log,tree,blob,commits/ID}.
+        !! /api/v1/repos and /api/v1/repos/NAME/{refs,log,tree,blob,commits/ID,policy}.
         type(http_request_t), intent(in) :: req
         type(db_t), intent(in) :: db
         type(response_t), intent(inout) :: res
@@ -669,6 +699,14 @@ contains
                     call queue_verify(rest(1:len(rest) - 7))
                     return
                 end if
+            end if
+        end if
+        if (len(rest) > 7) then
+            ! Not a ref called policy, as in NAME/commits/policy.
+            if (rest(len(rest) - 6:) == '/policy' .and. &
+                index(rest(1:len(rest) - 7), '/') == 0) then
+                call policy_route(rest(1:len(rest) - 7))
+                return
             end if
         end if
         if (len(rest) > 9) then
@@ -833,16 +871,7 @@ contains
             end if
             ! The branch's open change lands with it.
             call change_by_branch(db, target, branch, ch, has_change)
-            if (has_change) then
-                call store_landing_add(db, target, branch, who%account, number, stat, ch%id)
-            else
-                call store_landing_add(db, target, branch, who%account, number, stat)
-            end if
-            if (stat == 0) call events_notify('jobs')
-            if (stat /= 0) then
-                call fail(res, 500, 'landing not queued')
-                return
-            end if
+            if (.not. queued(target, branch, has_change, number)) return
             write (num, '(i0)') number
             res%code = 202
             res%body = '{"landing":'//trim(num)//',"state":"queued"}'
@@ -918,12 +947,7 @@ contains
                 branch)
             if (len(branch) > 0) then
                 call change_by_branch(db, target, branch, ch, has_change)
-                call store_landing_add(db, target, branch, who%account, number, stat, ch%id)
-                if (stat /= 0) then
-                    call fail(res, 500, 'landing not queued')
-                    return
-                end if
-                call events_notify('jobs')
+                if (.not. queued(target, branch, has_change, number)) return
                 write (num, '(i0)') number
                 answer = '{"landing":'//trim(num)//',"state":"queued"}'
             end if
@@ -931,6 +955,63 @@ contains
             res%ctype = ctype
             res%body = answer
         end subroutine changes
+
+        logical function queued(target, branch, has_change, number)
+            !! Queues the landing of `branch`, of the change `ch` if it has
+            !! one, as `number`, when the policy of the repository lets it;
+            !! else the answer says why not.
+            character(len=*), intent(in) :: target, branch
+            logical, intent(in) :: has_change
+            integer(int64), intent(out) :: number
+            character(len=:), allocatable :: refusal
+            integer(int64) :: change
+
+            change = 0
+            if (has_change) change = ch%id
+            call policy_queue(db, target, branch, who%account, change, number, refusal, stat)
+            queued = stat == 0 .and. len(refusal) == 0
+            if (len(refusal) > 0) then
+                call fail(res, 409, refusal)
+            else if (stat /= 0) then
+                call fail(res, 500, 'landing not queued')
+            else
+                call events_notify('jobs')
+            end if
+        end function queued
+
+        subroutine policy_route(target)
+            !! GET /api/v1/repos/NAME/policy: the policy of the repository.
+            !! PUT the same with a JSON object of settings (fy_policy): sets
+            !! those and keeps the others; answers with the policy.
+            character(len=*), intent(in) :: target
+            type(policy_t) :: policy
+            character(len=:), allocatable :: error
+            logical :: ok
+
+            call policy_get(db, target, policy, ok)
+            if (.not. repo_name_ok(target) .or. .not. ok) then
+                call fail(res, 404, 'no such repository')
+                return
+            end if
+            if (req%method == 'PUT') then
+                if (index(' '//who%scopes//' ', ' admin ') == 0) then
+                    call fail(res, 403, 'changing a repository policy needs the admin scope')
+                    return
+                end if
+                call policy_from_json(policy, req%body, error)
+                if (len(error) > 0) then
+                    call fail(res, 400, error)
+                    return
+                end if
+                call policy_put(db, target, policy, ok)
+                ! The review agent may have open changes to review now.
+                call events_notify('jobs')
+            else if (req%method /= 'GET') then
+                call fail(res, 405, 'use GET or PUT')
+                return
+            end if
+            res%body = policy_json(target, policy)
+        end subroutine policy_route
 
         subroutine list_landings(target)
             character(len=*), intent(in) :: target

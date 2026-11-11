@@ -22,7 +22,7 @@ module fy_store
     public :: store_check_add, store_check_claim, store_check_finish, store_check_get, &
         store_check_release
 
-    integer, parameter, public :: SCHEMA_VERSION = 14
+    integer, parameter, public :: SCHEMA_VERSION = 15
 
     type :: token_identity_t
         logical :: found = .false.
@@ -309,6 +309,24 @@ contains
                 'CREATE TABLE audit_head (one INTEGER PRIMARY KEY CHECK (one = 1),'// &
                 ' id INTEGER NOT NULL, hash TEXT NOT NULL);'// &
                 'DELETE FROM schema_version; INSERT INTO schema_version VALUES (14);'// &
+                'COMMIT;', stat)
+            if (stat /= SQLITE_OK) then
+                call db_exec(db, 'ROLLBACK;', version)
+                return
+            end if
+        end if
+        if (store_schema_version(db) < 15) then
+            ! The policy of a repository (fy_policy). The defaults are what
+            ! every repository did before there were policies.
+            ! changes.reviewed_head: the head of the version a review read.
+            call db_exec(db, 'BEGIN;'// &
+                "ALTER TABLE repos ADD COLUMN policy_tests TEXT NOT NULL DEFAULT 'full';"// &
+                "ALTER TABLE repos ADD COLUMN policy_review TEXT NOT NULL DEFAULT 'after';"// &
+                'ALTER TABLE repos ADD COLUMN policy_bisect INTEGER NOT NULL DEFAULT 1;'// &
+                'ALTER TABLE repos ADD COLUMN policy_batch INTEGER NOT NULL DEFAULT 8;'// &
+                'ALTER TABLE repos ADD COLUMN policy_unreviewed_limit INTEGER NOT NULL DEFAULT 0;'// &
+                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (15);'// &
+                'ALTER TABLE changes ADD COLUMN reviewed_head TEXT;'// &
                 'COMMIT;', stat)
             if (stat /= SQLITE_OK) then
                 call db_exec(db, 'ROLLBACK;', version)

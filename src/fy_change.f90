@@ -24,7 +24,7 @@ module fy_change
         integer(int64) :: id = 0
         integer :: number = 0
         character(len=:), allocatable :: repo, key, branch, title, description, author, state, &
-            created, updated, commit, review, flag_reason
+            created, updated, commit, review, flag_reason, reviewed_head
         integer :: versions = 0
         logical :: flagged = .false.
     end type change_t
@@ -34,7 +34,11 @@ module fy_change
     character(len=*), parameter :: COLUMNS = 'id, number, repo, change_key, branch, title,'// &
         " description, author, state, created_at, updated_at, coalesce(commit_id, ''),"// &
         ' (SELECT count(*) FROM change_versions v WHERE v.change = changes.id),'// &
-        " coalesce(review_state, ''), flagged, coalesce(flag_reason, '')"
+        " coalesce(review_state, ''), flagged, coalesce(flag_reason, ''),"// &
+        " coalesce(reviewed_head, '')"
+    !! The head of the newest version of a row of changes.
+    character(len=*), parameter :: NEWEST = '(SELECT v.head FROM change_versions v'// &
+        ' WHERE v.change = changes.id ORDER BY v.version DESC LIMIT 1)'
 
 contains
 
@@ -93,7 +97,7 @@ contains
                 call exec_bind(db, 'UPDATE changes SET branch = ?2, updated_at = '//NOW// &
                     ' WHERE id = ?1;', c%id, branch)
             end if
-            call add_version(db, git_dir, c, tip, base, account)
+            call add_version(db, repo, git_dir, c, tip, base, account)
         end do
     end subroutine change_sync
 
@@ -158,9 +162,9 @@ contains
         end if
     end subroutine open_change
 
-    subroutine add_version(db, git_dir, c, tip, base, account)
+    subroutine add_version(db, repo, git_dir, c, tip, base, account)
         type(db_t), intent(in) :: db
-        character(len=*), intent(in) :: git_dir, tip, base, account
+        character(len=*), intent(in) :: repo, git_dir, tip, base, account
         type(change_t), intent(in) :: c
         type(stmt_t) :: st
         character(len=:), allocatable :: out
@@ -189,7 +193,29 @@ contains
         ! Keeps the version's commits after its branch is gone.
         call git(git_dir, [character(len=256) :: 'update-ref', &
             'refs/fortyard/changes/'//trim(num)//'/'//trim(ver), tip], out, status)
+        if (review_first(db, repo)) then
+            ! A review holds for the version it read; the agent reviews this one.
+            if (version > 1) call exec_bind(db, 'UPDATE changes SET review_state = NULL,'// &
+                ' flagged = 0, flag_reason = NULL WHERE id = ?1 AND state = ?2;', c%id, 'open')
+            call events_notify('jobs')
+        end if
     end subroutine add_version
+
+    logical function review_first(db, repo)
+        !! The policy of `repo` asks for a review before landing (fy_policy).
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: repo
+        type(stmt_t) :: st
+        integer :: stat
+
+        review_first = .false.
+        call db_prepare(db, "SELECT 1 FROM repos WHERE name = ?1 AND policy_review = 'before';", &
+            st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, repo, stat)
+        review_first = stmt_step(st) == SQLITE_ROW
+        call stmt_finalize(st)
+    end function review_first
 
     integer function change_next_number(db, repo, git_dir) result(m)
         !! One more than the highest number of the repository's changes and
@@ -339,30 +365,41 @@ contains
             NOW//' WHERE id = ?1;', id, commit)
     end subroutine change_landed
 
-    subroutine change_review_set(db, id, state, flagged, reason)
+    subroutine change_review_set(db, id, state, flagged, reason, head)
         !! Records a review of the change `id`: its state, and whether and why
-        !! it is flagged for a person.
+        !! it is flagged for a person. The review holds for the version with
+        !! the head `head`, which is the one it read; without `head` (or with
+        !! an empty one) for the newest version as of this statement.
         type(db_t), intent(in) :: db
         integer(int64), intent(in) :: id
         character(len=*), intent(in) :: state, reason
         logical, intent(in) :: flagged
+        character(len=*), intent(in), optional :: head
         type(stmt_t) :: st
         integer :: stat
 
-        call db_prepare(db, 'UPDATE changes SET review_state = ?2, flagged = ?3, flag_reason = ?4'// &
-            ' WHERE id = ?1;', st, stat)
+        call db_prepare(db, 'UPDATE changes SET review_state = ?2, flagged = ?3, flag_reason = ?4,'// &
+            " reviewed_head = coalesce(nullif(?5, ''), "//NEWEST//') WHERE id = ?1;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, id, stat)
         call stmt_bind_text(st, 2, state, stat)
         call stmt_bind_int(st, 3, int(merge(1, 0, flagged), int64), stat)
         call stmt_bind_text(st, 4, reason, stat)
+        if (present(head)) then
+            call stmt_bind_text(st, 5, head, stat)
+        else
+            call stmt_bind_text(st, 5, '', stat)
+        end if
         stat = stmt_step(st)
         call stmt_finalize(st)
     end subroutine change_review_set
 
     subroutine change_review_next(db, c, found)
         !! The oldest change waiting for the review agent: one whose review was
-        !! requested, or a landed one not reviewed yet.
+        !! requested, a landed one not reviewed yet, or, in a repository whose
+        !! policy asks for a review before landing, an open one that is not
+        !! reviewed yet or whose review by the agent read an older version (one
+        !! pushed while the agent was reading).
         type(db_t), intent(in) :: db
         type(change_t), intent(out) :: c
         logical, intent(out) :: found
@@ -371,7 +408,11 @@ contains
 
         found = .false.
         call db_prepare(db, 'SELECT '//COLUMNS//" FROM changes WHERE review_state = 'requested'"// &
-            " OR (state = 'landed' AND review_state IS NULL) ORDER BY id LIMIT 1;", st, stat)
+            " OR (state = 'landed' AND review_state IS NULL)"// &
+            " OR (state = 'open' AND (review_state IS NULL OR (review_state IN ('ai-reviewed',"// &
+            " 'failed') AND coalesce(reviewed_head, '') <> coalesce("//NEWEST//", '')))"// &
+            " AND repo IN (SELECT name FROM repos WHERE policy_review = 'before'))"// &
+            ' ORDER BY id LIMIT 1;', st, stat)
         if (stat /= SQLITE_OK) return
         if (stmt_step(st) == SQLITE_ROW) then
             call read_row(st, c)
@@ -842,6 +883,7 @@ contains
         c%review = stmt_text(st, 13)
         c%flagged = stmt_int(st, 14) /= 0
         c%flag_reason = stmt_text(st, 15)
+        c%reviewed_head = stmt_text(st, 16)
     end subroutine read_row
 
     subroutine exec_bind(db, sql, id, text)

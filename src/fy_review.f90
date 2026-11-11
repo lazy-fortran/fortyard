@@ -2,6 +2,8 @@ module fy_review
     !! The review agent, at its first depth: a model reads the diff of a change
     !! and writes a review, which fortyard posts as a comment of the account
     !! `review-agent`, and says whether a person should look at the change.
+    !! It reviews landed changes, and open ones on request or when the policy
+    !! of their repository asks for a review before landing (review=before).
     !! The model runs behind an OpenAI-compatible chat API (FY_REVIEW_URL,
     !! FY_REVIEW_MODEL, optionally FY_REVIEW_KEY, FY_REVIEW_MAX_TOKENS and
     !! FY_REVIEW_EXTRA); without FY_REVIEW_URL there are no reviews. The model sees the diff only and runs nothing, and its
@@ -94,6 +96,7 @@ contains
         logical :: flagged
 
         ok = .false.
+        head = ''
         if (c%state == 'landed' .and. len(c%commit) > 0) then
             call proc_run([character(len=256) :: 'git', '--git-dir', git_dir, 'rev-parse', &
                 '--verify', '--quiet', c%commit//'^1'], diff, status, 256)
@@ -115,19 +118,20 @@ contains
                 '--patch', base//'...'//head], diff, status, 4 * DIFF_BYTES)
         end if
         if (status /= 0 .or. len_trim(diff) == 0) then
-            call change_review_set(db, c%id, 'failed', c%flagged, c%flag_reason)
+            call change_review_set(db, c%id, 'failed', c%flagged, c%flag_reason, head)
             return
         end if
         call ask_model(review_prompt(c%title, c%description, diff), answer, model, status)
         if (status == 0) call review_parse(answer, body, flagged, reason, ok)
         if (.not. ok) then
-            call change_review_set(db, c%id, 'failed', c%flagged, c%flag_reason)
+            call change_review_set(db, c%id, 'failed', c%flagged, c%flag_reason, head)
             return
         end if
         if (flagged) body = body//NL//NL//'**Flagged for a person:** '//reason
         body = body//NL//NL//'*Review by the model '//model//' from the diff alone.*'
         call change_comment(db, c%id, AGENT, body)
-        call change_review_set(db, c%id, 'ai-reviewed', flagged, reason)
+        ! For the version read: one pushed meanwhile is not reviewed by this.
+        call change_review_set(db, c%id, 'ai-reviewed', flagged, reason, head)
     end subroutine review_change
 
     function review_prompt(title, description, diff) result(text)

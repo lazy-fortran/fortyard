@@ -18,6 +18,7 @@ module fy_verify
     use fy_proc, only: proc_run, proc_exit
     use fy_issue, only: issue_open, issue_comment, issue_set_state
     use fy_change, only: change_t, change_get, change_comment
+    use fy_policy, only: policy_t, policy_get
     implicit none
     private
 
@@ -158,6 +159,7 @@ contains
         character(len=:), allocatable :: target, chain, state
         character(len=40), allocatable :: commits(:)
         integer :: status, n, a, lo, hi, i
+        type(policy_t) :: policy
 
         target = ''
         state = result_of(db, repo, head)
@@ -167,6 +169,12 @@ contains
         end if
         if (state == 'passed') then
             call close_reports(db, repo, head)
+            return
+        end if
+        call policy_get(db, repo, policy)
+        if (.not. policy%bisect) then
+            ! Reported once, without further runs and without a culprit.
+            call report(db, repo, git_dir, 'unknown', '', base, bisect=.false.)
             return
         end if
         call git(git_dir, [character(len=256) :: 'rev-list', '--first-parent', '--max-count=200', &
@@ -276,12 +284,14 @@ contains
         flush (error_unit)
     end subroutine finish
 
-    subroutine report(db, repo, git_dir, culprit, good, base)
+    subroutine report(db, repo, git_dir, culprit, good, base, bisect)
         !! Reports the first failing commit once: an issue, and a comment on
         !! the change that landed it. `culprit` 'unknown': main fails and no
-        !! earlier verification passed.
+        !! earlier verification passed, or the policy of the repository asks
+        !! for no bisection (`bisect` false).
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: repo, git_dir, culprit, good, base
+        logical, intent(in), optional :: bisect
         character(len=:), allocatable :: subject, title, body, log, link
         type(change_t) :: c
         type(stmt_t) :: st
@@ -294,6 +304,12 @@ contains
             body = 'The verification of main (.fortyard/verify, or every test run again) fails, '// &
                 'and no earlier verification of main passed, so no change can be blamed. See '// &
                 'the recent verify jobs of '//repo//'.'
+            if (present(bisect)) then
+                if (.not. bisect) body = 'The verification of main (.fortyard/verify, or every '// &
+                    'test run again) fails. The policy of the repository sets bisect=off, so '// &
+                    'the commits since the last passing verification are not bisected and no '// &
+                    'change is blamed. See the recent verify jobs of '//repo//'.'
+            end if
             change = 0
         else
             call git(git_dir, [character(len=256) :: 'log', '-1', '--format=%s', culprit], subject, &
