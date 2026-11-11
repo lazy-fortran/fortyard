@@ -1,8 +1,9 @@
 # fortyard plan
 
 Delivery order for [DESIGN.md](DESIGN.md),
-[Testing at scale](doc/testing-at-scale.md), [Workflow](doc/workflow.md) and
-[Parallel development](doc/parallel-development.md). A milestone is done when its
+[Testing at scale](doc/testing-at-scale.md), [Workflow](doc/workflow.md),
+[Parallel development](doc/parallel-development.md) and
+[Inspection, review and monitoring](doc/inspection.md). A milestone is done when its
 behaviour is covered by tests that run with `fo test` and it runs on the
 development instance.
 
@@ -88,9 +89,9 @@ first consumer of fortui's browser backend, which is built in fortui itself.
       `fortui_html`) and embeds the data it used; the browser adopts that page.
       Assets have content-hashed names and are cached for good; the browser
       lays out the page natively (fortui DOM layout, no Asyncify).
-- [ ] Visual design of the application.
-- [ ] Virtualized views of long files and diffs.
-- [ ] Canvas surface in fortui for diffs and plots (needed from M5 on).
+- [ ] Visual design of the application (MI22).
+- [ ] Long files and diffs stay fast (MI24: folded files, lists loaded by key).
+- [ ] Plots in fortui as a plot node drawn as inline SVG (MI25); diffs stay text.
 
 ### M3 CI overlay
 
@@ -222,7 +223,7 @@ starts when the letters before it have landed.
       on the member's own files, a merge of `main` into a branch lands
       squashed with the others. `fy serve` refuses to start with a git older
       than 2.40.
-- [ ] MP6 (C) Queue numbers: `fy board --stats` and `GET .../board?stats=1`
+- [ ] MP6 (C) Queue numbers (built as MI9): `fy board --stats` and `GET .../board?stats=1`
       give time from `fy land` to `main`, landings per hour, failures by
       reason and checks per landing from the rows that exist, as the baseline
       for everything below.
@@ -298,12 +299,12 @@ starts when the letters before it have landed.
       its parent as its own commit, also when the parent was amended or has
       landed squashed; `fy land --stack` queues the session's own unlanded
       ancestors; a child of a rejected, cancelled or closed parent waits.
-- [ ] MP19 (G) The board: `fy board`, `GET .../board` and the MCP action
+- [ ] MP19 (G) The board (built as MI5, MI27 and MI28): `fy board`, `GET .../board` and the MCP action
       `board` list working sessions (draft changes with claimed issue, last
       push and predicted conflicts), the queue (landings with state and
       reason, candidates with their check), landings that need their author,
       and recent landings with the first release that contains them.
-- [ ] MP20 (H) The board as a page of the web application, live through the
+- [ ] MP20 (H) The board as a page of the web application (built as MI5 and MI27), live through the
       event stream.
 - [ ] MP21 (H) Speculation, off by default (`queue.speculate`): further
       candidates are built on the tip of the one being checked and checked on
@@ -341,6 +342,316 @@ implement one prepared issue on a scratch copy of fortyard, all of them in
 landed or shown on the board as waiting for the person, without the person
 merging, rebasing or testing anything.
 
+### MI Inspection and monitoring
+
+A person who steers many agents can inspect every change, review what is
+flagged and watch the instance from outside
+([Inspection, review and monitoring](doc/inspection.md)). Every item delivers
+its data through the API, `fy` and `fy mcp` as well as on its page. Items are
+in delivery order within their group; items with the same letter can be built
+at the same time, and a letter starts when the letters before it have landed.
+An item marked `any` depends on no other item. `R` is a repository's path.
+
+MI absorbs these items, which are ticked by the MI item named:
+
+- M5 "CI logs and test history, with their own addresses": logs are MI2;
+  history per test case stays with #62.
+- MP6 "Queue numbers" is MI9, which gives the time from `fy land` to
+  `main`, landings per hour, the failed share and checks per landing; its
+  failures by reason follow in MI10, which records the reason. MP19 "The
+  board" is MI5, MI27 and MI28; MP20 "The board as a page" is MI5 and MI27.
+- M2 "Visual design of the application" is MI22. M2 "Virtualized views of
+  long files and diffs" is MI24: folded files, lists loaded by key and
+  `content-visibility`, without a virtual list. M2 "Canvas surface in fortui
+  for diffs and plots" is replaced by MIF6 and MI25: a plot node drawn as
+  inline SVG, while diffs stay text.
+
+Interleaving with MP:
+
+- MI1 to MI26 work on the rows that exist and do not wait for any MP item.
+  MI27 comes after MP9, MP12, MP13 and MP14, MI28 after MP3, MP7 and MP11,
+  MI29 after S6.
+- MP13 changes what a queue row is. MI2, MI4 and MI5 fix the form the pages
+  read before that: a job carries `checks` as a list and `candidate` as
+  null, a change carries `entries`. MP13 changes the store queries that
+  fill these and keeps the form; the tests of MI2, MI4 and MI5 hold it to
+  that.
+- MI10 adds `landings.reason`, `version` and `head`. MP9 (pinned version)
+  and MP14 (reasons) write these columns and add none of their own;
+  whichever lands first adds them.
+- MI10 to MI14 each add a migration. After MP1 (named migrations) they are
+  parallel; before it they land one after another in this order.
+- Each new resource is a module of its own with one dispatch line in
+  `src/fy_server.f90`, so sessions meet only in that line until MP2 has
+  landed.
+
+Additions to fortui, landed in the fortui repository
+([What fortui gains](doc/inspection.md#what-fortui-gains)). They depend on
+nothing here; an MI item that names one needs it landed and the fortui
+version in `fpm.toml` moved to it:
+
+- [ ] MIF1 (any) Keys: key presses outside text fields reach the
+      application, and `ui_shortcut(chord)` registers a chord.
+- [ ] MIF2 (any) Focus: `ui_focus(id)`, `ui_reveal(id)`, and arrow keys and
+      Enter delivered while a text field has the focus.
+- [ ] MIF3 (any) `look=` on text, link, button, row and column, and the
+      tone `UI_TONE_ATTENTION`.
+- [ ] MIF4 (any) `anchor=`, emitted as the HTML `id`.
+- [ ] MIF5 (any) Only changed nodes are updated, a row or column with an id
+      keeps its element when rows are inserted before it, and `FUI.stats`
+      reports frame time, bytes and nodes.
+- [ ] MIF6 (any) A plot node drawn as inline SVG, with block characters in
+      the terminal.
+
+On the existing rows, without a schema change:
+
+- [ ] MI1 (A) Changes of all states: the list shows open, landed and closed
+      changes, newest activity first, each with its state, its review state
+      and flag reason, commit and age. Filters are links in the address
+      (`?state=all|open|landed|closed`, `?review=flagged|unreviewed`,
+      `?attention=needs-author`), also in
+      `fy change list --state S --review S --attention S` and the MCP tool
+      `changes`. A repository whose changes all landed no longer shows an
+      empty page.
+- [ ] MI2 (A) Jobs name their change: a job in the API, `fy jobs` and the
+      jobs page carries the number and title of its change, its kind and its
+      check (state, runner, wait and run time), found through the check's
+      ref. `/jobs/ID` is a page with the whole stored log (a runner stores
+      the first 64 KiB of a check's output); its lines have addresses
+      (`#L812`) once MIF4 has landed.
+- [ ] MI3 (A) Repository row: every page of a repository, the code page
+      included, links to Code, Changes, Issues and Board, with the numbers
+      of open changes and issues. Issues are one click from the code. The
+      link Analytics is added by MI18.
+- [ ] MI4 (B) The change page shows what happened: one page with the status
+      line, the decision line for a flagged change (approve as
+      `fy change reviewed N` does), and the sections Checks (entries with
+      their times and check, the end of a failing log, earlier entries
+      folded, the verification of `main`), Reviews (review state, flag
+      reason, the review's text), Files, Discussion and Timeline, each with
+      an anchor (MIF4). There are no tabs. `fy change view N` prints the
+      same. Later items add what they record: MI10 the reason of a failure
+      and what ran, MI11 the version a review read and the decisions as
+      rows, MI13 the release, MI15 the revert.
+- [ ] MI5 (B) The board from the rows that exist: `GET /repos/R/board`,
+      `fy board`, the MCP tool `board` and the page `/R/-/board` show the
+      queue, the changes that need their author, the open changes and the
+      recent landings with their review states, one row per change, and the
+      verification of `main`.
+- [ ] MI6 (B) Overview at `/`: per repository the state of `main`, the
+      queue, and the numbers of changes that need their author, are flagged
+      or are unreviewed, each a link to its filtered list; below it what
+      runs now. `GET /overview`, `fy overview`, the MCP tool `overview`.
+      The delivery line is added by MI13, the rows that need the person by
+      MI16 and MI20.
+- [ ] MI7 (any) Every page is live: a change made with `fy` shows on an
+      open page within a second without a reload. The event stream takes a
+      list of topics (`jobs`, `changes`, `reviews`, `issues`; MI12 adds
+      `runners`, MI17 `load`), a tab holds one stream, and a page asks for
+      its resources again on an event. A page says `live`, and `offline
+      since TIME` while the server is stopped, and is current again after
+      one request when it is back. With 28 open streams a request is still
+      answered: a worker keeps four request threads free of streams, and
+      the default is 32 threads.
+- [ ] MI8 (any) Audit page `/audit` over the existing log, filtered by event
+      and subject (`GET /audit?event=&subject=`, `fy audit list --subject`),
+      with the state of the chain: the server checks the chain every 5
+      minutes from the last checked entry, the page shows up to which entry
+      it is intact and when that was checked, and `Verify now` checks at
+      once. The page is linked from the Server page once MI17 has landed.
+- [ ] MI9 (any) Queue numbers (MP6): `GET /stats`, `fy stats`,
+      `fy board --stats` and the MCP tool `stats` give, for 1, 7 or 30
+      days, the time from `fy land` to `main` (median and 95th percentile),
+      landings per hour, the failed share, the share landed with the first
+      entry, checks per landed change, wait and run time of checks, failed
+      verifications per 100 landings and the flagged changes not decided.
+
+Links between the rows:
+
+- [ ] MI10 (C) Entries and checks carry their links: an entry records the
+      version and commit it lands, its check and, when it fails, the reason
+      (`conflict`, `check`, `format`, `size`, `empty`); a check records its
+      job and what ran (command, image, fo version, exit status), reported
+      by the runner. Existing checks get their job from the ref name. Jobs,
+      board and change show `failed: REASON · entry 1 of 2` and what ran,
+      and `fy stats` gives the failures by reason.
+- [ ] MI11 (C) Reviews are rows: the reviewer records the version it read,
+      model, thinking setting, instruction version, tokens, duration and its
+      findings with file and line; a person records `approve` or `issue`
+      (`GET` and `POST .../changes/N/reviews`, `fy change reviews N`,
+      `fy change approve|issue N`, the MCP tools `change_reviews` and
+      `review_add`). The change page shows the review as a block with the
+      version it read against the newest, earlier reviews folded as
+      superseded, and each decision as `approved by NAME` or `issue #N
+      opened` with its time; a second decision adds a row and changes none.
+      Reviews from before this item show `not recorded`.
+- [ ] MI12 (C) Runners are rows: name, host, version, last call and current
+      check, written by the calls a runner makes; `GET /runners`,
+      `fy runners`, the MCP tool `runners`, and the event topic `runners`.
+      An idle local runner asks at least once a minute.
+- [ ] MI13 (C) Builds and deploys are recorded: the release builder opens a
+      release as `building` and ends it `ready` or `failed` with the end of
+      its log; `fy serve` records a deploy when it starts as a new version,
+      and `scripts/self-update.sh` reports a release it refused. A change
+      names the first release that contains it. The overview shows the
+      delivery line. `GET /deploys`, `fy deploys`.
+- [ ] MI14 (C) Issues and changes are linked: `#N` and `Fixes #N` in a
+      description link the change to the issue; the issue list (filters in
+      the address, `GET /issues` across repositories) names the linked
+      changes with their states, and a change names its issues.
+
+Review, numbers, load, metrics and alerts:
+
+- [ ] MI15 (D) Revert as a decision: `verdict=revert` with a reason opens
+      the revert of a landed change as a change, queues it (before the
+      others once MP14 has landed) and records `reverted by` and `reverts`
+      on both; `fy change revert N -m TEXT`, and the filter
+      `?attention=reverted`.
+- [ ] MI16 (D) Inbox: `GET /inbox`, `fy inbox`, the MCP tool `inbox` and
+      the page `/inbox` list, across repositories, flagged changes, changes
+      without a finished review with the reason, and changes stuck with
+      their author, each as a card with intent, reason, evidence and
+      decision. The top bar and the tab title carry the count; the sentence
+      of an empty inbox is computed; the overview shows the flagged cards.
+      The section Before landing comes with MI27.
+- [ ] MI17 (D) Live load: `GET /load` and `fy load` give host load, memory,
+      disk, database size, queue depth and the supervised processes, and
+      the page `/server` shows them with the runners of MI12 and the
+      deploys of MI13. One sample a minute is always taken and fills a ring
+      of two hours for the sparklines; while a page listens, values arrive
+      every 10 seconds over topic `load`.
+- [ ] MI18 (D) Analytics pages `/analytics` and `/R/-/analytics`, linked
+      from the Server page and the repository row: the numbers of MI9 with
+      bars and sparklines, and the measures whose columns exist by then
+      (failures by reason, push to `main`, `main` to release, landing to AI
+      review, tokens per review). A click on a number opens the list of the
+      rows it counts.
+- [ ] MI19 (D) Metrics and readiness: `GET /metrics` in the Prometheus text
+      format returns the metrics listed in the design, with a token of the
+      scope `metrics` or, with `FY_METRICS_OPEN=1`, without one; the host
+      metrics come with MI17 and `fy_alert` with MI20. `/readyz` answers
+      503 with the reason while the database, the data directory or the
+      lander fails. The log has one JSON line per request with its
+      duration.
+- [ ] MI20 (E) Alerts: the conditions of
+      [Alerts](doc/inspection.md#alerts) are computed from the rows;
+      `review-backlog` reads the limit of the repository policy (S1).
+      `GET /alerts`, `fy alerts`, the MCP tool `alerts`, the gauge
+      `fy_alert`, the first section of the inbox and of the overview, and
+      the mark in the top bar show the same list.
+- [ ] MI21 (F) Alert webhook: with `FY_ALERT_WEBHOOK` the instance posts one
+      message when a rule starts to fire and one when it ends.
+
+Frame, keys and budgets:
+
+- [ ] MI22 (C) Frame and look (MIF3): top bar with the mark for `main` and
+      the links Jobs, Inbox and Server, each shown once its page exists
+      (MI16, MI17), the repository row, the account page `/account`
+      (tokens, theme, sign out), no drawer, a bottom bar on phones; states
+      as words in five tones, the type scale and row heights of the design.
+      The HTML the server sends is the same at every width.
+- [ ] MI23 (D) Commands, keys and palette (MIF1, MIF2): one command table
+      feeds buttons, keys and the palette; the go keys, list keys and
+      decision keys of the design work and stay inert in text fields;
+      `GET /find`, `fy find`. Two commands with one key on a page fail a
+      test.
+- [ ] MI24 (E) Budgets as tests (MIF5): the browser tests are one file per
+      page (`test/web_PAGE_test.mjs`) on a shared harness that asserts the
+      budgets of the design on every page; server tests with 10 000 seeded
+      landings assert the times of `GET /overview`, `/board` and `/inbox`.
+      A file with more than 400 changed lines is folded, lists load older
+      rows by key, code rows use `content-visibility`.
+- [ ] MI25 (F) Time series (MIF6): the Analytics page shows the time to
+      `main` per day and the Server page the load over the ring's two hours
+      as plots, present in the HTML the server sends.
+- [ ] MI26 (G) The rehearsal below as a browser test,
+      `test/web_inspection_test.mjs`, next to `test/web_app_test.mjs` and
+      run like it, since `fo test` runs no browser tests:
+      `node test/web_inspection_test.mjs build/fo/bin/fy build/web`.
+
+After other milestones have changed the rows:
+
+- [ ] MI27 (H) Candidates and supersession: the board shows candidates with
+      members, shared check, halves, waiting reasons and candidates
+      superseded in the last hour; change and job pages show the pinned
+      version, cancelled entries with the next entry, superseded and reused
+      checks, tests and rebase tasks; a candidate has the page
+      `/R/-/candidates/ID`, `GET .../candidates/ID` and `fy candidate ID`.
+      The inbox gains the section Before landing for entries that wait for
+      an approval: `verdict=approve` on the waiting version releases the
+      entry, and sending back posts a comment and cancels it. Merges by the
+      server are shown once MP10 has landed, speculative candidates once
+      MP21 has. Its own check extends the rehearsal by two questions, each
+      answered in 2 actions: why does each queued entry wait, and which
+      changes shared a candidate, which check decided it and what was
+      superseded?
+- [ ] MI28 (H) Sessions, claims and predicted conflicts on the board, the
+      issue list and the change page.
+- [ ] MI29 (H) Spot checks: the inbox has the section Spot check with the
+      changes the agent of S6 drew, and a decision on one is recorded like
+      any other.
+
+Not in MI: the routing of cards by an owners file and the time budget of
+[Workflow](doc/workflow.md#the-human-review-queue); they need measured
+reading times.
+
+**Done when** an inspection rehearsal passes on a local instance
+(`scripts/dev-up.sh` with one runner, the stub model gateway and two
+repositories; the second holds one flagged change, so that overview and
+inbox span repositories). One action is a key sequence, a click or a tap; a
+reading step unfolds a section of the page reached. A script plays one day
+in four phases, and at each phase a headless browser, starting from another
+page, answers the questions within the stated number of actions, while the
+`fy` command and the MCP tool of the same row of the design's API table
+return the same data in one call.
+
+While a check runs and a second entry is queued behind it:
+
+1. What runs now, on which runner, for which change? 1 action.
+2. What is queued in the repository? 2 actions.
+
+After a change failed its first entry on the check and landed with its
+second:
+
+3. What happened to it: versions, entries, checks, review, release?
+   2 actions.
+4. What ran in its failed first entry (command, runner, exit status, the
+   failing lines), and which entry followed? 2 actions and 1 reading step.
+
+With the runner stopped for two minutes while a check is queued:
+
+5. Which runner is lost, and since when? 1 action; `runner-lost` is the
+   first card of the inbox, and `/metrics` reports it. The runner is then
+   started again.
+
+At the end, when twelve changes have landed, the reviewer has flagged two
+of them with a finding, one open change has failed three entries, the
+verification of the last `main` has failed and opened an issue, and the
+release builder has reported a failed build, so that the instance serves an
+older release:
+
+6. Which changes need a decision, and why? 1 action; 0 on the overview. The
+   alerts `main-broken` and `deploy-behind` stand first, in this order.
+7. Is `main` verified, built and serving, and if not, why? 0 actions for
+   the mark, 1 for the reason.
+8. Which changes landed today, and which are flagged or unreviewed?
+   2 actions.
+9. What did the AI review find, with which model and how many tokens, and
+   which version did it read? 2 actions.
+10. Approve one flagged change and open an issue for the other with keys
+    alone: on the inbox at most 2 keys each, and both cards leave.
+11. Who approved the flagged change, and when? 2 actions.
+12. Which issues are open, and which change addresses the issue of the
+    failed verification? 2 actions.
+13. What was the median time from `fy land` to `main`, and which entries
+    are behind the failed count? 2 actions.
+
+The rehearsal also passes only if every page shows a change made through
+`fy` within a second without a reload, no page scrolls sideways at 390 px,
+light and dark both render, the browser budgets of the design hold, and
+`/metrics` reports the failed build, the failed verification and the
+flagged changes.
+
 ### M4b First background agent
 
 - [ ] One agent on the local model gateway, in a per-task sandbox (fresh
@@ -371,7 +682,7 @@ merging, rebasing or testing anything.
       counts per repository, recent results with their logs; live through a
       server-sent event stream (inotify and poll(2) on the server, EventSource in
       the browser) and fortui timers, without polling.
-- [ ] CI logs and test history, with their own addresses.
+- [ ] CI logs (MI2) and test history per case (#62), with their own addresses.
 
 **Inspection gate:** the instance is reviewed before anything is hosted
 elsewhere.

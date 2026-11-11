@@ -400,7 +400,9 @@ The browser application is Fortran compiled to WebAssembly with LFortran
 (target `wasm32-unknown-emscripten`; Flang cannot yet target WebAssembly),
 using
 [fortui](https://github.com/lazy-fortran/fortui) with its browser backend: DOM
-elements for ordinary controls, a canvas for diffs, graphs and plots. The only
+elements for ordinary controls, and plots as inline SVG; diffs stay text. The
+pages and what each answers are described in
+[Inspection, review and monitoring](doc/inspection.md). The only
 JavaScript is the emscripten loader and two small hosts, one in fortui for the
 DOM and events and one in fortyard for HTTP requests. Data types, JSON handling and diff
 logic are shared modules compiled with both gfortran (server) and LFortran

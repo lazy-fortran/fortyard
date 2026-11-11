@@ -55,10 +55,12 @@ and review. Every push of a change creates a new **version** of it.
   contains a version of another change builds on that change and forms a
   stack with it; nothing is declared
   (see [Parallel development](parallel-development.md#stacks)).
-- **Page.** As on GitHub and GitLab: title and a required Markdown description
+- **Page.** Title and a required Markdown description
   (drafted by the review agent from the issue and the diff, edited by the
-  author); tabs *Conversation*, *Files changed*, *Versions* and *Checks*;
-  for a stack, the whole stack around the change.
+  author); one page whose sections are checks, reviews, files, discussion and
+  timeline, each with its own address
+  ([Inspection](inspection.md)); for a stack, the whole
+  stack around the change.
 - **Attachments.** Images, PDFs and data files can be added to the description
   and to comments, from the browser, with `fy change attach FILE` or through
   the MCP server. They are stored by fortyard, not in git, within a size limit.
