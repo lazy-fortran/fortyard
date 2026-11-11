@@ -574,14 +574,15 @@ contains
             type(landing_t), intent(in) :: g(:)
             type(change_t) :: ch
             integer, allocatable :: held(:), single(:)
-            character(len=40), allocatable :: commits(:)
+            character(len=40), allocatable :: commits(:), tips(:)
+            character(len=40) :: pinned
             character(len=1024), allocatable :: branches(:), holds(:)
             character(len=:), allocatable :: tip, hold, commit, log, work, change_url
             logical :: ok, alone, has_change
             integer :: i, k, next
 
             tip = ''
-            allocate (held(0), single(0), commits(0), branches(0), holds(0))
+            allocate (held(0), single(0), commits(0), tips(0), branches(0), holds(0))
             do i = 1, size(g)
                 hold = 'refs/fortyard/queue/'//itoa(int(g(i)%id))
                 work = tmp_dir()//'/fy-land-'//itoa(int(g(i)%id))
@@ -594,12 +595,13 @@ contains
                     call land_branch(repo_path(g(i)%repo), work, g(i)%repo, g(i)%branch, &
                         itoa(int(g(i)%id))//'@'//g(i)%created, base, upstream, commit, log, ok, &
                         number=ch%number, message_in=change_message(ch, change_url), &
-                        onto=tip, hold=hold, alone=alone, expect=reviewed(ch))
+                        onto=tip, hold=hold, alone=alone, expect=reviewed(ch), &
+                        pinned=pinned)
                 else
                     next = change_next_number(db, g(i)%repo, repo_path(g(i)%repo))
                     call land_branch(repo_path(g(i)%repo), work, g(i)%repo, g(i)%branch, &
                         itoa(int(g(i)%id))//'@'//g(i)%created, base, upstream, commit, log, ok, &
-                        min_number=next, onto=tip, hold=hold, alone=alone)
+                        min_number=next, onto=tip, hold=hold, alone=alone, pinned=pinned)
                 end if
                 call execute_command_line('rm -rf '''//work//'''')
                 if (alone) then
@@ -607,6 +609,7 @@ contains
                 else if (ok) then
                     held = [held, i]
                     commits = [character(len=40) :: commits, commit]
+                    tips = [character(len=40) :: tips, pinned]
                     branches = [character(len=1024) :: branches, g(i)%branch]
                     holds = [character(len=1024) :: holds, hold]
                     tip = hold
@@ -619,10 +622,11 @@ contains
                 if (checks_mode == 'runner') then
                     call land_candidate(repo_path(g(1)%repo), work, g(1)%repo, tip, branches, &
                         holds, upstream, log, ok, runner=runner_check, &
-                        check=policy%tests /= 'none')
+                        check=policy%tests /= 'none', pinned=tips)
                 else
                     call land_candidate(repo_path(g(1)%repo), work, g(1)%repo, tip, branches, &
-                        holds, upstream, log, ok, check=policy%tests /= 'none')
+                        holds, upstream, log, ok, check=policy%tests /= 'none', &
+                        pinned=tips)
                 end if
                 call execute_command_line('rm -rf '''//work//'''')
                 if (ok) then

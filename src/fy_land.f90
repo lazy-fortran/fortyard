@@ -3,7 +3,9 @@ module fy_land
     !! `main`, after the repository's check passed on exactly that commit; `main`
     !! then moves forward to it and is pushed to the repository's mirror. A
     !! branch that is `main` plus one merge commit lands as that merge, so the
-    !! merged history (such as an upstream's) stays an ancestor of `main`.
+    !! merged history (such as an upstream's) stays an ancestor of `main`. The
+    !! commit is made in the bare repository itself, from git's three-way merge
+    !! of trees; files are written only for the checks that read them.
     use fy_proc, only: &
         proc_find, &
         proc_run
@@ -15,6 +17,8 @@ module fy_land
         land_branch, &
         land_candidate, &
         land_check, &
+        land_git_check, &
+        land_git_new_enough, &
         land_hook_install, &
         land_push_check
 
@@ -31,18 +35,27 @@ module fy_land
     character(len=*), parameter :: NO_CHECK = 'Not checked: the policy of the repository sets tests=none.'
     !! git's empty tree, the base of a first landing.
     character(len=*), parameter :: EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+    !! The value of a ref that does not exist yet.
+    character(len=*), parameter :: NO_COMMIT = '0000000000000000000000000000000000000000'
+    !! git merge-tree takes --merge-base from this version on.
+    character(len=*), parameter :: GIT_NEEDED = '2.40'
     !! The repository's size limit in bytes, read into $lim from the text of
     !! .fortyard/size-limit: 1 MiB unless that is a single number.
     character(len=*), parameter :: SIZE_LIMIT = 'case "$lim" in ""|*[!0-9]*) lim=1048576;; esac; '
+    !! Shell: git in the bare repository $3, the landing commit $2 and what
+    !! it is compared with, $1.
+    character(len=*), parameter :: IN_REPO = 'r=$3; g() { git --git-dir="$r" "$@"; }; '
     !! Prints each file the landing adds or changes that is over the size limit
     !! and not matched by a pattern in .fortyard/allow-large (one shell pattern
-    !! a line).
-    character(len=*), parameter :: SIZE_CHECK = 'lim=$(cat .fortyard/size-limit 2>/dev/null); '// &
-        SIZE_LIMIT//'git diff --name-only --diff-filter=AMR "$1" HEAD '// &
-        '| while IFS= read -r f; do s=$(git cat-file -s "HEAD:$f"); '// &
-        '[ "$s" -gt "$lim" ] || continue; ok=; if [ -f .fortyard/allow-large ]; then '// &
-        'while IFS= read -r p; do case "$f" in $p) ok=1;; esac; done < .fortyard/allow-large; '// &
-        'fi; [ -n "$ok" ] || echo "$f ($s bytes)"; done'
+    !! a line). Sizes and both files are read from the object store.
+    character(len=*), parameter :: SIZE_CHECK = IN_REPO// &
+        'lim=$(g cat-file -p "$2:.fortyard/size-limit" 2>/dev/null); '//SIZE_LIMIT// &
+        'allow=$(g cat-file -p "$2:.fortyard/allow-large" 2>/dev/null); '// &
+        'g -c core.quotePath=false diff --name-only --diff-filter=AMR "$1" "$2" '// &
+        '| while IFS= read -r f; do s=$(g cat-file -s "$2:$f"); '// &
+        '[ "$s" -gt "$lim" ] || continue; '// &
+        'printf "%s\n" "$allow" | { while IFS= read -r p; do [ -n "$p" ] || continue; '// &
+        'case "$f" in $p) exit 0;; esac; done; exit 1; } || echo "$f ($s bytes)"; done'
     !! A shell function for a push: reads the pushed commits and prints each
     !! file one of them adds or changes that is over the size limit and matched
     !! by no pattern in .fortyard/allow-large, both taken from the pushed commit
@@ -76,13 +89,24 @@ module fy_land
         'out=$(sent); fi; [ -z "$out" ] || printf "%s\n" "$out"'
     !! fo fmt --check on the Fortran files the landing adds or changes, except
     !! those matched by a pattern in .fortyard/format-exclude (one shell pattern
-    !! a line), for code that follows another project's style.
-    character(len=*), parameter :: FORMAT_CHECK = 'files=$(git diff --name-only '// &
-        '--diff-filter=AMR "$1" HEAD -- "*.f90" "*.F90" "*.f" "*.F" | while IFS= read -r f; do '// &
-        'if [ -f .fortyard/format-exclude ]; then while IFS= read -r p; do '// &
-        'case "$f" in $p) continue 2;; esac; done < .fortyard/format-exclude; fi; echo "$f"; '// &
+    !! a line), for code that follows another project's style. The formatter
+    !! reads files, so these and the project files it looks for are written
+    !! from the object store into the empty current directory, through an
+    !! index of their own that leaves the bare repository as it is. Names are
+    !! split at line ends only, so one with a space is one file.
+    character(len=*), parameter :: FORMAT_CHECK = IN_REPO// &
+        'ex=$(g cat-file -p "$2:.fortyard/format-exclude" 2>/dev/null); '// &
+        'files=$(g -c core.quotePath=false diff --name-only --diff-filter=AMR "$1" "$2" -- '// &
+        '"*.f90" "*.F90" "*.f" "*.F" | while IFS= read -r f; do '// &
+        'printf "%s\n" "$ex" | { while IFS= read -r p; do [ -n "$p" ] || continue; '// &
+        'case "$f" in $p) exit 0;; esac; done; exit 1; } || echo "$f"; '// &
         'done); [ -n "$files" ] || exit 0; '// &
-        '{ [ -f fpm.toml ] || [ -f CMakeLists.txt ]; } || exit 0; fo fmt --check $files 2>&1'
+        'cfg=$(g ls-tree --name-only "$2" -- fpm.toml CMakeLists.txt .fprettify .fprettify.rc); '// &
+        'case "$cfg" in *fpm.toml*|*CMakeLists.txt*) ;; *) exit 0;; esac; '// &
+        'export GIT_INDEX_FILE="$PWD/.fy-index"; g read-tree "$2" && '// &
+        'printf "%s\n" "$files" "$cfg" | tr "\n" "\0" | g --work-tree="$PWD" checkout-index -z '// &
+        '--stdin --prefix="$PWD/" 2>&1 || exit 1; unset GIT_INDEX_FILE; rm -f .fy-index; '// &
+        'IFS="'//new_line('a')//'"; set -f; fo fmt --check $files 2>&1'
 
 contains
 
@@ -156,12 +180,13 @@ contains
     end subroutine land_push_check
 
     subroutine land_branch(repo, work, name, branch, ident, base_url, upstream, commit, log, ok, &
-            runner, number, message_in, min_number, onto, hold, alone, check, expect)
-        !! Lands `branch` of the bare repository `repo` (called `name` in URLs),
-        !! using the scratch directory `work`. `ident` names this landing uniquely
-        !! and goes into the commit as a `Landing:` trailer. The commit is numbered
-        !! after the highest `(#N)` on main. On success `commit` is the new `main`;
-        !! `log` tells what happened either way.
+            runner, number, message_in, min_number, onto, hold, alone, check, expect, pinned)
+        !! Lands `branch` of the bare repository `repo` (called `name` in URLs).
+        !! The landing commit is made in `repo` itself, without a work tree; the
+        !! scratch directory `work` holds what needs files. `ident` names this
+        !! landing uniquely and goes into the commit as a `Landing:` trailer. The
+        !! commit is numbered after the highest `(#N)` on main. On success
+        !! `commit` is the new `main`; `log` tells what happened either way.
         character(len=*), intent(in) :: repo, work, name, branch, ident, base_url, upstream
         character(len=:), allocatable, intent(out) :: commit, log
         logical, intent(out) :: ok
@@ -172,9 +197,10 @@ contains
         integer, intent(in), optional :: number, min_number
         character(len=*), intent(in), optional :: message_in
         !! For the merge queue: with `hold`, the landing commit is made on the ref
-        !! `onto` (main when empty), pushed to the ref `hold` and neither checked
-        !! nor landed. A branch that cannot share a candidate (a merge, or the
-        !! first commit of main) sets `alone` instead and is left untouched.
+        !! `onto` (main when empty), kept at the ref `hold` and neither checked
+        !! nor landed. A branch that cannot share a candidate (a merge of another
+        !! history into main, or the first commit of main) sets `alone` instead
+        !! and is left untouched.
         character(len=*), intent(in), optional :: onto, hold
         logical, intent(out), optional :: alone
         !! False when the policy of the repository asks for no check (tests=none).
@@ -182,15 +208,18 @@ contains
         !! The commit the branch has to be at, when not empty: the version of
         !! its change that was reviewed (review=before).
         character(len=*), intent(in), optional :: expect
+        !! The commit of the branch that the landing commit was made from.
+        character(len=40), intent(out), optional :: pinned
         logical :: passed
         character(len=:), allocatable :: runner_log
         character(len=:), allocatable :: out, subjects, message, num
         ! Fixed length: gfortran overflows typed array constructors around
         ! deferred-length strings.
-        character(len=1024) :: range, author
-        character(len=40) :: base
-        character(len=:), allocatable :: merged
-        character(len=:), allocatable :: tip
+        character(len=1024) :: range, author_name, author_mail
+        ! The branch, main, what the landing commit stands on (main, or the
+        ! candidate before it), the merged history of an upstream merge, and
+        ! the landing commit with its tree and what it is checked against.
+        character(len=40) :: tip, main, base, merged, tree, made, against
         integer :: status, k, n
         logical :: has_main, checked
 
@@ -199,28 +228,35 @@ contains
         checked = .true.
         if (present(check)) checked = check
         log = ''
+        if (present(alone)) alone = .false.
+        if (present(pinned)) pinned = ''
         call run([character(len=1024) :: 'rm', '-rf', work], '')
-        call run([character(len=1024) :: 'git', 'clone', '--quiet', '--shared', repo, work], '')
+        call run([character(len=1024) :: 'mkdir', '-p', work//'/files'], '')
         if (status /= 0) return
         ! A landing interrupted by a restart runs again; if it already moved main,
         ! its commit (made by fortyard, with its trailer) is there and it is done.
         call git([character(len=1024) :: 'log', '-1', '--format=%H', '--fixed-strings', &
-            '--committer=fortyard@localhost', '--grep=Landing: '//ident, 'origin/main'])
+            '--committer=fortyard@localhost', '--grep=Landing: '//ident, 'refs/heads/main'])
         if (status == 0 .and. len_trim(out) >= 40) then
             commit = first_line(out)
             log = 'Landed as '//commit//' before a restart.'
             ok = .true.
             return
         end if
-        call git([character(len=1024) :: 'rev-parse', '--verify', '--quiet', 'origin/'//branch])
+        call git([character(len=1024) :: 'rev-parse', '--verify', '--quiet', &
+            'refs/heads/'//branch//'^{commit}'])
         if (status /= 0) then
             log = 'There is no branch '//branch//'.'
             return
         end if
         tip = first_line(out)
-        call git([character(len=1024) :: 'rev-parse', '--verify', '--quiet', 'origin/main'])
+        if (present(pinned)) pinned = tip
+        call git([character(len=1024) :: 'rev-parse', '--verify', '--quiet', &
+            'refs/heads/main^{commit}'])
         has_main = status == 0
-        if (present(alone)) alone = .false.
+        main = ''
+        if (has_main) main = first_line(out)
+        base = main
         if (present(expect)) then
             if (len(expect) > 0 .and. tip /= expect) then
                 log = 'The branch '//branch//' is at '//tip//', which is not the reviewed'// &
@@ -230,26 +266,39 @@ contains
                 return
             end if
         end if
+        merged = ''
         if (present(hold)) then
-            call git([character(len=1024) :: 'rev-parse', '--verify', '--quiet', &
-                'origin/'//branch//'^2'])
-            if (status == 0 .or. .not. has_main) then
+            if (.not. has_main) then
                 if (present(alone)) alone = .true.
-                status = 0
                 return
+            end if
+            ! A merge on main, or on an older main, is no member of a candidate:
+            ! it lands as that merge or is refused, by itself. Any other merge
+            ! is squashed with the branch's other commits.
+            call git([character(len=1024) :: 'rev-parse', '--verify', '--quiet', tip//'^2'])
+            if (status == 0) then
+                call git([character(len=1024) :: 'merge-base', '--is-ancestor', tip//'^1', main])
+                if (status == 0) then
+                    if (present(alone)) alone = .true.
+                    return
+                end if
             end if
             if (present(onto)) then
                 if (len(onto) > 0) then
                     ! The candidate stands in for main in everything below.
-                    call git([character(len=1024) :: 'fetch', '--quiet', 'origin', onto])
-                    if (status == 0) call git([character(len=1024) :: 'update-ref', &
-                        'refs/remotes/origin/main', 'FETCH_HEAD'])
+                    call git([character(len=1024) :: 'rev-parse', '--verify', '--quiet', &
+                        onto//'^{commit}'])
                     if (status /= 0) then
                         log = 'The queue candidate could not be fetched.'//new_line('a')//out
                         return
                     end if
+                    base = first_line(out)
                 end if
             end if
+        else if (has_main) then
+            ! A branch that is main plus one merge commit lands as that merge.
+            call merge_parent(merged)
+            if (status /= 0) return
         end if
         if (present(number)) then
             num = itoa(number)
@@ -259,38 +308,57 @@ contains
             num = itoa(k)
         end if
 
-        ! A branch that is main plus one merge commit lands as that merge.
-        merged = ''
-        if (has_main) then
-            call merge_parent(merged)
-            if (status /= 0) return
-        end if
-        ! Else one squashed commit on top of main (or the first commit of main).
-        if (has_main) then
-            range = 'origin/main..origin/'//branch
-            call git([character(len=1024) :: 'checkout', '--quiet', '-B', 'landing', &
-                'origin/main'])
-            if (len(merged) == 0) then
-                ! A three-way merge needs an identity, though it commits nothing.
-                call git([character(len=1024) :: '-c', 'user.name=fortyard', '-c', &
-                    'user.email=fortyard@localhost', 'merge', '--squash', '--quiet', &
-                    'origin/'//branch])
-                if (status /= 0) then
-                    log = 'The branch does not merge cleanly with main; rebase it onto main.'// &
-                        new_line('a')//out
-                    return
-                end if
+        ! Else one squashed commit on top of main (or the first commit of main):
+        ! what the branch changed since it left main, merged three-way onto
+        ! the newest state by git, in the object store alone.
+        tree = ''
+        if (has_main .and. len_trim(merged) == 0) then
+            range = base//'..'//tip
+            call git([character(len=1024) :: 'merge-base', '--all', base, tip])
+            if (status /= 0) then
+                log = 'The branch does not merge cleanly with main; rebase it onto main.'// &
+                    new_line('a')//'It shares no history with main.'
+                return
+            end if
+            ! Merge attributes are those of the side landed on, as in a checkout
+            ! of it. Several merge bases (a history both sides merged) are left
+            ! to git, which merges them first as git merge does.
+            if (count_lines(out) > 1) then
+                call git([character(len=1024) :: '-c', 'core.quotePath=false', &
+                    '--attr-source='//base, 'merge-tree', '--write-tree', '--name-only', base, tip])
+            else
+                call git([character(len=1024) :: '-c', 'core.quotePath=false', &
+                    '--attr-source='//base, 'merge-tree', '--write-tree', '--name-only', &
+                    '--merge-base='//first_line(out), base, tip])
+            end if
+            if (status == 1) then
+                ! After the tree: the conflicting paths, an empty line and what
+                ! git says about each.
+                k = max(1, index(out, new_line('a')))
+                log = 'The branch does not merge cleanly with main; rebase it onto main.'// &
+                    new_line('a')//'Conflicting paths:'//trim_trailing(out(k:))
+                return
+            else if (status /= 0) then
+                log = 'The branch could not be merged with main.'//new_line('a')//out
+                return
+            end if
+            tree = first_line(out)
+            call git([character(len=1024) :: 'rev-parse', base//'^{tree}'])
+            if (status == 0 .and. first_line(out) == tree) then
+                log = 'The branch has nothing that main does not have.'
+                return
             end if
         else
-            range = 'origin/'//branch
-            call git([character(len=1024) :: 'checkout', '--quiet', '--orphan', 'landing', &
-                'origin/'//branch])
+            range = tip
+            if (has_main) range = base//'..'//tip
+            call git([character(len=1024) :: 'rev-parse', tip//'^{tree}'])
+            if (status == 0) tree = first_line(out)
         end if
         ! Commits whose patch main already has (a branch not rebased after an
         ! earlier landing of part of it) do not name the landing.
         if (has_main) then
             call git([character(len=1024) :: 'log', '--reverse', '--format=%s', '--no-merges', &
-                '--cherry-pick', '--right-only', 'origin/main...origin/'//branch])
+                '--cherry-pick', '--right-only', base//'...'//tip])
         else
             call git([character(len=1024) :: 'log', '--reverse', '--format=%s', trim(range)])
         end if
@@ -300,8 +368,14 @@ contains
             log = 'The branch has nothing that main does not have.'
             return
         end if
-        if (n == 1 .or. len(merged) > 0) then
-            call git([character(len=1024) :: 'log', '-1', '--format=%B', 'origin/'//branch])
+        if (len_trim(merged) > 0 .or. .not. has_main) then
+            call git([character(len=1024) :: 'log', '-1', '--format=%B', tip])
+            message = trim_trailing(out)
+        else if (n == 1) then
+            ! The message of that one commit, which a merge of main into the
+            ! branch may have left below the tip.
+            call git([character(len=1024) :: 'log', '-1', '--format=%B', '--no-merges', &
+                '--cherry-pick', '--right-only', base//'...'//tip])
             message = trim_trailing(out)
         else
             message = first_line(subjects)//new_line('a')//new_line('a')// &
@@ -318,58 +392,62 @@ contains
             if (len(base_url) == 0) message = message//new_line('a')
             message = message//new_line('a')//'Landing: '//ident
         end if
-        call git([character(len=1024) :: 'log', '--reverse', '--format=%an <%ae>', trim(range)])
-        author = first_line(out)
-        call write_file(work//'/.git/LANDING_MSG', message//new_line('a'))
-        if (len(merged) > 0) then
+        call write_file(work//'/LANDING_MSG', message//new_line('a'))
+        if (len_trim(merged) > 0) then
             ! The merge as it was resolved, on main and the merged commit, by the
             ! merge's author.
-            call git([character(len=1024) :: 'log', '-1', '--format=%an%n%ae', 'origin/'//branch])
-            k = index(out, new_line('a'))
-            call run([character(len=1024) :: 'env', 'GIT_AUTHOR_NAME='//out(1:k - 1), &
-                'GIT_AUTHOR_EMAIL='//first_line(out(k + 1:)), 'git', '-c', 'user.name=fortyard', &
-                '-c', 'user.email=fortyard@localhost', 'commit-tree', 'origin/'//branch//'^{tree}', &
-                '-p', 'origin/main', '-p', merged, '-F', '.git/LANDING_MSG'], work)
-            if (status == 0) call git([character(len=1024) :: 'checkout', '--quiet', '-B', &
-                'landing', first_line(out)])
+            call git([character(len=1024) :: 'log', '-1', '--format=%an%n%ae', tip])
         else
-            call git([character(len=1024) :: '-c', 'user.name=fortyard', '-c', &
-                'user.email=fortyard@localhost', 'commit', '--quiet', '--no-verify', &
-                '--author='//trim(author), '-F', '.git/LANDING_MSG'])
+            call git([character(len=1024) :: 'log', '--reverse', '--format=%an%n%ae', trim(range)])
         end if
-        if (status /= 0) then
+        k = max(1, index(out, new_line('a')))
+        author_name = out(1:k - 1)
+        author_mail = first_line(out(k + 1:))
+        if (len_trim(merged) > 0) then
+            call run([character(len=1024) :: 'env', 'GIT_AUTHOR_NAME='//trim(author_name), &
+                'GIT_AUTHOR_EMAIL='//trim(author_mail), 'GIT_COMMITTER_NAME=fortyard', &
+                'GIT_COMMITTER_EMAIL=fortyard@localhost', 'git', '--git-dir', repo, &
+                'commit-tree', tree, '-p', main, '-p', merged, '-F', work//'/LANDING_MSG'], '')
+        else
+            ! The message is tidied as git commit does it.
+            call run([character(len=1024) :: 'env', 'GIT_AUTHOR_NAME='//trim(author_name), &
+                'GIT_AUTHOR_EMAIL='//trim(author_mail), 'GIT_COMMITTER_NAME=fortyard', &
+                'GIT_COMMITTER_EMAIL=fortyard@localhost', 'sh', '-c', &
+                'git stripspace < "$1" | git --git-dir "$2" commit-tree "$3" '// &
+                '${4:+-p "$4"} -F - 2>&1', 'commit', work//'/LANDING_MSG', repo, tree, base], '')
+        end if
+        if (status /= 0 .or. len_trim(tree) == 0) then
             log = 'The landing commit could not be made.'//new_line('a')//out
             return
         end if
+        made = first_line(out)
 
         ! A merge is checked for what differs from the merged history only.
-        base = EMPTY_TREE
-        if (has_main) base = 'HEAD~1'
-        if (len(merged) > 0) base = merged
+        against = EMPTY_TREE
+        if (has_main) against = base
+        if (len_trim(merged) > 0) against = merged
         ! What local pre-commit hooks check, checked again on the landing commit,
         ! so nothing that skipped them reaches main.
-        call run([character(len=1024) :: 'sh', '-c', SIZE_CHECK, 'size-check', &
-            base], work)
+        call run([character(len=1024) :: 'sh', '-c', SIZE_CHECK, 'size-check', against, made, &
+            repo], '')
         if (status /= 0 .or. len_trim(out) > 0) then
             log = 'Files over the size limit (allow them in .fortyard/allow-large):'//new_line('a')//out
             return
         end if
-        call run([character(len=1024) :: 'sh', '-c', FORMAT_CHECK, 'format-check', &
-            base], work)
+        call run([character(len=1024) :: 'sh', '-c', FORMAT_CHECK, 'format-check', against, &
+            made, absolute(repo)], work//'/files')
         if (status /= 0) then
             log = 'Changed Fortran files need formatting (run fo fmt):'//new_line('a')//out
             return
         end if
 
         if (present(hold)) then
-            call run([character(len=1024) :: 'env', 'FY_LANDING=1', 'git', 'push', '--quiet', &
-                'origin', '+HEAD:'//hold], work)
+            call git([character(len=1024) :: 'update-ref', hold, made])
             if (status /= 0) then
                 log = 'The landing commit could not be queued.'//new_line('a')//out
                 return
             end if
-            call git([character(len=1024) :: 'rev-parse', 'HEAD'])
-            commit = first_line(out)
+            commit = made
             ok = .true.
             call run([character(len=1024) :: 'rm', '-rf', work], '')
             return
@@ -380,31 +458,39 @@ contains
             out = NO_CHECK
             status = 0
         else if (present(runner)) then
-            call run([character(len=1024) :: 'env', 'FY_LANDING=1', 'git', 'push', '--quiet', &
-                'origin', 'HEAD:'//check_ref(ident)], work)
+            call git([character(len=1024) :: 'update-ref', check_ref(ident), made])
             call runner(name, check_ref(ident), passed, runner_log)
-            call run([character(len=1024) :: 'env', 'FY_LANDING=1', 'git', 'push', '--quiet', &
-                'origin', ':'//check_ref(ident)], work)
+            call git([character(len=1024) :: 'update-ref', '-d', check_ref(ident)])
             ! Set after the cleanup above, which reuses status and out.
             out = runner_log
             if (passed) out = 'Checked by a runner.'//new_line('a')//runner_log
             status = merge(0, 1, passed)
         else
-            call land_check(work, out, status)
+            call check_out(repo, work//'/check', made, out, status)
+            if (status /= 0) then
+                log = 'The landing commit could not be checked out.'//new_line('a')//out
+                return
+            end if
+            call land_check(work//'/check', out, status)
         end if
         log = out
         if (status /= 0) then
             log = 'The check failed (exit status '//itoa(status)//').'//new_line('a')//out
             return
         end if
-        call run([character(len=1024) :: 'env', 'FY_LANDING=1', 'git', 'push', '--quiet', &
-            'origin', 'landing:main', ':'//branch], work)
+        ! main moves only from the commit this landing was made on.
+        if (has_main) then
+            call git([character(len=1024) :: 'update-ref', 'refs/heads/main', made, main])
+        else
+            call git([character(len=1024) :: 'update-ref', 'refs/heads/main', made, NO_COMMIT])
+        end if
         if (status /= 0) then
             log = log//new_line('a')//'main could not be moved forward.'//new_line('a')//out
             return
         end if
-        call git([character(len=1024) :: 'rev-parse', 'HEAD'])
-        commit = first_line(out)
+        ! Commits pushed to the branch since then stay on it.
+        call git([character(len=1024) :: 'update-ref', '-d', 'refs/heads/'//branch, tip])
+        commit = made
         ok = .true.
         log = log//new_line('a')//'Landed as '//commit//'.'
         if (len(upstream) > 0) then
@@ -426,26 +512,22 @@ contains
             !! The second parent of the branch's tip when the tip is a merge whose
             !! first parent is main, else ''. A merge onto an older main fails
             !! (status 1): squashing it would drop the merged history.
-            character(len=:), allocatable, intent(out) :: parent
-            character(len=:), allocatable :: second, first, main
+            character(len=40), intent(out) :: parent
+            character(len=40) :: second
 
             parent = ''
-            call git([character(len=1024) :: 'rev-parse', '--verify', '--quiet', &
-                'origin/'//branch//'^2'])
+            call git([character(len=1024) :: 'rev-parse', '--verify', '--quiet', tip//'^2'])
             if (status /= 0) then
                 status = 0
                 return
             end if
             second = first_line(out)
-            call git([character(len=1024) :: 'rev-parse', 'origin/'//branch//'^1', 'origin/main'])
-            first = first_line(out)
-            main = out(len(first) + 2:)
-            main = first_line(main)
-            if (first == main) then
+            call git([character(len=1024) :: 'rev-parse', tip//'^1'])
+            if (first_line(out) == main) then
                 parent = second
                 return
             end if
-            call git([character(len=1024) :: 'merge-base', '--is-ancestor', first, 'origin/main'])
+            call git([character(len=1024) :: 'merge-base', '--is-ancestor', tip//'^1', main])
             if (status == 0) then
                 log = 'The branch is a merge onto an older main; merge again on the current main.'
                 status = 1
@@ -460,7 +542,7 @@ contains
             integer :: pos, e, s, v, ios
             m = 1
             if (.not. has_main) return
-            call git([character(len=1024) :: 'log', '--format=%s', 'origin/main'])
+            call git([character(len=1024) :: 'log', '--format=%s', base])
             pos = 1
             do while (pos <= len(out))
                 e = index(out(pos:), new_line('a'))
@@ -484,7 +566,7 @@ contains
 
         subroutine git(args)
             character(len=*), intent(in) :: args(:)
-            call run([character(len=1024) :: 'git', args], work)
+            call run([character(len=1024) :: 'git', '--git-dir', repo, args], '')
         end subroutine git
 
         subroutine run(argv, dir)
@@ -499,19 +581,21 @@ contains
     end subroutine land_branch
 
     subroutine land_candidate(repo, work, name, ref, branches, holds, upstream, log, ok, runner, &
-            check)
+            check, pinned)
         !! Checks the queue candidate at the ref `ref` of the bare repository
         !! `repo` once and, when it passes, moves main to it and removes the
         !! landed `branches`. The refs `holds` of the candidate's commits are
-        !! removed either way.
+        !! removed either way. With `pinned`, the commit each branch was squashed
+        !! from, a branch that moved on since then stays, with its later commits.
         character(len=*), intent(in) :: repo, work, name, ref, upstream
         character(len=*), intent(in) :: branches(:), holds(:)
         character(len=:), allocatable, intent(out) :: log
         logical, intent(out) :: ok
         procedure(check_runner_i), optional :: runner
         logical, intent(in), optional :: check
+        character(len=*), intent(in), optional :: pinned(:)
         character(len=:), allocatable :: out, runner_log
-        character(len=1024), allocatable :: argv(:)
+        character(len=40) :: tip, main
         integer :: status, i
         logical :: passed, checked
 
@@ -520,16 +604,13 @@ contains
         checked = .true.
         if (present(check)) checked = check
         call run([character(len=1024) :: 'rm', '-rf', work], '')
-        call run([character(len=1024) :: 'git', 'clone', '--quiet', '--shared', repo, work], '')
-        if (status == 0) call run([character(len=1024) :: 'git', 'fetch', '--quiet', 'origin', &
-            ref], work)
-        if (status == 0) call run([character(len=1024) :: 'git', 'checkout', '--quiet', '-B', &
-            'landing', 'FETCH_HEAD'], work)
+        call git([character(len=1024) :: 'rev-parse', '--verify', '--quiet', ref//'^{commit}'])
         if (status /= 0) then
             log = 'The queue candidate could not be checked out.'//new_line('a')//out
             call drop_holds()
             return
         end if
+        tip = first_line(out)
         if (.not. checked) then
             out = NO_CHECK
             status = 0
@@ -539,6 +620,12 @@ contains
             if (passed) out = 'Checked by a runner.'//new_line('a')//runner_log
             status = merge(0, 1, passed)
         else
+            call check_out(repo, work, tip, out, status)
+            if (status /= 0) then
+                log = 'The queue candidate could not be checked out.'//new_line('a')//out
+                call drop_holds()
+                return
+            end if
             call land_check(work, out, status)
         end if
         log = out
@@ -547,17 +634,26 @@ contains
             call drop_holds()
             return
         end if
-        argv = [character(len=1024) :: 'env', 'FY_LANDING=1', 'git', 'push', '--quiet', 'origin', &
-            'landing:main']
-        do i = 1, size(branches)
-            argv = [character(len=1024) :: argv, ':'//trim(branches(i))]
-        end do
-        call run(argv, work)
+        ! main moves forward only: from a commit the candidate stands on.
+        call git([character(len=1024) :: 'rev-parse', '--verify', '--quiet', &
+            'refs/heads/main^{commit}'])
+        main = first_line(out)
+        if (status == 0) call git([character(len=1024) :: 'merge-base', '--is-ancestor', main, tip])
+        if (status == 0) call git([character(len=1024) :: 'update-ref', 'refs/heads/main', tip, &
+            main])
         if (status /= 0) then
             log = log//new_line('a')//'main could not be moved forward.'//new_line('a')//out
             call drop_holds()
             return
         end if
+        do i = 1, size(branches)
+            if (present(pinned)) then
+                call git([character(len=1024) :: 'update-ref', '-d', &
+                    'refs/heads/'//trim(branches(i)), trim(pinned(i))])
+            else
+                call git([character(len=1024) :: 'update-ref', '-d', 'refs/heads/'//trim(branches(i))])
+            end if
+        end do
         ok = .true.
         call drop_holds()
         if (len(upstream) > 0) then
@@ -585,6 +681,11 @@ contains
             end do
         end subroutine drop_holds
 
+        subroutine git(args)
+            character(len=*), intent(in) :: args(:)
+            call run([character(len=1024) :: 'git', '--git-dir', repo, args], '')
+        end subroutine git
+
         subroutine run(argv, dir)
             character(len=*), intent(in) :: argv(:), dir
             if (len(dir) > 0) then
@@ -594,6 +695,72 @@ contains
             end if
         end subroutine run
     end subroutine land_candidate
+
+    subroutine check_out(repo, dir, commit, out, status)
+        !! A work tree of `commit` of the bare repository `repo` in `dir`, for a
+        !! check that runs here: a clone that borrows the repository's objects.
+        character(len=*), intent(in) :: repo, dir, commit
+        character(len=:), allocatable, intent(out) :: out
+        integer, intent(out) :: status
+
+        call proc_run([character(len=1024) :: 'git', 'clone', '--quiet', '--shared', &
+            '--no-checkout', repo, dir], out, status, LOG_BYTES)
+        if (status == 0) call proc_run([character(len=1024) :: 'git', 'checkout', '--quiet', '-B', &
+            'landing', commit], out, status, LOG_BYTES, dir=dir)
+    end subroutine check_out
+
+    subroutine land_git_check(ok, message)
+        !! Whether the git on PATH can squash in a bare repository; `message`
+        !! says what is missing when it cannot.
+        logical, intent(out) :: ok
+        character(len=:), allocatable, intent(out) :: message
+        character(len=:), allocatable :: out
+        integer :: status
+
+        call proc_run([character(len=16) :: 'git', '--version'], out, status, 1024)
+        ok = .false.
+        message = 'fy: git is not installed; fy serve needs git '//GIT_NEEDED//' or newer'
+        if (status /= 0) return
+        ok = land_git_new_enough(out)
+        message = ''
+        if (.not. ok) message = 'fy: '//first_line(out)//' is too old: fy serve needs git '// &
+            GIT_NEEDED//' or newer, as landings are squashed with git merge-tree --merge-base'
+    end subroutine land_git_check
+
+    pure logical function land_git_new_enough(version) result(enough)
+        !! True when the answer of `git --version` ("git version 2.43.0", with
+        !! whatever a vendor adds after it) names 2.40 or newer.
+        character(len=*), intent(in) :: version
+        integer :: s, e, major, minor, ios
+
+        enough = .false.
+        s = scan(version, '0123456789')
+        if (s == 0) return
+        e = s + verify(version(s:)//' ', '0123456789') - 2
+        read (version(s:e), *, iostat=ios) major
+        if (ios /= 0 .or. e + 2 > len(version)) return
+        if (version(e + 1:e + 1) /= '.') return
+        s = e + 2
+        e = s + verify(version(s:)//' ', '0123456789') - 2
+        if (e < s) return
+        read (version(s:e), *, iostat=ios) minor
+        if (ios /= 0) return
+        enough = major > 2 .or. (major == 2 .and. minor >= 40)
+    end function land_git_new_enough
+
+    function absolute(path) result(full)
+        !! `path` from the root, for a command that runs in another directory.
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: full
+        character(len=4096) :: cwd
+
+        full = path
+        if (len(path) > 0) then
+            if (path(1:1) == '/') return
+        end if
+        call getcwd(cwd)
+        full = trim(cwd)//'/'//path
+    end function absolute
 
     subroutine land_check(work, out, code, verify)
         !! The check of a landing commit checked out in `work`: fo build and fo

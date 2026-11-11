@@ -22,6 +22,7 @@ program fy
         config_save, &
         config_t
     use fy_land, only: &
+        land_git_check, &
         land_push_check
     use fy_mcp, only: &
         mcp_main
@@ -255,6 +256,12 @@ contains
         integer :: lfd, port, stat, colon, workers, threads, interval, n
         logical :: exists
 
+        ! Landings are squashed by git itself, which older versions cannot do.
+        call land_git_check(exists, text)
+        if (.not. exists) then
+            write (error_unit, '(a)') text
+            call quit(1)
+        end if
         data = option('--data', './fortyard-data')
         listen = option('--listen', '127.0.0.1:8740')
         text = option('--workers', '2')
