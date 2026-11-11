@@ -110,6 +110,8 @@ module fy_store
         character(len=:), allocatable :: mode
         !! Exit status of the last clone or fetch; -1 before the first.
         integer :: fetch_status = -1
+        !! Issues that are open, for the repository row of the pages.
+        integer :: open_issues = 0
     end type repo_info_t
 
     type :: release_t
@@ -742,7 +744,9 @@ contains
 
         allocate (repos(0))
         call db_prepare(db, "SELECT name, upstream, coalesce(fetched_at, ''),"// &
-            ' coalesce(fetch_status, -1), mode FROM repos ORDER BY name;', st, stat)
+            ' coalesce(fetch_status, -1), mode, (SELECT count(*) FROM issues'// &
+            " WHERE issues.repo = repos.name AND issues.state = 'open')"// &
+            ' FROM repos ORDER BY name;', st, stat)
         if (stat /= SQLITE_OK) return
         do while (stmt_step(st) == SQLITE_ROW)
             r%name = stmt_text(st, 0)
@@ -750,6 +754,7 @@ contains
             r%fetched_at = stmt_text(st, 2)
             r%fetch_status = int(stmt_int(st, 3))
             r%mode = stmt_text(st, 4)
+            r%open_issues = int(stmt_int(st, 5))
             repos = [repos, r]
         end do
         call stmt_finalize(st)

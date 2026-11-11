@@ -2472,6 +2472,7 @@ contains
         !! The mirrored repositories as GET /api/v1/repos returns them.
         type(db_t), intent(in) :: db
         character(len=:), allocatable :: s
+        character(len=12) :: num
         type(repo_info_t), allocatable :: repos(:)
         integer :: i, stat
         logical :: exists
@@ -2480,10 +2481,12 @@ contains
         s = '{"repos":['
         do i = 1, size(repos)
             inquire (file=repo_path(repos(i)%name)//'/HEAD', exist=exists)
+            write (num, '(i0)') repos(i)%open_issues
             if (i > 1) s = s//','
             s = s//'{"name":"'//repos(i)%name//'","mode":"'//repos(i)%mode//'","upstream":"'// &
                 json_escape_string(repos(i)%upstream)//'","fetched":"'// &
-                repos(i)%fetched_at//'","ready":'//json_bool(exists)//'}'
+                repos(i)%fetched_at//'","ready":'//json_bool(exists)// &
+                ',"open_issues":'//trim(num)//'}'
         end do
         s = s//']}'
     end function repos_json

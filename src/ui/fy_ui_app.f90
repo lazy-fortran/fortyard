@@ -23,9 +23,11 @@ module fy_ui_app
         json_parser_t
     use fy_change_view, only: &
         change_view_compose, &
+        change_view_counts_changed, &
         change_view_missing, &
         change_view_receive, &
         change_view_repo, &
+        change_view_reset, &
         change_view_show, &
         change_view_title
     use fy_fetch, only: &
@@ -51,8 +53,10 @@ module fy_ui_app
         repo_view_list, &
         repo_view_list_compose, &
         repo_view_missing, &
+        repo_view_open_issues, &
         repo_view_receive, &
         repo_view_repo, &
+        repo_view_repos, &
         repo_view_reset, &
         repo_view_show, &
         repo_view_title
@@ -86,6 +90,8 @@ module fy_ui_app
     type(token_row_t), allocatable :: tokens(:)
     character(len=:), allocatable :: version, commit, built, account, scopes, message
     character(len=:), allocatable :: token_input, new_name, new_token, here, theme
+    !! The repository whose open issues the repository row last asked for.
+    character(len=:), allocatable :: row_of
     character(len=16) :: action = ''
     integer :: page = R_REPOS, theme_choice = 1
     logical :: signed_in = .false., checked = .false., submitted = .false.
@@ -127,6 +133,7 @@ contains
         action = ''
         here = location
         theme = theme_pref
+        row_of = ''
         theme_choice = 1
         do k = 1, size(THEMES)
             if (theme == trim(THEMES(k))) theme_choice = k
@@ -140,6 +147,7 @@ contains
         call set_page(location)
         if (allocated(tokens)) deallocate (tokens)
         allocate (tokens(0))
+        call change_view_reset()
         call repo_view_reset()
         call fetch_start(version_req, 'GET', '/api/v1/version')
         call fetch_start(whoami_req, 'GET', '/api/v1/whoami')
@@ -168,6 +176,13 @@ contains
         message = ''
         if (page /= R_JOBS) call jobs_view_hide()
         if (.not. signed_in) return
+        ! The row's count is asked for on entering a repository and with the
+        ! issue list beneath it, as others open and close issues meanwhile;
+        ! every other page of the repository keeps it.
+        if (in_repo(page) .and. (r%repo /= row_of .or. page == R_ISSUES)) then
+            row_of = r%repo
+            call repo_view_repos()
+        end if
         select case (page)
         case (R_BLOB, R_COMMIT, R_COMMITS, R_TREE)
             call repo_view_show(r)
@@ -266,6 +281,7 @@ contains
         else if (.not. signed_in) then
             call sign_in_view()
         else
+            call repo_row()
             select case (page)
             case (R_CHANGE, R_CHANGES, R_ISSUE, R_ISSUES)
                 ! The land scope lands without admin.
@@ -338,6 +354,42 @@ contains
         if (signed_in) call text(account, size=BODY, tone=UI_TONE_MUTED, id="account")
         call row_end()
     end subroutine topbar
+
+    subroutine repo_row()
+        !! The row of every page of a repository: its path and its pages, with
+        !! the one shown marked, so that changes and issues are one click from
+        !! the code and from each other.
+        character(len=:), allocatable :: repo, issues
+        integer :: n
+
+        if (.not. in_repo(page)) return
+        repo = page_repo()
+        n = repo_view_open_issues(repo)
+        ! No row for a repository that is not there: its links lead nowhere.
+        if (n < 0) return
+        issues = "Issues "//ui_str(n)
+        call row_begin(16.0, id="reporow", height=ROW_H)
+        if (link("path", repo, route_href(R_TREE, repo), size=BODY, style=UI_HEADING, &
+            tone=UI_TONE_NORMAL, ellipsis=.true.)) call go(route_href(R_TREE, repo))
+        call row_link("code", "Code", route_href(R_TREE, repo), page == R_BLOB .or. &
+            page == R_COMMIT .or. page == R_COMMITS .or. page == R_TREE)
+        call row_link("changes", "Changes", route_href(R_CHANGES, repo), &
+            page == R_CHANGE .or. page == R_CHANGES)
+        call row_link("issues", issues, route_href(R_ISSUES, repo), &
+            page == R_ISSUE .or. page == R_ISSUES)
+        call row_end()
+    end subroutine repo_row
+
+    subroutine row_link(id, label, href, current)
+        character(len=*), intent(in) :: id, label, href
+        logical, intent(in) :: current
+        if (current) then
+            if (link(id, label, href, size=BODY, tone=UI_TONE_STRONG, look="current")) &
+                call go(href)
+        else
+            if (link(id, label, href, size=BODY, tone=UI_TONE_NORMAL)) call go(href)
+        end if
+    end subroutine row_link
 
     logical function in_repo(kind)
         !! Whether a page of this kind belongs to a repository.
@@ -670,6 +722,7 @@ contains
             if (signed_in) call show(here)
         end if
         call change_view_receive()
+        if (change_view_counts_changed()) call repo_view_repos()
         call jobs_view_receive()
         call repo_view_receive()
         if (fetch_ready(tokens_req)) then
@@ -690,7 +743,10 @@ contains
                 new_token = ''
                 deallocate (tokens)
                 allocate (tokens(0))
+                ! The next person signed in here sees nothing of this session.
+                call change_view_reset()
                 call repo_view_reset()
+                row_of = ''
                 call nav_push('/')
                 here = '/'
                 page = R_REPOS

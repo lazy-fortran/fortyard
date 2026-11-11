@@ -117,9 +117,13 @@ program test_change
     call check(stat == 0 .and. index(out, 'issue #4: '//server//'/demo/-/issues/4') > 0 .and. &
         index(out, '#4 It fails') > 0 .and. index(out, '1. run it') > 0 .and. &
         index(out, 'Seen too.') > 0, 'an issue is opened, commented and shown: '//out)
+    call run(in//fy//' repo list')
+    call check(index(out, '"open_issues":1') > 0, 'the repository counts its open issue: '//out)
     call run(in//fy//' issue close 4 && '//fy//' issue list --all')
     call check(index(out, '4       closed  admin   1         It fails') > 0, &
         'fy issue list --all shows the closed issue: '//out)
+    call run(in//fy//' repo list')
+    call check(index(out, '"open_issues":0') > 0, 'and no closed one: '//out)
     call run(in//'git checkout -q -b later FETCH_HEAD && printf "y\n" > Y && '//git// &
         'add Y && '//git//'commit -q -m Later && '//fy//' push')
     call check(index(out, 'change #5') > 0, 'the next change follows the issue: '//out)

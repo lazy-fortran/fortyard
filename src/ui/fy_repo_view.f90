@@ -61,8 +61,10 @@ module fy_repo_view
         repo_view_list, &
         repo_view_list_compose, &
         repo_view_missing, &
+        repo_view_open_issues, &
         repo_view_receive, &
         repo_view_repo, &
+        repo_view_repos, &
         repo_view_reset, &
         repo_view_show, &
         repo_view_title
@@ -72,6 +74,7 @@ module fy_repo_view
         !! "primary" (takes pushes here, pushed on to upstream) or "mirror".
         character(len=:), allocatable :: mode
         logical :: ready = .false.
+        integer :: open_issues = 0
     end type repo_t
 
     type :: entry_t
@@ -165,6 +168,24 @@ contains
         call fetch_start(repos_req, 'GET', '/api/v1/repos')
     end subroutine repo_view_list
 
+    subroutine repo_view_repos()
+        !! Asks for the repositories with their numbers, which the repository
+        !! row of every page shows; what is known stays until the answer.
+        call init()
+        call fetch_start(repos_req, 'GET', '/api/v1/repos')
+    end subroutine repo_view_repos
+
+    integer function repo_view_open_issues(name) result(n)
+        !! The open issues of repository `name`, or -1 while that is not known.
+        character(len=*), intent(in) :: name
+        integer :: k
+        call init()
+        n = -1
+        do k = 1, size(repos)
+            if (repos(k)%name == name) n = repos(k)%open_issues
+        end do
+    end function repo_view_open_issues
+
     subroutine repo_view_show(r)
         !! A page of a repository.
         type(route_t), intent(in) :: r
@@ -189,7 +210,6 @@ contains
             allocate (commits(0))
             call fetch_start(log_req, 'GET', api(repo, 'log'))
         end if
-        if (.not. repos_loaded) call fetch_start(repos_req, 'GET', '/api/v1/repos')
         select case (kind)
         case (R_TREE)
             dir = r%path
@@ -789,7 +809,7 @@ contains
 
         deallocate (repos)
         allocate (repos(0))
-        r = repo_t('', '', '', 'mirror', .false.)
+        r = repo_t('', '', '', 'mirror', .false., 0)
         key = ''
         call json_parser_init(p, body)
         do
@@ -804,11 +824,13 @@ contains
                 if (key == 'upstream') r%upstream = ev%string_val
                 if (key == 'fetched') r%fetched = ev%string_val
                 if (key == 'mode') r%mode = ev%string_val
+            case (JSON_INTEGER)
+                if (key == 'open_issues') r%open_issues = int(ev%int_val)
             case (JSON_BOOL)
                 if (key == 'ready') r%ready = ev%bool_val
             case (JSON_OBJECT_END)
                 if (len(r%name) > 0) repos = [repos, r]
-                r = repo_t('', '', '', 'mirror', .false.)
+                r = repo_t('', '', '', 'mirror', .false., 0)
             end select
         end do
     end subroutine parse_repos

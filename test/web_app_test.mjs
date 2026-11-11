@@ -78,6 +78,9 @@ const path = async () => ((await evaluate('location.pathname + location.search')
 const bg = () => evaluate(`getComputedStyle(document.body).backgroundColor`);
 const scheme = (value) => send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value }] });
 const linkTo = (href) => `a[href=${JSON.stringify(base + href)}]`;
+// The repository row: its links in order, and the one marked as the page shown.
+const rowLinks = `[...document.querySelectorAll('[data-box="reporow"] a')].map((e) => e.textContent).join(' | ')`;
+const rowCurrent = `[...document.querySelectorAll('[data-box="reporow"] [data-look="current"]')].map((e) => e.textContent).join(' | ')`;
 const noOverflow = `document.documentElement.scrollWidth <= document.documentElement.clientWidth`;
 
 try {
@@ -174,12 +177,28 @@ try {
   check(await path() === '/demo', 'a repository is at its path');
   check(await evaluate(`getComputedStyle([...document.querySelectorAll('.fui')].find((e) => e.textContent === 'Demo')).fontSize`) === '32px',
     'README headings have their own sizes');
+  // The repository row leads from the code to the changes and issues and back.
+  await until(`${rowLinks} === 'demo | Code | Changes | Issues 0'`, 'the repository row');
+  check(await evaluate(rowCurrent) === 'Code', 'the code page has the repository row with Code marked and the open issues counted');
+  await click('[data-id$="reporow/changes"]');
+  await until(hasText('No open changes. Pushing a branch opens one: fy push.'), 'the changes from the code');
+  check(await path() === '/demo/-/changes' && await evaluate(rowCurrent) === 'Changes',
+    'the row leads from the code to the changes and marks them');
+  await click('[data-id$="reporow/issues"]');
+  await until(hasText('No open issues.'), 'the issues from the changes');
+  check(await path() === '/demo/-/issues' && await evaluate(rowCurrent) === 'Issues 0' &&
+    await evaluate('document.title') === 'Issues · demo · fortyard', 'and from the changes to the issues');
+  await click('[data-id$="reporow/code"]');
+  await until(`!!document.querySelector(${JSON.stringify(linkTo('/demo/-/blob/hello.f90'))})`, 'back at the code');
+  check(await path() === '/demo', 'and back to the code');
   await click(linkTo('/demo/-/blob/hello.f90'));
   await until(`[...document.querySelectorAll('[data-style="5"]')].some((e) => e.textContent.endsWith('  print *, "hi"') && e.querySelector('span[data-t="5"]')?.textContent === 'print')`, 'file');
   check(await path() === '/demo/-/blob/hello.f90', 'a file of the repository is shown as code at its own address');
+  check(await evaluate(rowCurrent) === 'Code', 'a file is a page of the code');
   await click('[data-id$="repotabs/history"]');
   await until(`!!document.querySelector('[data-box^="row-c"] [data-id$="/id"]')`, 'history');
   check(await evaluate(hasText('Add hello')) && await path() === '/demo/-/commits', 'the history lists the commit');
+  check(await evaluate(rowCurrent) === 'Code', 'and is a page of the code');
   await click('[data-box^="row-c"] [data-id$="/id"]');
   await until(`[...document.querySelectorAll('[data-tone="11"]')].some((e) => e.textContent.endsWith('+ program hello'))`, 'diff');
   check((await path()).startsWith('/demo/-/commit/'), 'the commit shows its diff with added lines marked');
@@ -246,12 +265,34 @@ try {
   // Phones: no sideways scrolling; the navigation is an overlay drawer.
   await send('Emulation.setDeviceMetricsOverride', { width: 375, height: 740, deviceScaleFactor: 2, mobile: true });
   let wide = [];
-  for (const to of ['/', '/demo', commitPath, '/demo/-/commits', '/tokens', '/server', '/demo/-/blob/hello.f90']) {
+  for (const to of ['/', '/demo', commitPath, '/demo/-/commits', '/tokens', '/server', '/demo/-/blob/hello.f90',
+    '/demo/-/changes', '/demo/-/issues', '/demo/-/issues/new']) {
     await load(to);
     await adopted();
     if (!await evaluate(noOverflow)) wide.push(to);
   }
   check(wide.length === 0, 'no page scrolls sideways on a phone' + (wide.length ? ': ' + wide.join(' ') : ''));
+  check(await evaluate(`[...document.querySelectorAll('[data-box="reporow"] a')].every((e) => e.getBoundingClientRect().height >= 44)`),
+    'the links of the repository row are 44 pixels tall there');
+  // Repository names have up to 64 characters: the row stays one line and cuts the name.
+  const long = 'computational-plasma-physics-neoclassical-transport-solver-next';
+  const medium = 'neo-2-transport-solver-benchmarks';
+  const cookie = { Cookie: `fy_session=${session.value}`, 'Content-Type': 'application/json' };
+  for (const name of [long, medium]) {
+    await fetch(url + 'api/v1/repos', { method: 'POST', headers: cookie, body: JSON.stringify({ name }) });
+    for (let i = 0; i < 100 && !(await fetch(url + `api/v1/repos/${name}/issues`, { headers: cookie })).ok; i++) await sleep(100);
+  }
+  wide = [];
+  let lines = [];
+  for (const to of [`/${long}/-/issues`, `/${long}/-/changes`, `/${long}/-/issues/new`, `/${medium}/-/issues`]) {
+    await load(to);
+    await adopted();
+    if (!await evaluate(noOverflow)) wide.push(to);
+    if (await evaluate(`new Set([...document.querySelectorAll('[data-box="reporow"] a')].map((e) => Math.round(e.getBoundingClientRect().top))).size`) !== 1 ||
+      !await evaluate(`[...document.querySelectorAll('[data-box="reporow"] a')].every((e) => e.getBoundingClientRect().right <= document.documentElement.clientWidth)`)) lines.push(to);
+  }
+  check(wide.length === 0, 'nor does a page of a repository with a long name' + (wide.length ? ': ' + wide.join(' ') : ''));
+  check(lines.length === 0, 'and its repository row stays one line within the page' + (lines.length ? ': ' + lines.join(' ') : ''));
   check(await evaluate(`getComputedStyle(document.querySelector('[data-box="sidebar"]')).display`) === 'none',
     'a pinned sidebar gives way to the page on a phone');
   await click('[data-id$="/menu"]');
@@ -289,6 +330,10 @@ try {
   wg('add', '-A');
   wg('commit', '-q', '-m', 'Explain the feature', '-m', 'Why it matters for the study.');
   for (let i = 0; i < 100 && !(await fetch(url + 'api/v1/repos/work/changes', { headers: auth })).ok; i++) await sleep(100);
+  await load('/work/-/issues');
+  check(await evaluate(`window.__ssrTexts.includes('No open issues.') && window.__ssrTexts.includes('Issues 0')`),
+    'the server sends the empty issue list with the repository row');
+  check(await adopted(), 'and the WebAssembly adopts it');
   wg('push', '-q', `http://x:${admin}@127.0.0.1:${port}${base}/work.git`, 'HEAD:feature');
   await load('/work/-/changes');
   await until(hasText('Explain the feature'), 'the change listed');
@@ -306,13 +351,126 @@ try {
   await click(linkTo('/work/-/changes/1/files'));
   await until(`[...document.querySelectorAll('.fui')].some((e) => e.textContent.endsWith('+ second line'))`, 'the diff');
   check(await path() === '/work/-/changes/1/files', 'the files of a change show its diff');
-  await load('/work/-/issues/new');
+  // Issues, reached from the change through the repository row: the list,
+  // a new issue, a comment, and closing it.
+  check(await evaluate(rowLinks) === 'work | Code | Changes | Issues 0' && await evaluate(rowCurrent) === 'Changes',
+    'a change page has the repository row with Changes marked');
+  await click('[data-id$="reporow/issues"]');
+  await until(hasText('No open issues.'), 'the issue list');
+  check(await path() === '/work/-/issues', 'the row leads from a change to the issues');
+  await click(linkTo('/work/-/issues/new'));
   await until(`!!document.querySelector('[data-id$="/newtitle"]')`, 'the new issue form');
+  check(await path() === '/work/-/issues/new' && await evaluate(rowCurrent) === 'Issues 0',
+    'the issue list leads to the form for a new issue');
   await click('[data-id$="/newtitle"]');
   await type('Plots are blank');
   await click('[data-id$="/create"]');
   await until(hasText('Plots are blank'), 'the new issue page');
   check(await path() === '/work/-/issues/2', 'a new issue gets the next number and its own page');
+  await until(`${rowCurrent} === 'Issues 1'`, 'the count after opening');
+  check(true, 'the repository row counts the new issue at once');
+  await click('[data-id$="/comment"]');
+  await type('Seen on the phone too.');
+  await click('[data-id$="/send"]');
+  await until(hasText('Seen on the phone too.'), 'the comment on the issue');
+  check(await evaluate(`document.querySelector('[data-id$="/comment"]').value`) === '', 'a comment is added to the issue');
+  await click('[data-id$="reporow/issues"]');
+  await until(hasText('Plots are blank'), 'the issue listed');
+  await until(`[...document.querySelectorAll('[data-box="row-i2"] .fui')].some((e) => e.textContent.startsWith('admin · 1 comment · '))`,
+    'the comment counted');
+  check(await path() === '/work/-/issues', 'the list shows the open issue with its comment');
+  await load('/work/-/issues');
+  check(await evaluate(`window.__ssrTexts.includes('Plots are blank') && window.__ssrTexts.includes('Issues 1') &&
+    !window.__ssrTexts.includes('No open issues.')`), 'a reload gets the list with the issue from the server');
+  check(await adopted(), 'and the WebAssembly adopts it');
+  await click(linkTo('/work/-/issues/2'));
+  await until(`!!document.querySelector('[data-id$="/closeitem"]')`, 'the issue page');
+  check(await evaluate(hasText('Seen on the phone too.')), 'the list leads to the issue with its comments');
+  await click('[data-id$="/closeitem"]');
+  await until(`!!document.querySelector('[data-id$="/reopen"]') && ${rowCurrent} === 'Issues 0'`, 'the issue closed');
+  check(await evaluate(`document.querySelector('[data-box="itemmeta"] [data-id$="badge"]').textContent`) === 'closed',
+    'closing an issue shows it closed and takes it from the count');
+  // The answer for the list is held back: until it comes the list shown before stays.
+  await evaluate(`window.__fetch = window.fetch; window.__held = [];
+    window.fetch = (p, i) => String(p).endsWith('/work/issues') ? new Promise((done) => window.__held.push(() => done(window.__fetch(p, i)))) : window.__fetch(p, i); 0`);
+  await click('[data-id$="reporow/issues"]');
+  await until(`window.__held.length === 1`, 'the list asked for');
+  check(await path() === '/work/-/issues' && await evaluate(hasText('Plots are blank')) && !await evaluate(hasText('Loading...')),
+    'after closing an issue the list keeps its rows until the new answer');
+  await evaluate('window.fetch = window.__fetch; window.__held.forEach((go) => go()); 0');
+  await until(hasText('No open issues.'), 'the list without the closed issue');
+  check(true, 'the list of open issues no longer has it');
+  await click(linkTo('/work/-/issues?all'));
+  await until(hasText('Plots are blank'), 'all issues');
+  check(await path() === '/work/-/issues?all', 'the list of all issues has it');
+  // The server composed this list before, when the issue was open.
+  await load('/work/-/issues');
+  check(await evaluate(`window.__ssrTexts.includes('No open issues.') && window.__ssrTexts.includes('Issues 0') &&
+    !window.__ssrTexts.includes('Plots are blank')`), 'the server sends the same list again as it is now');
+  check(await adopted(), 'and the WebAssembly adopts it');
+
+  // Issues are mostly opened elsewhere (fy, agents): the row asks for its
+  // count on entering a repository and with the issue list, which it must
+  // agree with, and no other page of the repository asks for it.
+  const elsewhere = await fetch(url + 'api/v1/repos/work/issues', { method: 'POST', headers: auth,
+    body: JSON.stringify({ title: 'From elsewhere', body: '' }) });
+  check(elsewhere.status === 201, 'an issue is opened through the API');
+  await evaluate(`window.__asked = []; const f = window.fetch; window.fetch = (p, i) => { window.__asked.push(String(p)); return f(p, i); }; 0`);
+  const countsAsked = `window.__asked.filter((p) => p.endsWith('/api/v1/repos')).length`;
+  await click('[data-id$="reporow/changes"]');
+  await until(`${rowCurrent} === 'Changes' && ${hasText('Explain the feature')}`, 'the changes');
+  await click('[data-id$="reporow/code"]');
+  await until(`${rowCurrent} === 'Code'`, 'the code');
+  check(await evaluate(countsAsked) === 0, 'the pages of the code and the changes in the same repository ask for no count');
+  await click('[data-id$="reporow/issues"]');
+  await until(`${hasText('From elsewhere')} && ${rowCurrent} === 'Issues 1'`, 'the issue opened elsewhere listed');
+  check(await evaluate(countsAsked) === 1, 'the issue list asks for the count once and shows the issue opened elsewhere under it');
+  await fetch(url + 'api/v1/repos/work/issues', { method: 'POST', headers: auth, body: JSON.stringify({ title: 'Another', body: '' }) });
+  await click(linkTo('/work/-/issues/3'));
+  await until(`!!document.querySelector('[data-id$="/closeitem"]')`, 'the issue page');
+  await evaluate('history.back()');
+  await until(`${hasText('Another')} && ${rowCurrent} === 'Issues 2'`, 'the list after Back');
+  check(true, 'Back to the list shows what was opened since, under the same count');
+
+  // A phone gets the same elements: the pages of an item are adopted there too.
+  await send('Emulation.setDeviceMetricsOverride', { width: 375, height: 740, deviceScaleFactor: 2, mobile: true });
+  wide = [];
+  for (const to of ['/work/-/issues/3', '/work/-/changes/1']) {
+    await load(to);
+    if (!await adopted() || !await evaluate(noOverflow)) wide.push(to);
+  }
+  check(wide.length === 0, 'the pages of an issue and of a change are adopted on a phone and fit it' + (wide.length ? ': ' + wide.join(' ') : ''));
+  check(await evaluate(`getComputedStyle(document.querySelector('[data-box="itemtitle"] [data-id$="/number"]')).display`) === 'none',
+    'where the number beside the title is hidden');
+  await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+
+  // What is not there: a missing item keeps the row of its repository, a
+  // repository that does not exist has none.
+  await load('/work/-/issues/99');
+  check(await evaluate(`window.__ssrTexts.includes('There is no such page.')`) && await evaluate(rowCurrent) === 'Issues 2',
+    'a missing issue says so under the row of its repository');
+  for (const to of ['/ghost/-/issues', '/ghost/-/changes/3', '/ghost']) {
+    await load(to);
+    await adopted();
+    check(await evaluate(`!window.__ssrBoxes.includes('reporow') && !document.querySelector('[data-box="reporow"]')`),
+      `${to}, of a repository that does not exist, has no repository row`);
+  }
+
+  // Signing out forgets what the session saw: the next one asks again.
+  await load('/work/-/issues/3');
+  await until(`!!document.querySelector('[data-id$="/closeitem"]')`, 'the open issue');
+  await click('[data-box="sidebar"] [data-id$="/signout"]');
+  await until(`!!document.querySelector('[data-id$="/token"]')`, 'signed out');
+  const closed = await fetch(url + 'api/v1/repos/work/issues/3', { method: 'POST',
+    headers: { Authorization: `Bearer ${admin}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ state: 'closed' }) });
+  check(closed.ok, 'the issue is closed through the API meanwhile');
+  await click('[data-id$="/token"]');
+  await send('Input.insertText', { text: admin });
+  await click('[data-id$="/signin"]');
+  await until(hasText('admin'), 'signed in again');
+  await evaluate(`history.pushState(null, '', ${JSON.stringify(base + '/work/-/issues/3')}); dispatchEvent(new PopStateEvent('popstate'))`);
+  await until(`!!document.querySelector('[data-id$="/reopen"]') && ${rowCurrent} === 'Issues 1'`, 'the issue as it is now');
+  check(true, 'after signing out and in again the issue is shown as it is now, not as the last session saw it');
 
   if (shot) {
     const png = await send('Page.captureScreenshot', { format: 'png' });

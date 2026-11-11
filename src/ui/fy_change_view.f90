@@ -49,9 +49,11 @@ module fy_change_view
 
     public :: &
         change_view_compose, &
+        change_view_counts_changed, &
         change_view_missing, &
         change_view_receive, &
         change_view_repo, &
+        change_view_reset, &
         change_view_show, &
         change_view_title
 
@@ -79,6 +81,8 @@ module fy_change_view
     integer :: kind = R_CHANGES, number = 0, version = 0, from = 0
     logical :: show_all = .false., loaded = .false., item_loaded = .false., missing = .false.
     logical :: diff_cut = .false., has_text = .false.
+    !! An issue was opened, closed or reopened: the action asked for, and done.
+    logical :: counting = .false., counts_changed = .false.
 
 contains
 
@@ -123,16 +127,37 @@ contains
             end if
             if (tab == 'files' .and. item_loaded) call request_diff()
         else
-            if (list_of /= api_list()) then
-                loaded = .false.
-                list_of = api_list()
-                call fetch_start(list_req, 'GET', list_of)
-            end if
+            ! Others open and close items: a list is asked for whenever it is
+            ! shown, and the one at hand stays until the answer.
+            if (list_of /= api_list()) loaded = .false.
+            list_of = api_list()
+            call fetch_start(list_req, 'GET', list_of)
         end if
     end subroutine change_view_show
 
+    subroutine change_view_reset()
+        !! Forgets everything: the server renders pages for different people, and
+        !! a list or an item it showed before has changed since.
+        if (allocated(rows)) deallocate (rows, versions, comments, landings, diff_files)
+        call init()
+    end subroutine change_view_reset
+
+    logical function change_view_counts_changed()
+        !! Whether the number of open issues has changed since the last call.
+        change_view_counts_changed = counts_changed
+        counts_changed = .false.
+    end function change_view_counts_changed
+
     subroutine init()
         allocate (rows(0), versions(0), comments(0), landings(0), diff_files(0))
+        loaded = .false.
+        item_loaded = .false.
+        missing = .false.
+        counting = .false.
+        counts_changed = .false.
+        number = 0
+        version = 0
+        from = 0
         list_of = ''
         item_of = ''
         comment_input = ''
@@ -247,6 +272,8 @@ contains
         end if
         if (fetch_ready(action_req)) then
             if (action_req%status >= 200 .and. action_req%status < 300) then
+                counts_changed = counting
+                counting = .false.
                 call json_extract_int(action_req%body, 'landing', n, found)
                 if (found) then
                     message = ''
@@ -257,7 +284,6 @@ contains
                 if (found .and. tab == 'new') then
                     new_title = ''
                     new_body = ''
-                    list_of = ''
                     call go(page_of(n))
                     return
                 end if
@@ -266,6 +292,7 @@ contains
             else
                 call json_extract_string(action_req%body, 'error', message, found)
                 if (.not. found) message = 'The server refused this.'
+                counting = .false.
             end if
         end if
     end subroutine change_view_receive
@@ -443,7 +470,7 @@ contains
             if (tab == 'new') then
                 call new_issue_view()
             else
-                call item_view(may_land, narrow)
+                call item_view(may_land)
             end if
         end select
     end subroutine change_view_compose
@@ -509,8 +536,8 @@ contains
         call column_end()
     end subroutine list_view
 
-    subroutine item_view(may_land, narrow)
-        logical, intent(in) :: may_land, narrow
+    subroutine item_view(may_land)
+        logical, intent(in) :: may_land
         character(len=:), allocatable :: base_path
         integer :: k
 
@@ -522,7 +549,8 @@ contains
         call column_begin(8.0, id="card-itemhead")
         call row_begin(GAP, id="itemtitle")
         call text(i_title, size=TITLE, style=UI_HEADING, width=UI_FILL, id="subject")
-        if (.not. narrow) call text("#"//ui_str(number), size=TITLE, tone=UI_TONE_MUTED)
+        ! Hidden on a phone by the style sheet: the elements are the same there.
+        call text("#"//ui_str(number), size=TITLE, tone=UI_TONE_MUTED, id="number")
         call row_end()
         call row_begin(GAP, id="itemmeta")
         call text(i_state, size=12.0, id="badge", tone=state_tone(i_state))
@@ -601,11 +629,15 @@ contains
                 call fetch_start(action_req, 'POST', item_of//'/land', '{}')
         end if
         if (i_state == 'open') then
-            if (button("closeitem", "Close", height=ROW_H, size=BODY)) &
+            if (button("closeitem", "Close", height=ROW_H, size=BODY)) then
                 call fetch_start(action_req, 'POST', item_of, '{"state":"closed"}')
+                counting = kind == R_ISSUE
+            end if
         else if (i_state == 'closed') then
-            if (button("reopen", "Reopen", height=ROW_H, size=BODY)) &
+            if (button("reopen", "Reopen", height=ROW_H, size=BODY)) then
                 call fetch_start(action_req, 'POST', item_of, '{"state":"open"}')
+                counting = kind == R_ISSUE
+            end if
         end if
         call row_end()
     end subroutine item_view
@@ -669,9 +701,12 @@ contains
         if (text_input("newbody", new_body, placeholder="What happened, and what should", &
             size=BODY, lines=8)) continue
         if ((button("create", "Open issue", height=ROW_H, size=BODY) .or. submitted) .and. &
-            len_trim(new_title) > 0) call fetch_start(action_req, 'POST', '/api/v1/repos/'// &
-            url_encode(repo)//'/issues', '{"title":"'//json_escape_string(trim(new_title))// &
-            '","body":"'//json_escape_string(trim(new_body))//'"}')
+            len_trim(new_title) > 0) then
+            call fetch_start(action_req, 'POST', '/api/v1/repos/'//url_encode(repo)// &
+                '/issues', '{"title":"'//json_escape_string(trim(new_title))// &
+                '","body":"'//json_escape_string(trim(new_body))//'"}')
+            counting = .true.
+        end if
     end subroutine new_issue_view
 
     integer function state_tone(s)

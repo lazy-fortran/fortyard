@@ -224,7 +224,7 @@ contains
         type(db_t), intent(in) :: db
         character(len=:), allocatable :: msg
 
-        msg = c_string(sqlite3_errmsg(db%handle))
+        call c_string(sqlite3_errmsg(db%handle), msg)
     end function db_errmsg
 
     subroutine db_prepare(db, sql, stmt, stat)
@@ -275,7 +275,7 @@ contains
         integer, intent(in) :: col
         character(len=:), allocatable :: text
 
-        text = c_string(sqlite3_column_text(stmt%handle, int(col, c_int)))
+        call c_string(sqlite3_column_text(stmt%handle, int(col, c_int)), text)
     end function stmt_text
 
     function stmt_int(stmt, col) result(val)
@@ -294,9 +294,13 @@ contains
         stmt%handle = c_null_ptr
     end subroutine stmt_finalize
 
-    function c_string(p) result(s)
+    subroutine c_string(p, s)
+        !! A subroutine, not a function: gfortran keeps the length of a
+        !! deferred-length function result in one static variable per call, and
+        !! the server's threads, which all read their columns here, would
+        !! overwrite each other's lengths.
         type(c_ptr), intent(in) :: p
-        character(len=:), allocatable :: s
+        character(len=:), allocatable, intent(out) :: s
         character(kind=c_char), pointer :: chars(:)
         integer :: n, i
 
@@ -310,6 +314,6 @@ contains
         do i = 1, n
             s(i:i) = chars(i)
         end do
-    end function c_string
+    end subroutine c_string
 
 end module fy_sqlite

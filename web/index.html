@@ -167,6 +167,12 @@
   .fui[data-id$="/current"] { color: var(--green); border-color: currentColor; }
   .fui[data-id$="badge"][data-tone="1"] { color: var(--green); border-color: currentColor; }
   .fui[data-id$="badge"][data-tone="2"] { color: var(--red); border-color: currentColor; }
+  [data-box="reporow"] { margin-top: -8px; min-width: 0; }
+  [data-box="reporow"] a { flex: none !important; line-height: 40px; white-space: nowrap; }
+  [data-box="reporow"] a:hover { text-decoration: none; color: var(--acc); }
+  [data-box="reporow"] a[data-id$="/path"] { flex: 0 1 auto !important; min-width: 0; margin-right: 8px; }
+  [data-box="reporow"] a[data-look="current"] { font-weight: 600;
+    box-shadow: inset 0 -2px 0 var(--tab-sel); }
   [data-box="repotabs"] { border-bottom: 1px solid var(--line); margin-top: -8px; gap: 8px !important; }
   [data-box="repotabs"] a, [data-box="seg"] a { display: inline-flex; align-items: center;
     padding: 0 8px; min-height: 48px; color: var(--fg); text-decoration: none;
@@ -324,6 +330,7 @@
     .fui-box[data-box="markdown"] { padding: 16px; }
     .fui-box[data-box^="row-"] { padding: 8px 12px; }
     [data-box="crumbs"] a { padding: 8px 0; }
+    [data-box="reporow"] a { line-height: 44px; }
     .fui-box[data-box="card-lastcommit"] { flex-wrap: wrap; row-gap: 2px; padding: 8px 12px; }
     [data-box="card-lastcommit"] a[data-id$="/lastsubject"] { order: 9; flex: 1 1 100% !important;
       white-space: normal; overflow: visible; }
@@ -332,6 +339,10 @@
     .fui-box[data-box="addform"] > .fui-k8 { flex: 1 1 100% !important; width: auto !important; }
     [data-box="filehead"] { flex-wrap: wrap; }
     .fui-box[data-box="card-signin"] { margin-top: 0; padding: 16px; }
+  }
+  /* The title of a change or an issue has the width of a phone to itself. */
+  @media (max-width: 599px) {
+    [data-box="itemtitle"] .fui[data-id$="/number"] { display: none; }
   }
 </style>
 </head>
