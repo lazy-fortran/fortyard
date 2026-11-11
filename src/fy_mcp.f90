@@ -70,6 +70,7 @@ module fy_mcp
         'issue_reopen', 'Reopen a closed issue', 'repo number', &
     ! landings
         'land', 'Queue the landing of a pushed branch (admin); answers its job', 'repo branch', &
+        'land_cancel', 'Cancel a queued or running landing (land scope)', 'repo id', &
         'landings', 'Recent landings of a repository', 'repo', &
     ! jobs
         'jobs', 'Running, waiting and recent jobs with their changes', 'repo? kind? state?', &
@@ -416,6 +417,9 @@ contains
             method = 'POST'
             expect = 202
             payload = '{"branch":"'//json_escape_string(argument(message, 'branch'))//'"}'
+        case ('land_cancel')
+            path = '/api/v1/repos/'//repo//'/landings/'//argument(message, 'id')
+            method = 'DELETE'
         case ('verify')
             path = '/api/v1/repos/'//repo//'/verify'
             method = 'POST'

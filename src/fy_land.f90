@@ -31,6 +31,10 @@ module fy_land
             logical, intent(out) :: passed
             character(len=:), allocatable, intent(out) :: log
         end subroutine check_runner_i
+
+        logical function proceed_i()
+            !! Whether main may move now; asked once, right before it moves.
+        end function proceed_i
     end interface
 
     integer, parameter :: LOG_BYTES = 65536
@@ -182,7 +186,8 @@ contains
     end subroutine land_push_check
 
     subroutine land_branch(repo, work, name, branch, ident, base_url, upstream, commit, log, ok, &
-            runner, number, message_in, min_number, onto, hold, alone, check, expect, pinned)
+            runner, number, message_in, min_number, onto, hold, alone, check, expect, pinned, &
+            proceed)
         !! Lands `branch` of the bare repository `repo` (called `name` in URLs).
         !! The landing commit is made in `repo` itself, without a work tree; the
         !! scratch directory `work` holds what needs files. `ident` names this
@@ -212,6 +217,8 @@ contains
         character(len=*), intent(in), optional :: expect
         !! The commit of the branch that the landing commit was made from.
         character(len=40), intent(out), optional :: pinned
+        !! Asked right before main moves; main stays where it is when it says no.
+        procedure(proceed_i), optional :: proceed
         logical :: passed
         character(len=:), allocatable :: runner_log
         character(len=:), allocatable :: out, subjects, message, num
@@ -480,6 +487,12 @@ contains
             log = 'The check failed (exit status '//itoa(status)//').'//new_line('a')//out
             return
         end if
+        if (present(proceed)) then
+            if (.not. proceed()) then
+                log = log//new_line('a')//'main was not moved: the landing was cancelled.'
+                return
+            end if
+        end if
         ! main moves only from the commit this landing was made on.
         if (has_main) then
             call git([character(len=1024) :: 'update-ref', 'refs/heads/main', made, main])
@@ -583,7 +596,7 @@ contains
     end subroutine land_branch
 
     subroutine land_candidate(repo, work, name, ref, branches, holds, upstream, log, ok, runner, &
-            check, pinned)
+            check, pinned, proceed)
         !! Checks the queue candidate at the ref `ref` of the bare repository
         !! `repo` once and, when it passes, moves main to it and removes the
         !! landed `branches`. The refs `holds` of the candidate's commits are
@@ -596,6 +609,8 @@ contains
         procedure(check_runner_i), optional :: runner
         logical, intent(in), optional :: check
         character(len=*), intent(in), optional :: pinned(:)
+        !! Asked right before main moves; main stays where it is when it says no.
+        procedure(proceed_i), optional :: proceed
         character(len=:), allocatable :: out, runner_log
         character(len=40) :: tip, main
         integer :: status, i
@@ -635,6 +650,13 @@ contains
             log = 'The check failed (exit status '//itoa(status)//').'//new_line('a')//out
             call drop_holds()
             return
+        end if
+        if (present(proceed)) then
+            if (.not. proceed()) then
+                log = log//new_line('a')//'main was not moved: a member was cancelled.'
+                call drop_holds()
+                return
+            end if
         end if
         ! main moves forward only: from a commit the candidate stands on.
         call git([character(len=1024) :: 'rev-parse', '--verify', '--quiet', &

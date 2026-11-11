@@ -165,6 +165,12 @@ contains
             '  land [BRANCH] [--repo NAME] [--no-push] [--no-wait]', &
             '                      push HEAD to BRANCH, land it on main after its check', &
             '                      passed and follow it to the end (admin)', &
+            '  land [BRANCH] --urgent', &
+            '                      land before every landing not yet in a candidate,', &
+            '                      in a candidate of its own (admin)', &
+            '  land --cancel ID    cancel a landing that has not ended (land scope)', &
+            '  land --cancel-all REPO', &
+            '                      cancel every landing of REPO that has not ended (admin)', &
             '  land REPO BRANCH    land a branch that is already pushed', &
             '  push [BRANCH]       push HEAD to BRANCH, which opens or updates its change', &
             '                      (push and land send no file over 1 MiB, or over the bytes', &
@@ -490,12 +496,18 @@ contains
         !! landing and follows it to the end; the exit status tells the outcome.
         !! The repository is the one of a remote on the server, unless --repo
         !! names it. The form fy land REPO BRANCH lands a branch already pushed.
+        !! --urgent (admin) lands before the others; --cancel ID cancels landing ID
+        !! and --cancel-all REPO every queued and running landing of REPO.
         type(config_t) :: cfg
         character(len=:), allocatable :: body, repo, branch, id
         integer :: code, stat
 
         call config_load(cfg)
         call require_login(cfg)
+        if (flag('--cancel') .or. flag('--cancel-all')) then
+            call cancel_landing(cfg)
+            return
+        end if
         if (len(positional(2)) > 0) then
             repo = positional(1)
             branch = positional(2)
@@ -511,7 +523,8 @@ contains
             if (.not. flag('--no-push')) call push_head(cfg, repo, branch)
         end if
         call client_request(cfg%server, 'POST', '/api/v1/repos/'//repo//'/land', cfg%token, &
-            '{"branch":"'//json_escape_string(branch)//'"}', code, body, stat)
+            '{"branch":"'//json_escape_string(branch)//'"'// &
+            trim(merge(',"urgent":true', '              ', flag('--urgent')))//'}', code, body, stat)
         if (stat /= 0 .or. code /= 202) call report(code, body, stat)
         id = cli_field(body, 'landing')
         write (output_unit, '(a)') 'landing '//id//' of '//repo//' '//branch//' queued'
@@ -519,6 +532,41 @@ contains
         if (flag('--no-wait')) return
         call follow_job(cfg, id)
     end subroutine cmd_land
+
+    subroutine cancel_landing(cfg)
+        !! fy land --cancel ID: cancels landing ID of the repository the server
+        !! names for it; fy land --cancel-all REPO: all of REPO's. A landing that
+        !! ended already is not cancelled and ends fy with status 1.
+        type(config_t), intent(in) :: cfg
+        character(len=:), allocatable :: body, id, repo
+        integer :: code, stat
+
+        if (flag('--cancel-all')) then
+            repo = option('--cancel-all', '')
+            if (len(repo) == 0 .or. index(repo, '--') == 1) then
+                write (error_unit, '(a)') 'fy: usage: fy land --cancel-all REPO'
+                call quit(2)
+            end if
+            call client_request(cfg%server, 'DELETE', '/api/v1/repos/'//repo//'/landings', &
+                cfg%token, '', code, body, stat)
+            if (stat /= 0 .or. code /= 200) call report(code, body, stat)
+            write (output_unit, '(a)') 'cancelled landings of '//repo//': '//body
+            return
+        end if
+        id = option('--cancel', '')
+        if (len(id) == 0 .or. verify(id, '0123456789') /= 0) then
+            write (error_unit, '(a)') 'fy: usage: fy land --cancel ID'
+            call quit(2)
+        end if
+        call client_request(cfg%server, 'GET', '/api/v1/jobs/'//id, cfg%token, '', code, &
+            body, stat)
+        if (stat /= 0 .or. code /= 200) call report(code, body, stat)
+        repo = cli_field(body, 'repo')
+        call client_request(cfg%server, 'DELETE', '/api/v1/repos/'//repo//'/landings/'//id, &
+            cfg%token, '', code, body, stat)
+        if (stat /= 0 .or. code /= 200) call report(code, body, stat)
+        write (output_unit, '(a)') 'landing '//id//' of '//repo//' cancelled'
+    end subroutine cancel_landing
 
     subroutine follow_job(cfg, id)
         !! Waits until job `id` has finished and reports how; a failed job ends
@@ -1241,7 +1289,7 @@ contains
             if (index(arg(i), '--') == 1) then
                 select case (arg(i))
                 case ('--no-push', '--no-wait', '--wait', '--json', '--init', '--all', &
-                        '--all-repos', '--stats')
+                        '--all-repos', '--stats', '--urgent')
                     i = i + 1
                 case default
                     i = i + 2

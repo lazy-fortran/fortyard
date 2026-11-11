@@ -101,6 +101,7 @@ program test_mcp
     call tool(29, 'issues', demo//',"state":"flagged"')
     call tool(30, 'changes', demo//',"state":"flagged"')
     call tool(31, 'change_diff', one//',"version":1')
+    call tool(32, 'land_cancel', demo//',"id":99')
     ! Longer than the 32 kB at which fx's own loop gives up.
     call tool(33, 'issue_new', demo//',"title":"Long","body":"'//repeat('long ', 8000)//'"')
     call tool(34, 'issue', demo//',"number":3')
@@ -195,6 +196,9 @@ program test_mcp
         'changes lists the flagged ones: '//answer(30))
     call check(passed(31) .and. index(answer(31), '+hello') > 0, &
         'change_diff answers the version asked for: '//answer(31))
+    call check(index(answer(32), 'no landing 99 in demo') > 0 .and. &
+        index(answer(32), '"isError":true') > 0, 'land_cancel asks the server to cancel the '// &
+        'landing: '//answer(32))
     call check(passed(33) .and. passed(34) .and. &
         index(answer(34), repeat('long ', 8000)) > 0, &
         'a message beyond 32 kB is read whole: '//answer(33))

@@ -129,6 +129,15 @@ contains
             "ALTER TABLE checks ADD COLUMN class TEXT NOT NULL DEFAULT 'linux';"// &
             "ALTER TABLE repos ADD COLUMN policy_verify_on TEXT NOT NULL DEFAULT 'linux';")
 
+        ! An urgent landing (fy land --urgent) is taken before the others of its
+        ! repository that are not in a candidate yet, and forms a candidate
+        ! alone. A sealed landing is about to move main, so it can no longer be
+        ! cancelled; the lander seals the members of a candidate whose check
+        ! passed only if none of them was cancelled meanwhile.
+        call migration_add(list, 'landings-urgent-sealed', &
+            'ALTER TABLE landings ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0;'// &
+            'ALTER TABLE landings ADD COLUMN sealed INTEGER NOT NULL DEFAULT 0;')
+
     end subroutine migrations_registry
 
 end module fy_migrations

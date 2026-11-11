@@ -143,6 +143,7 @@ module fy_server
         repo_info_t, &
         store_account_find, &
         store_check_add, &
+        store_check_cancel, &
         store_check_claim, &
         store_check_error, &
         store_check_finish, &
@@ -155,12 +156,17 @@ module fy_server
         store_jobs, &
         store_jobs_state, &
         store_landing_add, &
+        store_landing_cancel, &
+        store_landing_cancel_all, &
         store_landing_check, &
         store_landing_finish, &
         store_landing_list, &
         store_landing_next, &
         store_landing_requeue, &
+        store_landing_seal, &
+        store_landing_state, &
         store_landing_take, &
+        store_landing_unseal, &
         store_open, &
         store_release_add, &
         store_release_list, &
@@ -245,6 +251,10 @@ module fy_server
     type(db_t) :: lander_db
     !! The landings of the candidate the lander checks, which share its check.
     integer(int64), allocatable :: candidate_jobs(:)
+    !! The landings in the candidate the lander checks now: a runner check
+    !! is withdrawn when one of them is cancelled, and main moves only when
+    !! none of them is.
+    integer(int64), allocatable :: lander_members(:)
     !! Lander processes when runners check the landings.
     integer, parameter :: MAX_LANDERS = 4
     !! Seconds past its check_timeout after which a check whose runner has
@@ -536,7 +546,8 @@ contains
             call policy_get(db, l%repo, policy)
             ! Queued landings of one repository share a candidate and its check,
             ! at most as many as its policy says. A change whose review was
-            ! due before landing and is missing by now does not land.
+            ! due before landing and is missing by now does not land. An urgent
+            ! landing forms a candidate alone, so others' failures cannot delay it.
             if (allocated(group)) deallocate (group)
             allocate (group(0))
             more = l
@@ -547,7 +558,7 @@ contains
                 else
                     group = [group, more]
                 end if
-                if (size(group) >= policy%batch) exit
+                if (size(group) >= policy%batch .or. l%urgent) exit
                 call store_landing_take(db, lander, l%repo, more, found)
                 if (.not. found) exit
             end do
@@ -570,6 +581,8 @@ contains
             logical :: ok, has_change
             integer :: next
 
+            if (store_landing_state(db, l%id) == 'cancelled') return
+            lander_members = [l%id]
             ! Scratch space of a landing lives in the temporary directory and is
             ! removed when the landing ends, whatever its outcome.
             work = tmp_dir()//'/fy-land-'//itoa(int(l%id))
@@ -585,12 +598,13 @@ contains
                         itoa(int(l%id))//'@'//l%created, base, upstream, commit, log, ok, &
                         runner=runner_check, number=ch%number, &
                         message_in=change_message(ch, change_url), check=policy%tests /= 'none', &
-                        expect=reviewed(ch))
+                        expect=reviewed(ch), proceed=lander_proceed)
                 else
                     call land_branch(repo_path(l%repo), work, l%repo, l%branch, &
                         itoa(int(l%id))//'@'//l%created, base, upstream, commit, log, ok, &
                         number=ch%number, message_in=change_message(ch, change_url), &
-                        check=policy%tests /= 'none', expect=reviewed(ch))
+                        check=policy%tests /= 'none', expect=reviewed(ch), &
+                        proceed=lander_proceed)
                 end if
                 if (ok) call change_landed(db, ch%id, commit)
             else
@@ -599,14 +613,17 @@ contains
                 if (checks_mode == 'runner') then
                     call land_branch(repo_path(l%repo), work, l%repo, l%branch, &
                         itoa(int(l%id))//'@'//l%created, base, upstream, commit, log, ok, &
-                        runner=runner_check, min_number=next, check=policy%tests /= 'none')
+                        runner=runner_check, min_number=next, check=policy%tests /= 'none', &
+                        proceed=lander_proceed)
                 else
                     call land_branch(repo_path(l%repo), work, l%repo, l%branch, &
                         itoa(int(l%id))//'@'//l%created, base, upstream, commit, log, ok, &
-                        min_number=next, check=policy%tests /= 'none')
+                        min_number=next, check=policy%tests /= 'none', proceed=lander_proceed)
                 end if
             end if
             call execute_command_line('rm -rf '''//work//'''')
+            if (.not. ok) call store_landing_unseal(db, lander_members)
+            lander_members = [integer(int64) ::]
             call finish(l, ok, commit, log)
         end subroutine land_one
 
@@ -615,9 +632,11 @@ contains
             !! squashed onto the candidate before it, and main moves to the last
             !! when the check passes. A failing candidate is split in halves, so a
             !! branch is blamed only when it fails on main by itself.
+            !! A cancelled member is left out at the next step: its candidate is
+            !! built again without it, whatever its check said.
             type(landing_t), intent(in) :: g(:)
             type(change_t) :: ch
-            integer, allocatable :: held(:), single(:)
+            integer, allocatable :: held(:), single(:), live(:)
             character(len=40), allocatable :: commits(:), tips(:)
             character(len=40) :: pinned
             character(len=1024), allocatable :: branches(:), holds(:)
@@ -628,6 +647,7 @@ contains
             tip = ''
             allocate (held(0), single(0), commits(0), tips(0), branches(0), holds(0))
             do i = 1, size(g)
+                if (store_landing_state(db, g(i)%id) == 'cancelled') cycle
                 hold = 'refs/fortyard/queue/'//itoa(int(g(i)%id))
                 work = tmp_dir()//'/fy-land-'//itoa(int(g(i)%id))
                 has_change = .false.
@@ -664,17 +684,24 @@ contains
             if (size(held) > 0) then
                 work = tmp_dir()//'/fy-land-'//itoa(int(g(held(1))%id))
                 candidate_jobs = g(held)%id
+                lander_members = g(held)%id
                 if (checks_mode == 'runner') then
                     call land_candidate(repo_path(g(1)%repo), work, g(1)%repo, tip, branches, &
                         holds, upstream, log, ok, runner=runner_check, &
-                        check=policy%tests /= 'none', pinned=tips)
+                        check=policy%tests /= 'none', pinned=tips, proceed=lander_proceed)
                 else
                     call land_candidate(repo_path(g(1)%repo), work, g(1)%repo, tip, branches, &
                         holds, upstream, log, ok, check=policy%tests /= 'none', &
-                        pinned=tips)
+                        pinned=tips, proceed=lander_proceed)
                 end if
                 deallocate (candidate_jobs)
                 call execute_command_line('rm -rf '''//work//'''')
+                if (.not. ok) call store_landing_unseal(db, lander_members)
+                lander_members = [integer(int64) ::]
+                allocate (live(0))
+                do k = 1, size(held)
+                    if (store_landing_state(db, g(held(k))%id) /= 'cancelled') live = [live, held(k)]
+                end do
                 if (ok) then
                     do k = 1, size(held)
                         if (size(held) > 1) then
@@ -690,6 +717,9 @@ contains
                             if (has_change) call change_landed(db, ch%id, commits(k))
                         end if
                     end do
+                else if (size(live) < size(held)) then
+                    ! The check included a cancelled member, so it decides nothing.
+                    if (size(live) > 0) call land_group(g(live))
                 else if (size(held) == 1) then
                     call finish(g(held(1)), .false., '', log)
                 else
@@ -718,12 +748,15 @@ contains
             type(landing_t), intent(in) :: l
             logical, intent(in) :: ok
             character(len=*), intent(in) :: commit, log
+            logical :: found
 
             if (ok) then
-                call store_landing_finish(db, l%id, 'landed', commit, log)
+                call store_landing_finish(db, l%id, 'landed', commit, log, found)
             else
-                call store_landing_finish(db, l%id, 'failed', '', log)
+                call store_landing_finish(db, l%id, 'failed', '', log, found)
             end if
+            ! A cancelled landing keeps its state and the log that says who cancelled it.
+            if (.not. found) return
             call audit_landing(l, ok, commit)
             call events_notify('jobs')
             write (error_unit, '(a)') 'fy: landing '//itoa(int(l%id))//' of '//l%repo//' '// &
@@ -866,6 +899,13 @@ contains
                 return
             else if (rest(k + 8:k + 8) == '/') then
                 call changes(rest(1:k - 1), rest(k + 8:))
+                return
+            end if
+        end if
+        if (req%method == 'DELETE') then
+            k = index(rest, '/landings')
+            if (k > 1) then
+                call cancel_landings(rest(1:k - 1), rest(k + 9:))
                 return
             end if
         end if
@@ -1052,14 +1092,21 @@ contains
         subroutine queue_landing(target)
             !! POST /api/v1/repos/NAME/land {"branch":"..."}: queues the branch to
             !! land on main as one squashed commit; 202 with the landing number.
+            !! With "urgent":true (admin) it goes before the landings not yet in a
+            !! candidate and forms a candidate alone.
             character(len=*), intent(in) :: target
             character(len=:), allocatable :: branch
             integer(int64) :: number
             character(len=24) :: num
-            logical :: ok
+            logical :: ok, urgent
 
             if (.not. has_scope(who, 'land')) then
                 call fail(res, 403, 'landing needs the land or admin scope')
+                return
+            end if
+            urgent = index(req%body, '"urgent":true') > 0
+            if (urgent .and. index(' '//who%scopes//' ', ' admin ') == 0) then
+                call fail(res, 403, 'an urgent landing needs the admin scope')
                 return
             end if
             call json_extract_string(req%body, 'branch', branch, ok)
@@ -1071,10 +1118,10 @@ contains
             end if
             ! The branch's open change lands with it.
             call change_by_branch(db, target, branch, ch, has_change)
-            if (.not. queued(target, branch, has_change, number)) return
+            if (.not. queued(target, branch, has_change, number, urgent)) return
             write (num, '(i0)') number
             res%code = 202
-            res%body = '{"landing":'//trim(num)//',"state":"queued"}'
+            res%body = '{"landing":'//trim(num)//',"state":"queued","urgent":'//json_bool(urgent)//'}'
         end subroutine queue_landing
 
         subroutine queue_verify(target)
@@ -1158,12 +1205,13 @@ contains
             res%body = answer
         end subroutine changes
 
-        logical function queued(target, branch, has_change, number)
+        logical function queued(target, branch, has_change, number, urgent)
             !! Queues the landing of `branch`, of the change `ch` if it has
             !! one, as `number`, when the policy of the repository lets it;
             !! else the answer says why not.
             character(len=*), intent(in) :: target, branch
             logical, intent(in) :: has_change
+            logical, intent(in), optional :: urgent
             integer(int64), intent(out) :: number
             character(len=:), allocatable :: refusal
             integer(int64) :: change
@@ -1171,7 +1219,7 @@ contains
             change = 0
             if (has_change) change = ch%id
             call policy_queue(db, target, branch, who%account, change, number, refusal, stat, &
-                who%session)
+                who%session, urgent)
             queued = stat == 0 .and. len(refusal) == 0
             if (len(refusal) > 0) then
                 call fail(res, 409, refusal)
@@ -1236,6 +1284,87 @@ contains
             end do
             res%body = res%body//']}'
         end subroutine list_landings
+
+        subroutine cancel_landings(target, tail)
+            !! DELETE /api/v1/repos/NAME/landings/ID (land scope): cancels a queued
+            !! landing at once and a running one at the lander's next step, which
+            !! never moves main to a commit that holds it; 409 with the state of
+            !! one that ended or is moving main now. DELETE .../landings (admin):
+            !! cancels all queued and running ones; answers their numbers.
+            character(len=*), intent(in) :: target, tail
+            character(len=:), allocatable :: state, list
+            integer(int64), allocatable :: ids(:)
+            integer(int64) :: id
+            integer :: ios
+            logical :: cancelled
+            character(len=:), allocatable :: actor
+
+            ! The account, and the token it acted with, for the landing's log.
+            actor = who%account
+            if (len(who%session) > 0) actor = actor//' ('//who%session//')'
+            if (.not. repo_name_ok(target)) then
+                call fail(res, 404, 'no such repository')
+                return
+            end if
+            if (len(tail) == 0) then
+                if (index(' '//who%scopes//' ', ' admin ') == 0) then
+                    call fail(res, 403, 'cancelling all landings needs the admin scope')
+                    return
+                end if
+                call store_landing_cancel_all(db, target, actor, ids)
+                list = ''
+                do k = 1, size(ids)
+                    write (num, '(i0)') ids(k)
+                    if (k > 1) list = list//','
+                    list = list//trim(num)
+                    call audit_append(db, who%account, 'landing.cancelled', target, &
+                        'landing '//trim(num))
+                end do
+                call events_notify('jobs')
+                call events_notify('checks')
+                res%body = '{"cancelled":['//list//']}'
+                return
+            end if
+            id = 0
+            ios = 1
+            if (tail(1:1) == '/' .and. len(tail) > 1 .and. len(tail) < 19) then
+                if (verify(tail(2:), '0123456789') == 0) read (tail(2:), *, iostat=ios) id
+            end if
+            if (ios /= 0) then
+                call fail(res, 404, 'not found')
+                return
+            end if
+            if (.not. has_scope(who, 'land')) then
+                call fail(res, 403, 'cancelling a landing needs the land or admin scope')
+                return
+            end if
+            call store_landing_cancel(db, target, id, actor, state, found, cancelled)
+            write (num, '(i0)') id
+            if (.not. found) then
+                call fail(res, 404, 'no landing '//trim(num)//' in '//target)
+                return
+            end if
+            if (state /= 'cancelled') then
+                res%code = 409
+                if (state == 'running' .or. state == 'queued') then
+                    ! Sealed: main is moving to it, or was when the server restarted.
+                    res%body = '{"error":"landing '//trim(num)//' is moving main now and can no'// &
+                        ' longer be cancelled","state":"'//state//'"}'
+                else
+                    res%body = '{"error":"landing '//trim(num)//' has '//state// &
+                        ' and can no longer be cancelled","state":"'//state//'"}'
+                end if
+                return
+            end if
+            ! Cancelling a cancelled landing again changes nothing.
+            if (cancelled) then
+                call audit_append(db, who%account, 'landing.cancelled', target, 'landing '//trim(num))
+                ! The lander waits for these when the landing is in its candidate.
+                call events_notify('jobs')
+                call events_notify('checks')
+            end if
+            res%body = '{"landing":'//trim(num)//',"state":"cancelled"}'
+        end subroutine cancel_landings
 
         subroutine set_mode(target)
             !! POST /api/v1/repos/NAME/mode {"mode":"primary"|"mirror"}: a primary
@@ -1779,6 +1908,15 @@ contains
         ! The pages of the jobs show the check while it waits for a runner.
         call events_notify('jobs')
         do
+            if (member_cancelled()) then
+                ! Its result would include the cancelled commit; the lander
+                ! builds the candidate again without it.
+                call store_check_cancel(lander_db, id)
+                call events_notify('checks')
+                log = 'The check was withdrawn: a landing of its candidate was cancelled.'
+                state = 'cancelled'
+                exit
+            end if
             call store_check_get(lander_db, id, state, log, age, limit)
             if (state == 'passed' .or. state == 'failed') exit
             write (minutes, '(i0)') limit/60
@@ -1807,7 +1945,50 @@ contains
         end do
         call events_watch_close(fd)
         passed = state == 'passed'
+
+    contains
+
+        logical function member_cancelled()
+            integer :: k
+
+            member_cancelled = .false.
+            if (.not. allocated(lander_members)) return
+            do k = 1, size(lander_members)
+                if (store_landing_state(lander_db, lander_members(k)) == 'cancelled') then
+                    member_cancelled = .true.
+                    return
+                end if
+            end do
+        end function member_cancelled
+
     end subroutine runner_check
+
+    logical function lander_proceed()
+        !! Seals the landings of the lander's candidate, so main may move to
+        !! it, unless one of them was cancelled.
+        integer :: k
+        logical :: running
+        character(len=:), allocatable :: state
+
+        if (.not. allocated(lander_members)) then
+            lander_proceed = .true.
+            return
+        end if
+        do
+            call store_landing_seal(lander_db, lander_members, lander_proceed)
+            if (lander_proceed) return
+            ! A seal refused while every member still runs met a locked
+            ! database, not a cancel: blaming the candidate would rerun its check.
+            running = .true.
+            do k = 1, size(lander_members)
+                state = store_landing_state(lander_db, lander_members(k))
+                ! An empty state is an unreadable one: asked again.
+                if (state /= 'running' .and. state /= '') running = .false.
+            end do
+            if (.not. running) return
+            call proc_sleep_ms(1000)
+        end do
+    end function lander_proceed
 
     logical function checks_mode_set()
         checks_mode_set = allocated(checks_mode)

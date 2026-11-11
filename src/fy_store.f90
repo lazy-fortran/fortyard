@@ -42,6 +42,7 @@ module fy_store
         store_account_find, &
         store_bootstrap, &
         store_check_add, &
+        store_check_cancel, &
         store_check_claim, &
         store_check_error, &
         store_check_finish, &
@@ -54,12 +55,17 @@ module fy_store
         store_jobs, &
         store_jobs_state, &
         store_landing_add, &
+        store_landing_cancel, &
+        store_landing_cancel_all, &
         store_landing_check, &
         store_landing_finish, &
         store_landing_list, &
         store_landing_next, &
         store_landing_requeue, &
+        store_landing_seal, &
+        store_landing_state, &
         store_landing_take, &
+        store_landing_unseal, &
         store_migrate, &
         store_migrate_named, &
         store_migrate_numbered, &
@@ -142,6 +148,8 @@ module fy_store
         character(len=:), allocatable :: title
         !! The name of the token that queued it; empty when not recorded.
         character(len=:), allocatable :: session
+        !! Queued with --urgent: forms a candidate alone, before the others.
+        logical :: urgent = .false.
     end type landing_t
 
     type :: check_t
@@ -823,21 +831,25 @@ contains
         call stmt_finalize(st)
     end subroutine store_repo_set_number
 
-    subroutine store_landing_add(db, repo, branch, account, id, stat, change, session)
+    subroutine store_landing_add(db, repo, branch, account, id, stat, change, session, urgent)
         !! Queues the landing of `branch` on `main` of `repo`, of `change` if given,
-        !! by the token named `session`.
+        !! by the token named `session`; an `urgent` one goes first.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: repo, branch, account
         integer(int64), intent(in), optional :: change
         character(len=*), intent(in), optional :: session
+        logical, intent(in), optional :: urgent
         integer(int64), intent(out) :: id
         integer, intent(out) :: stat
         type(stmt_t) :: st
+        integer(int64) :: first
 
         id = 0
+        first = 0
+        if (present(urgent)) first = merge(1_int64, 0_int64, urgent)
         call db_prepare(db, 'INSERT INTO landings (repo, branch, account, created_at, change,'// &
-            ' session) VALUES (?1, ?2, ?3, '//NOW//", nullif(?4, 0), nullif(?5, '')) RETURNING id;", &
-            st, stat)
+            ' session, urgent) VALUES (?1, ?2, ?3, '//NOW//", nullif(?4, 0), nullif(?5, ''), ?6)"// &
+            ' RETURNING id;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, repo, stat)
         call stmt_bind_text(st, 2, branch, stat)
@@ -852,6 +864,7 @@ contains
         else
             call stmt_bind_text(st, 5, '', stat)
         end if
+        call stmt_bind_int(st, 6, first, stat)
         stat = 1
         if (stmt_step(st) == SQLITE_ROW) then
             id = stmt_int(st, 0)
@@ -863,7 +876,8 @@ contains
 
     subroutine store_landing_next(db, lander, l, found)
         !! Takes the oldest queued landing of a repository with no running one
-        !! (main moves one landing at a time) and marks it running by `lander`.
+        !! (main moves one landing at a time), an urgent one first, and marks it
+        !! running by `lander`.
         type(db_t), intent(in) :: db
         integer, intent(in) :: lander
         type(landing_t), intent(out) :: l
@@ -873,10 +887,11 @@ contains
 
         found = .false.
         call db_prepare(db, "UPDATE landings SET state = 'running', lander = ?1, started_at = "// &
-            NOW//" WHERE id = (SELECT min(id) FROM landings WHERE state = 'queued' AND"// &
+            NOW//", sealed = 0 WHERE id = (SELECT id FROM landings WHERE state = 'queued' AND"// &
             " kind = 'landing' AND repo NOT IN (SELECT repo FROM landings WHERE state = 'running'"// &
-            " AND kind = 'landing'))"// &
-            ' RETURNING id, repo, branch, account, created_at, coalesce(change, 0);', st, stat)
+            " AND kind = 'landing') ORDER BY urgent DESC, id LIMIT 1)"// &
+            ' RETURNING id, repo, branch, account, created_at, coalesce(change, 0), urgent;', st, &
+            stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, int(lander, int64), stat)
         if (stmt_step(st) == SQLITE_ROW) then
@@ -886,6 +901,7 @@ contains
             l%account = stmt_text(st, 3)
             l%created = stmt_text(st, 4)
             l%change = stmt_int(st, 5)
+            l%urgent = stmt_int(st, 6) /= 0
             l%state = 'running'
             found = .true.
         end if
@@ -894,7 +910,8 @@ contains
 
     subroutine store_landing_take(db, lander, repo, l, found)
         !! Takes the oldest queued landing of `repo` for `lander`, which already
-        !! runs a landing of that repository, so both can share a candidate.
+        !! runs a landing of that repository, so both can share a candidate. An
+        !! urgent landing forms a candidate of its own and is not taken here.
         type(db_t), intent(in) :: db
         integer, intent(in) :: lander
         character(len=*), intent(in) :: repo
@@ -905,8 +922,8 @@ contains
 
         found = .false.
         call db_prepare(db, "UPDATE landings SET state = 'running', lander = ?1, started_at = "// &
-            NOW//" WHERE id = (SELECT min(id) FROM landings WHERE state = 'queued' AND"// &
-            " kind = 'landing' AND repo = ?2)"// &
+            NOW//", sealed = 0 WHERE id = (SELECT min(id) FROM landings WHERE state = 'queued'"// &
+            " AND kind = 'landing' AND repo = ?2 AND urgent = 0)"// &
             ' RETURNING id, repo, branch, account, created_at, coalesce(change, 0);', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, int(lander, int64), stat)
@@ -939,21 +956,26 @@ contains
         call stmt_finalize(st)
     end subroutine store_landing_requeue
 
-    subroutine store_landing_finish(db, id, state, commit, log)
+    subroutine store_landing_finish(db, id, state, commit, log, found)
+        !! Ends landing `id` in `state`. A cancelled landing stays cancelled
+        !! (`found` false) unless it landed: what is on main has landed.
         type(db_t), intent(in) :: db
         integer(int64), intent(in) :: id
         character(len=*), intent(in) :: state, commit, log
+        logical, intent(out), optional :: found
         type(stmt_t) :: st
         integer :: stat
 
+        if (present(found)) found = .false.
         call db_prepare(db, 'UPDATE landings SET state = ?2, commit_id = ?3, log = ?4,'// &
-            ' finished_at = '//NOW//' WHERE id = ?1;', st, stat)
+            ' finished_at = '//NOW//", sealed = 0 WHERE id = ?1 AND (state <> 'cancelled'"// &
+            " OR ?2 = 'landed') RETURNING id;", st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, id, stat)
         call stmt_bind_text(st, 2, state, stat)
         call stmt_bind_text(st, 3, commit, stat)
         call stmt_bind_text(st, 4, log, stat)
-        stat = stmt_step(st)
+        if (stmt_step(st) == SQLITE_ROW .and. present(found)) found = .true.
         call stmt_finalize(st)
         call change_moved(db, id)
     end subroutine store_landing_finish
@@ -973,6 +995,139 @@ contains
         stat = stmt_step(st)
         call stmt_finalize(st)
     end subroutine change_moved
+
+    subroutine store_landing_cancel(db, repo, id, account, state, found, cancelled)
+        !! Cancels landing `id` of `repo` for `account` when it is queued, or
+        !! running and not sealed; its log says who cancelled it and when. The
+        !! lander drops a running one at its next step. `state` is the
+        !! landing's state afterwards; `found` is false when `repo` has no
+        !! landing `id`, `cancelled` whether this call cancelled it.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: repo, account
+        integer(int64), intent(in) :: id
+        character(len=:), allocatable, intent(out) :: state
+        logical, intent(out) :: found
+        logical, intent(out) :: cancelled
+        type(stmt_t) :: st
+        integer :: stat
+
+        found = .false.
+        state = ''
+        cancelled = .false.
+        call db_prepare(db, "UPDATE landings SET state = 'cancelled', finished_at = "//NOW// &
+            ", log = coalesce(nullif(log, '') || char(10), '') || 'Cancelled by ' || ?3 ||"// &
+            " ' at ' || "//NOW//" || '.' WHERE id = ?1 AND repo = ?2 AND kind = 'landing'"// &
+            " AND state IN ('queued', 'running') AND sealed = 0 RETURNING state;", st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, id, stat)
+        call stmt_bind_text(st, 2, repo, stat)
+        call stmt_bind_text(st, 3, account, stat)
+        if (stmt_step(st) == SQLITE_ROW) then
+            state = stmt_text(st, 0)
+            found = .true.
+        end if
+        call stmt_finalize(st)
+        cancelled = found
+        if (found) return
+        call db_prepare(db, "SELECT state FROM landings WHERE id = ?1 AND repo = ?2 AND"// &
+            " kind = 'landing';", st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, id, stat)
+        call stmt_bind_text(st, 2, repo, stat)
+        if (stmt_step(st) == SQLITE_ROW) then
+            state = stmt_text(st, 0)
+            found = .true.
+        end if
+        call stmt_finalize(st)
+    end subroutine store_landing_cancel
+
+    subroutine store_landing_cancel_all(db, repo, account, ids)
+        !! Cancels every queued landing of `repo` and every running one that is
+        !! not sealed, as store_landing_cancel does one; `ids` are the cancelled.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: repo, account
+        integer(int64), allocatable, intent(out) :: ids(:)
+        type(stmt_t) :: st
+        integer :: stat
+
+        allocate (ids(0))
+        call db_prepare(db, "UPDATE landings SET state = 'cancelled', finished_at = "//NOW// &
+            ", log = coalesce(nullif(log, '') || char(10), '') || 'Cancelled by ' || ?2 ||"// &
+            " ' at ' || "//NOW//" || '.' WHERE repo = ?1 AND kind = 'landing'"// &
+            " AND state IN ('queued', 'running') AND sealed = 0 RETURNING id;", st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, repo, stat)
+        call stmt_bind_text(st, 2, account, stat)
+        do while (stmt_step(st) == SQLITE_ROW)
+            ids = [ids, stmt_int(st, 0)]
+        end do
+        call stmt_finalize(st)
+    end subroutine store_landing_cancel_all
+
+    function store_landing_state(db, id) result(state)
+        !! The state of landing `id`, '' when there is none.
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: id
+        character(len=:), allocatable :: state
+        type(stmt_t) :: st
+        integer :: stat
+
+        state = ''
+        call db_prepare(db, 'SELECT state FROM landings WHERE id = ?1;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, id, stat)
+        if (stmt_step(st) == SQLITE_ROW) state = stmt_text(st, 0)
+        call stmt_finalize(st)
+    end function store_landing_state
+
+    subroutine store_landing_seal(db, ids, sealed)
+        !! Seals the landings `ids` before main moves to a commit that holds
+        !! them, in one statement: all of them, if each is still running, else
+        !! none (`sealed` false), so a cancel and the move never both happen.
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: ids(:)
+        logical, intent(out) :: sealed
+        type(stmt_t) :: st
+        integer :: stat, n
+
+        sealed = size(ids) == 0
+        if (sealed) return
+        call db_prepare(db, 'UPDATE landings SET sealed = 1 WHERE id IN ('//id_list(ids)// &
+            ") AND NOT EXISTS (SELECT 1 FROM landings WHERE id IN ("//id_list(ids)// &
+            ") AND state <> 'running') RETURNING id;", st, stat)
+        if (stat /= SQLITE_OK) return
+        n = 0
+        do while (stmt_step(st) == SQLITE_ROW)
+            n = n + 1
+        end do
+        call stmt_finalize(st)
+        sealed = n == size(ids)
+    end subroutine store_landing_seal
+
+    subroutine store_landing_unseal(db, ids)
+        !! The landings `ids` can be cancelled again: main did not move to them.
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: ids(:)
+        integer :: stat
+
+        if (size(ids) == 0) return
+        call db_exec(db, 'UPDATE landings SET sealed = 0 WHERE id IN ('//id_list(ids)//');', stat)
+    end subroutine store_landing_unseal
+
+    function id_list(ids) result(s)
+        !! The numbers `ids` separated by commas, for an SQL list.
+        integer(int64), intent(in) :: ids(:)
+        character(len=:), allocatable :: s
+        character(len=24) :: num
+        integer :: k
+
+        s = ''
+        do k = 1, size(ids)
+            write (num, '(i0)') ids(k)
+            if (k > 1) s = s//','
+            s = s//trim(num)
+        end do
+    end function id_list
 
     subroutine store_landing_list(db, repo, ls, stat)
         !! The newest 50 landings of `repo`, newest first.
@@ -1258,6 +1413,22 @@ contains
             call stmt_finalize(st)
         end do
     end subroutine store_landing_check
+
+    subroutine store_check_cancel(db, id)
+        !! Withdraws check `id` of a candidate that lost a member: no runner
+        !! takes it any more, and the runner that holds it has its result refused.
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: id
+        type(stmt_t) :: st
+        integer :: stat
+
+        call db_prepare(db, "UPDATE checks SET state = 'cancelled', finished_at = "//NOW// &
+            " WHERE id = ?1 AND state IN ('queued', 'running');", st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, id, stat)
+        stat = stmt_step(st)
+        call stmt_finalize(st)
+    end subroutine store_check_cancel
 
     subroutine store_check_claim(db, runner, id, repo, ref, found, kind, limit, class)
         !! Gives `runner` the queued check that shares the runners fairly:
