@@ -156,7 +156,7 @@ A squash has one of four outcomes:
 | Class | When | Result |
 |---|---|---|
 | `merge` | git's three-way merge is clean: the two sides changed different hunks | lands without author action |
-| `keep-both` | the file matches a pattern in `.fortyard/merge`, and in every conflicting hunk both sides only inserted lines at the same place (the base side of the hunk is empty) | both insertions are kept, the earlier entry's first; recorded on the entry and shown on the change and its review |
+| `keep-both` | the file matches a pattern in `.fortyard/merge`, and in every conflicting hunk both sides only inserted lines at the same place (the base side of the hunk is empty) | both insertions are kept whole, the earlier entry's first (not git's union merge, which keeps lines that both insertions start or end with only once); recorded on the entry and shown on the change and its review |
 | `model` | the repository allows it and the conflict is in text the model may merge (see [Merge by the model](#merge-by-the-model)) | the local model merges the conflict regions; recorded, shown on the change and, by the repository's choice, flagged for a person |
 | conflict | anything else | goes to the author as a rebase task |
 
@@ -372,7 +372,7 @@ entry and the pinned commit.
   so source order is landing order and a fresh database applies migrations in
   the order production did. An applied entry is immutable: its content hash
   is recorded, and a changed body under an applied name refuses to migrate.
-  In fortyard itself the migrations up to version 13 stay as they are, with
+  In fortyard itself the migrations up to version 15 stay as they are, with
   the version row frozen, so an older release still starts.
 - **Registries are one entry per line.** Lists that every feature extends
   (exported names, imported names, command tables, MCP actions) hold one name

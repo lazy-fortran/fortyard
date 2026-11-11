@@ -197,10 +197,10 @@ land without anyone merging or testing again by hand
 order; items with the same letter can be built at the same time, and a letter
 starts when the letters before it have landed.
 
-- [ ] MP1 (A) Named migrations: a registry of migrations by name
+- [x] MP1 (A) Named migrations: a registry of migrations by name
       (`src/fy_migrations.f90`) and the set of applied names with their
-      content hashes in the database. Versions 1 to 13 stay, with the version
-      row frozen at 13, so the previous release still starts. A duplicate name
+      content hashes in the database. Versions 1 to 15 stay, with the version
+      row frozen at 15, so the previous release still starts. A duplicate name
       or a changed body of an applied migration refuses to migrate.
 - [ ] MP2 (B) One name per line, sorted, in the lists every feature extends:
       the `public` and `use ..., only:` lists of the store, change and server
@@ -243,7 +243,10 @@ starts when the letters before it have landed.
 - [ ] MP10 (D) `keep-both`: for paths listed in `.fortyard/merge` on `main`,
       a conflict in which both sides only inserted lines at the same place is
       merged with both insertions, the earlier landing's first; anything else
-      stays a conflict. The landing and the change show what was merged.
+      stays a conflict. Each insertion is kept whole, as git shows it in
+      `diff3` style: git's union merge keeps lines that both insertions start
+      or end with only once, which cuts a registry entry. The landing and
+      the change show what was merged.
       fortyard lists `PLAN.md` and `src/fy_migrations.f90`.
 - [ ] MP11 (D) Overlap on demand: `fy push`, `fy change view` and
       `fy overlap [N]` say whether the change merges with `main` and name the

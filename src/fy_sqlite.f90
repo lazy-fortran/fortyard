@@ -7,11 +7,12 @@ module fy_sqlite
     private
 
     public :: db_t, stmt_t
-    public :: db_open, db_close, db_exec, db_errmsg
+    public :: db_open, db_close, db_exec, db_errmsg, db_deny_transaction
     public :: db_prepare, stmt_bind_text, stmt_bind_int, stmt_step
     public :: stmt_text, stmt_int, stmt_finalize
 
-    integer, parameter, public :: SQLITE_OK = 0, SQLITE_ROW = 100, SQLITE_DONE = 101
+    integer, parameter, public :: SQLITE_OK = 0, SQLITE_BUSY = 5, SQLITE_AUTH = 23, &
+        SQLITE_ROW = 100, SQLITE_DONE = 101
     integer(c_int), parameter :: OPEN_READWRITE = 2, OPEN_CREATE = 4
     ! SQLITE_TRANSIENT: SQLite copies bound text before the call returns.
     integer(c_intptr_t), parameter :: TRANSIENT = -1_c_intptr_t
@@ -56,6 +57,13 @@ module fy_sqlite
             type(c_ptr), value :: arg
             integer(c_int) :: rc
         end function sqlite3_busy_handler
+
+        function sqlite3_set_authorizer(db, auth, arg) bind(C) result(rc)
+            import :: c_ptr, c_funptr, c_int
+            type(c_ptr), value :: db, arg
+            type(c_funptr), value :: auth
+            integer(c_int) :: rc
+        end function sqlite3_set_authorizer
 
         function c_usleep(usec) bind(C, name='usleep') result(rc)
             import :: c_int
@@ -157,6 +165,31 @@ contains
         rc = c_usleep(1000_c_int)
         again = 1
     end function busy_wait
+
+    subroutine db_deny_transaction(db, deny)
+        !! While `deny` is set, SQL on this connection that begins or ends a
+        !! transaction fails with SQLITE_AUTH before it runs, so SQL from
+        !! elsewhere cannot end the transaction it is run in.
+        type(db_t), intent(in) :: db
+        logical, intent(in) :: deny
+        integer(c_int) :: rc
+
+        if (deny) then
+            rc = sqlite3_set_authorizer(db%handle, c_funloc(no_transaction), c_null_ptr)
+        else
+            rc = sqlite3_set_authorizer(db%handle, c_null_funptr, c_null_ptr)
+        end if
+    end subroutine db_deny_transaction
+
+    function no_transaction(arg, action, a, b, c, d) bind(C) result(rc)
+        type(c_ptr), value :: arg, a, b, c, d
+        integer(c_int), value :: action
+        integer(c_int) :: rc
+        ! SQLITE_TRANSACTION: BEGIN, COMMIT, END and ROLLBACK.
+        integer(c_int), parameter :: TRANSACTION = 22, DENY = 1
+
+        rc = merge(DENY, 0_c_int, action == TRANSACTION)
+    end function no_transaction
 
     subroutine db_close(db)
         type(db_t), intent(inout) :: db

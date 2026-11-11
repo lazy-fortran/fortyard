@@ -3,13 +3,17 @@ module fy_store
     !! hashes; the plaintext is shown once when created.
     use, intrinsic :: iso_fortran_env, only: int8, int64
     use fx_hash, only: sha256_string
+    use fy_proc, only: proc_sleep_ms
+    use fy_migrations, only: migration_t, migrations_registry
     use fy_sqlite, only: db_t, stmt_t, db_open, db_exec, db_errmsg, db_prepare, &
         stmt_bind_text, stmt_bind_int, stmt_step, stmt_text, stmt_int, &
-        stmt_finalize, SQLITE_OK, SQLITE_ROW, SQLITE_DONE
+        stmt_finalize, db_deny_transaction, SQLITE_OK, SQLITE_ROW, SQLITE_DONE, SQLITE_BUSY, &
+        SQLITE_AUTH
     implicit none
     private
 
     public :: store_open, store_migrate, store_schema_version, store_snapshot
+    public :: store_migrate_numbered, store_migrate_named
     public :: store_bootstrap, store_token_lookup, store_token_create, store_account_find
     public :: store_token_list, store_token_revoke, store_token_revoke_hash
     public :: token_identity_t, token_info_t, random_token
@@ -22,6 +26,9 @@ module fy_store
     public :: store_check_add, store_check_claim, store_check_finish, store_check_get, &
         store_check_release
 
+    !! The last numbered migration. Frozen: later migrations have names
+    !! (fy_migrations) and leave the version alone, so a release from before
+    !! them still finds the version it knows.
     integer, parameter, public :: SCHEMA_VERSION = 15
 
     type :: token_identity_t
@@ -72,16 +79,31 @@ module fy_store
 
 contains
 
-    subroutine store_open(path, db, stat)
+    subroutine store_open(path, db, stat, message)
         character(len=*), intent(in) :: path
         type(db_t), intent(out) :: db
         integer, intent(out) :: stat
+        !! Why a migration was refused; empty when SQLite has the reason.
+        character(len=:), allocatable, intent(out), optional :: message
+        integer(int64) :: started, now, rate
 
+        if (present(message)) message = ''
         call db_open(path, db, stat)
         if (stat /= SQLITE_OK) return
-        call db_exec(db, 'PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;', stat)
+        ! Processes that start on a new database at the same moment all switch
+        ! its journal mode, and SQLite refuses the ones that lose at once,
+        ! without asking the busy handler. They ask again, for as long as the
+        ! busy handler would wait: a lock that is held longer is reported.
+        call system_clock(started, rate)
+        do
+            call db_exec(db, 'PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;', stat)
+            if (stat /= SQLITE_BUSY) exit
+            call system_clock(now)
+            if (now - started > 5 * rate) exit
+            call proc_sleep_ms(1)
+        end do
         if (stat /= SQLITE_OK) return
-        call store_migrate(db, stat)
+        call store_migrate(db, stat, message)
     end subroutine store_open
 
     subroutine store_snapshot(db, path, stat)
@@ -102,238 +124,314 @@ contains
         call execute_command_line('mv -f '''//path//'.new'' '''//path//'''', exitstat=stat)
     end subroutine store_snapshot
 
-    subroutine store_migrate(db, stat)
-        !! Forward-only, additive migrations, so the previous release still runs.
+    subroutine store_migrate(db, stat, message)
+        !! Forward-only, additive migrations, so the previous release still runs:
+        !! the numbered ones up to SCHEMA_VERSION, then the named ones of the
+        !! registry (fy_migrations). `message` says why a migration was refused.
         type(db_t), intent(in) :: db
         integer, intent(out) :: stat
-        integer :: version
+        character(len=:), allocatable, intent(out), optional :: message
+        type(migration_t), allocatable :: list(:)
+        character(len=:), allocatable :: why
 
+        why = ''
+        call store_migrate_numbered(db, stat)
+        if (stat == SQLITE_OK) then
+            call migrations_registry(list)
+            call store_migrate_named(db, list, stat, why)
+        end if
+        if (present(message)) message = why
+    end subroutine store_migrate
+
+    subroutine store_migrate_numbered(db, stat)
+        !! The migrations from before there were named ones. Nothing is added
+        !! here: the version stays at SCHEMA_VERSION, which is what a release
+        !! from before named migrations expects to find.
+        type(db_t), intent(in) :: db
+        integer, intent(out) :: stat
+
+        stat = SQLITE_OK
+        ! Every worker and thread opens the store; none of them waits for the
+        ! write lock once the schema is there.
+        if (store_schema_version(db) >= SCHEMA_VERSION) return
         call db_exec(db, 'CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);', &
             stat)
         if (stat /= SQLITE_OK) return
-        version = store_schema_version(db)
-        if (version < 1) then
-            call db_exec(db, 'BEGIN;'// &
-                'CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL,'// &
-                ' kind TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,'// &
-                ' created_at TEXT NOT NULL);'// &
-                'CREATE TABLE tokens (id INTEGER PRIMARY KEY,'// &
-                ' account_id INTEGER NOT NULL REFERENCES accounts(id),'// &
-                ' name TEXT NOT NULL, hash TEXT UNIQUE NOT NULL, scopes TEXT NOT NULL,'// &
-                ' created_at TEXT NOT NULL, expires_at TEXT,'// &
-                ' revoked INTEGER NOT NULL DEFAULT 0);'// &
-                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (1);'// &
-                'COMMIT;', stat)
-            if (stat /= SQLITE_OK) then
-                call db_exec(db, 'ROLLBACK;', version)
+        call numbered(db, 1, &
+            'CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL,'// &
+            ' kind TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,'// &
+            ' created_at TEXT NOT NULL);'// &
+            'CREATE TABLE tokens (id INTEGER PRIMARY KEY,'// &
+            ' account_id INTEGER NOT NULL REFERENCES accounts(id),'// &
+            ' name TEXT NOT NULL, hash TEXT UNIQUE NOT NULL, scopes TEXT NOT NULL,'// &
+            ' created_at TEXT NOT NULL, expires_at TEXT,'// &
+            ' revoked INTEGER NOT NULL DEFAULT 0);', stat)
+        if (stat /= SQLITE_OK) return
+        call numbered(db, 2, &
+            'CREATE TABLE repos (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL,'// &
+            ' upstream TEXT NOT NULL, created_at TEXT NOT NULL, fetched_at TEXT,'// &
+            ' fetch_status INTEGER);', stat)
+        if (stat /= SQLITE_OK) return
+        ! "mirror": fetched from upstream; "primary": pushed to fortyard.
+        call numbered(db, 3, &
+            "ALTER TABLE repos ADD COLUMN mode TEXT NOT NULL DEFAULT 'mirror';", stat)
+        if (stat /= SQLITE_OK) return
+        call numbered(db, 4, &
+            'CREATE TABLE landings (id INTEGER PRIMARY KEY, repo TEXT NOT NULL,'// &
+            ' branch TEXT NOT NULL, account TEXT NOT NULL,'// &
+            " state TEXT NOT NULL DEFAULT 'queued', created_at TEXT NOT NULL,"// &
+            ' finished_at TEXT, commit_id TEXT, log TEXT);', stat)
+        if (stat /= SQLITE_OK) return
+        call numbered(db, 5, &
+            'CREATE TABLE releases (id INTEGER PRIMARY KEY, repo TEXT NOT NULL,'// &
+            ' version TEXT NOT NULL, commit_id TEXT NOT NULL, notes TEXT NOT NULL,'// &
+            ' uploader TEXT NOT NULL, created_at TEXT NOT NULL,'// &
+            " state TEXT NOT NULL DEFAULT 'open', sha256 TEXT, size INTEGER,"// &
+            ' UNIQUE (repo, version));', stat)
+        if (stat /= SQLITE_OK) return
+        call numbered(db, 6, 'ALTER TABLE landings ADD COLUMN started_at TEXT;', stat)
+        if (stat /= SQLITE_OK) return
+        ! Checks a runner performs for a landing: queued, running, passed, failed.
+        call numbered(db, 7, &
+            'CREATE TABLE checks (id INTEGER PRIMARY KEY, repo TEXT NOT NULL,'// &
+            " ref TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', runner TEXT,"// &
+            ' log TEXT, created_at TEXT NOT NULL, claimed_at TEXT, finished_at TEXT);', stat)
+        if (stat /= SQLITE_OK) return
+        ! The lander process (1, 2, ...) that runs a landing.
+        call numbered(db, 8, 'ALTER TABLE landings ADD COLUMN lander INTEGER;', stat)
+        if (stat /= SQLITE_OK) return
+        ! Changes (fy_change): one per reviewed branch, with its versions and
+        ! comments; a landing may land a change.
+        call numbered(db, 9, &
+            'CREATE TABLE changes (id INTEGER PRIMARY KEY, repo TEXT NOT NULL,'// &
+            ' number INTEGER NOT NULL, change_key TEXT NOT NULL, branch TEXT NOT NULL,'// &
+            ' title TEXT NOT NULL, description TEXT NOT NULL, author TEXT NOT NULL,'// &
+            " state TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL,"// &
+            ' updated_at TEXT NOT NULL, commit_id TEXT, UNIQUE (repo, number));'// &
+            'CREATE TABLE change_versions (change INTEGER NOT NULL, version INTEGER NOT NULL,'// &
+            ' head TEXT NOT NULL, base TEXT NOT NULL, pusher TEXT, created_at TEXT NOT NULL,'// &
+            ' PRIMARY KEY (change, version));'// &
+            'CREATE TABLE change_comments (id INTEGER PRIMARY KEY, change INTEGER NOT NULL,'// &
+            ' account TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL);'// &
+            'ALTER TABLE landings ADD COLUMN change INTEGER;', stat)
+        if (stat /= SQLITE_OK) return
+        ! Issues (fy_issue), numbered with the changes of their repository.
+        call numbered(db, 10, &
+            'CREATE TABLE issues (id INTEGER PRIMARY KEY, repo TEXT NOT NULL,'// &
+            ' number INTEGER NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,'// &
+            " author TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open',"// &
+            ' created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (repo, number));'// &
+            'CREATE TABLE issue_comments (id INTEGER PRIMARY KEY, issue INTEGER NOT NULL,'// &
+            ' account TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL);', stat)
+        if (stat /= SQLITE_OK) return
+        ! Verifications of main are jobs too (kind 'verify', fy_verify), and
+        ! their runner checks run .fortyard/verify; a regression found by
+        ! bisection is reported once per culprit commit.
+        call numbered(db, 11, &
+            "ALTER TABLE landings ADD COLUMN kind TEXT NOT NULL DEFAULT 'landing';"// &
+            "ALTER TABLE checks ADD COLUMN kind TEXT NOT NULL DEFAULT 'check';"// &
+            'CREATE TABLE verify_reports (id INTEGER PRIMARY KEY, repo TEXT NOT NULL,'// &
+            " culprit TEXT NOT NULL, issue INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'open',"// &
+            ' created_at TEXT NOT NULL, UNIQUE (repo, culprit));', stat)
+        if (stat /= SQLITE_OK) return
+        ! A repository can count its changes and issues from a set number,
+        ! so a fork does not continue the numbers in its upstream's history.
+        call numbered(db, 12, 'ALTER TABLE repos ADD COLUMN number_next INTEGER;', stat)
+        if (stat /= SQLITE_OK) return
+        ! Review state of a change (fy_review): NULL until reviewed, then
+        ! 'ai-reviewed' or 'human-reviewed'; 'requested' asks for a review
+        ! and 'failed' records one that gave no usable answer. Changes
+        ! landed before reviews existed are not reviewed.
+        call numbered(db, 13, 'ALTER TABLE changes ADD COLUMN review_state TEXT;'// &
+            'ALTER TABLE changes ADD COLUMN flagged INTEGER NOT NULL DEFAULT 0;'// &
+            'ALTER TABLE changes ADD COLUMN flag_reason TEXT;'// &
+            "UPDATE changes SET review_state = 'none' WHERE state <> 'open';", stat)
+        if (stat /= SQLITE_OK) return
+        ! The audit log (fy_audit): each row carries the hash of the row
+        ! before it. The triggers keep fortyard itself from changing a row;
+        ! whoever removes them is found by the chain. audit_head names the
+        ! newest row, which has no successor to give its removal away.
+        call numbered(db, 14, &
+            'CREATE TABLE audit (id INTEGER PRIMARY KEY, at TEXT NOT NULL,'// &
+            ' actor TEXT NOT NULL, event TEXT NOT NULL, subject TEXT NOT NULL,'// &
+            ' detail TEXT NOT NULL, prev TEXT NOT NULL, hash TEXT NOT NULL);'// &
+            'CREATE TRIGGER audit_keeps_rows BEFORE DELETE ON audit BEGIN'// &
+            " SELECT raise(ABORT, 'the audit log is append-only'); END;"// &
+            'CREATE TRIGGER audit_keeps_content BEFORE UPDATE ON audit BEGIN'// &
+            " SELECT raise(ABORT, 'the audit log is append-only'); END;"// &
+            'CREATE TABLE audit_head (one INTEGER PRIMARY KEY CHECK (one = 1),'// &
+            ' id INTEGER NOT NULL, hash TEXT NOT NULL);', stat)
+        if (stat /= SQLITE_OK) return
+        ! The policy of a repository (fy_policy). The defaults are what
+        ! every repository did before there were policies.
+        ! changes.reviewed_head: the head of the version a review read.
+        call numbered(db, 15, &
+            "ALTER TABLE repos ADD COLUMN policy_tests TEXT NOT NULL DEFAULT 'full';"// &
+            "ALTER TABLE repos ADD COLUMN policy_review TEXT NOT NULL DEFAULT 'after';"// &
+            'ALTER TABLE repos ADD COLUMN policy_bisect INTEGER NOT NULL DEFAULT 1;'// &
+            'ALTER TABLE repos ADD COLUMN policy_batch INTEGER NOT NULL DEFAULT 8;'// &
+            'ALTER TABLE repos ADD COLUMN policy_unreviewed_limit INTEGER NOT NULL DEFAULT 0;'// &
+            'ALTER TABLE changes ADD COLUMN reviewed_head TEXT;', stat)
+        if (stat /= SQLITE_OK) return
+    end subroutine store_migrate_numbered
+
+    subroutine numbered(db, version, sql, stat)
+        !! One numbered migration with its version, in one transaction.
+        type(db_t), intent(in) :: db
+        integer, intent(in) :: version
+        character(len=*), intent(in) :: sql
+        integer, intent(out) :: stat
+        character(len=12) :: digits
+        integer :: ignored
+
+        ! IMMEDIATE, and the version is read under the lock: of several
+        ! processes that start on one database, one applies the step and the
+        ! others find it done.
+        call db_exec(db, 'BEGIN IMMEDIATE;', stat)
+        if (stat /= SQLITE_OK) return
+        if (store_schema_version(db) < version) then
+            write (digits, '(i0)') version
+            call db_exec(db, sql//'DELETE FROM schema_version;'// &
+                'INSERT INTO schema_version VALUES ('//trim(digits)//');', stat)
+        end if
+        if (stat == SQLITE_OK) call db_exec(db, 'COMMIT;', stat)
+        if (stat /= SQLITE_OK) call db_exec(db, 'ROLLBACK;', ignored)
+    end subroutine numbered
+
+    subroutine store_migrate_named(db, list, stat, message)
+        !! Applies the migrations of `list` that the database does not have yet,
+        !! in the order of the list, each in one transaction with the record of
+        !! its name and the SHA-256 of its SQL. Refuses, before anything is
+        !! applied, a name that is in the list twice and an applied name whose
+        !! SQL has changed since. Applied names that the list does not have are
+        !! left alone: they come from a newer release that was rolled back.
+        type(db_t), intent(in) :: db
+        type(migration_t), intent(in) :: list(:)
+        integer, intent(out) :: stat
+        character(len=:), allocatable, intent(out) :: message
+        character(len=:), allocatable :: recorded
+        character(len=64), allocatable :: hash(:)
+        integer :: i, k, ignored
+        logical :: found, pending
+
+        message = ''
+        stat = SQLITE_OK
+        allocate (hash(size(list)))
+        pending = .false.
+        do i = 1, size(list)
+            do k = 1, i - 1
+                if (list(k)%name == list(i)%name) then
+                    call refuse('migration "'//list(i)%name//'" is defined twice in the registry')
+                    return
+                end if
+            end do
+            hash(i) = sha256_string(list(i)%sql)
+            call migration_applied(db, list(i)%name, recorded, found)
+            if (found .and. recorded /= hash(i)) then
+                call refuse(changed(list(i)%name))
                 return
             end if
+            if (.not. found) pending = .true.
+        end do
+        ! The usual start: nothing to apply, and nothing written.
+        if (.not. pending) return
+
+        call db_exec(db, 'CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY,'// &
+            ' hash TEXT NOT NULL, applied_at TEXT NOT NULL);', stat)
+        if (stat /= SQLITE_OK) then
+            message = db_errmsg(db)
+            return
         end if
-        if (store_schema_version(db) < 2) then
-            call db_exec(db, 'BEGIN;'// &
-                'CREATE TABLE repos (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL,'// &
-                ' upstream TEXT NOT NULL, created_at TEXT NOT NULL, fetched_at TEXT,'// &
-                ' fetch_status INTEGER);'// &
-                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (2);'// &
-                'COMMIT;', stat)
+        do i = 1, size(list)
+            ! Looked up again under the write lock: another process that
+            ! starts at the same time may have applied it by now.
+            call db_exec(db, 'BEGIN IMMEDIATE;', stat)
             if (stat /= SQLITE_OK) then
-                call db_exec(db, 'ROLLBACK;', version)
+                message = db_errmsg(db)
                 return
             end if
-        end if
-        if (store_schema_version(db) < 3) then
-            ! "mirror": fetched from upstream; "primary": pushed to fortyard.
-            call db_exec(db, 'BEGIN;'// &
-                "ALTER TABLE repos ADD COLUMN mode TEXT NOT NULL DEFAULT 'mirror';"// &
-                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (3);'// &
-                'COMMIT;', stat)
-            if (stat /= SQLITE_OK) then
-                call db_exec(db, 'ROLLBACK;', version)
+            call migration_applied(db, list(i)%name, recorded, found)
+            if (found) then
+                call db_exec(db, 'COMMIT;', ignored)
+                if (recorded == hash(i)) cycle
+                call refuse(changed(list(i)%name))
                 return
             end if
-        end if
-        if (store_schema_version(db) < 4) then
-            call db_exec(db, 'BEGIN;'// &
-                'CREATE TABLE landings (id INTEGER PRIMARY KEY, repo TEXT NOT NULL,'// &
-                ' branch TEXT NOT NULL, account TEXT NOT NULL,'// &
-                " state TEXT NOT NULL DEFAULT 'queued', created_at TEXT NOT NULL,"// &
-                ' finished_at TEXT, commit_id TEXT, log TEXT);'// &
-                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (4);'// &
-                'COMMIT;', stat)
+            ! A COMMIT in the SQL would apply it without its record.
+            call db_deny_transaction(db, .true.)
+            call db_exec(db, list(i)%sql, stat)
+            if (stat == SQLITE_AUTH) message = ' (a migration has no BEGIN, COMMIT or ROLLBACK)'
+            if (stat /= SQLITE_OK) message = db_errmsg(db)//message
+            call db_deny_transaction(db, .false.)
+            if (stat == SQLITE_OK) then
+                call migration_record(db, list(i)%name, hash(i), stat)
+                if (stat == SQLITE_OK) call db_exec(db, 'COMMIT;', stat)
+                if (stat /= SQLITE_OK) message = db_errmsg(db)
+            end if
             if (stat /= SQLITE_OK) then
-                call db_exec(db, 'ROLLBACK;', version)
+                message = 'migration "'//list(i)%name//'": '//message
+                call db_exec(db, 'ROLLBACK;', ignored)
                 return
             end if
+        end do
+
+    contains
+
+        subroutine refuse(why)
+            character(len=*), intent(in) :: why
+
+            stat = 1
+            message = why
+        end subroutine refuse
+
+        function changed(name) result(why)
+            character(len=*), intent(in) :: name
+            character(len=:), allocatable :: why
+
+            why = 'migration "'//name//'" was applied to this database with other SQL'// &
+                ' than the registry has now; an applied migration is never edited,'// &
+                ' a change to the schema is a new migration'
+        end function changed
+
+    end subroutine store_migrate_named
+
+    subroutine migration_applied(db, name, hash, found)
+        !! The recorded hash of an applied migration. A database without the
+        !! table has none applied.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: name
+        character(len=:), allocatable, intent(out) :: hash
+        logical, intent(out) :: found
+        type(stmt_t) :: st
+        integer :: stat
+
+        hash = ''
+        found = .false.
+        call db_prepare(db, 'SELECT hash FROM migrations WHERE name = ?1;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, name, stat)
+        if (stmt_step(st) == SQLITE_ROW) then
+            found = .true.
+            hash = stmt_text(st, 0)
         end if
-        if (store_schema_version(db) < 5) then
-            call db_exec(db, 'BEGIN;'// &
-                'CREATE TABLE releases (id INTEGER PRIMARY KEY, repo TEXT NOT NULL,'// &
-                ' version TEXT NOT NULL, commit_id TEXT NOT NULL, notes TEXT NOT NULL,'// &
-                ' uploader TEXT NOT NULL, created_at TEXT NOT NULL,'// &
-                " state TEXT NOT NULL DEFAULT 'open', sha256 TEXT, size INTEGER,"// &
-                ' UNIQUE (repo, version));'// &
-                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (5);'// &
-                'COMMIT;', stat)
-            if (stat /= SQLITE_OK) then
-                call db_exec(db, 'ROLLBACK;', version)
-                return
-            end if
-        end if
-        if (store_schema_version(db) < 6) then
-            call db_exec(db, 'BEGIN;ALTER TABLE landings ADD COLUMN started_at TEXT;'// &
-                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (6);'// &
-                'COMMIT;', stat)
-            if (stat /= SQLITE_OK) then
-                call db_exec(db, 'ROLLBACK;', version)
-                return
-            end if
-        end if
-        if (store_schema_version(db) < 7) then
-            ! Checks a runner performs for a landing: queued, running, passed, failed.
-            call db_exec(db, 'BEGIN;'// &
-                'CREATE TABLE checks (id INTEGER PRIMARY KEY, repo TEXT NOT NULL,'// &
-                " ref TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', runner TEXT,"// &
-                ' log TEXT, created_at TEXT NOT NULL, claimed_at TEXT, finished_at TEXT);'// &
-                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (7);'// &
-                'COMMIT;', stat)
-            if (stat /= SQLITE_OK) then
-                call db_exec(db, 'ROLLBACK;', version)
-                return
-            end if
-        end if
-        if (store_schema_version(db) < 8) then
-            ! The lander process (1, 2, ...) that runs a landing.
-            call db_exec(db, 'BEGIN;ALTER TABLE landings ADD COLUMN lander INTEGER;'// &
-                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (8);'// &
-                'COMMIT;', stat)
-            if (stat /= SQLITE_OK) then
-                call db_exec(db, 'ROLLBACK;', version)
-                return
-            end if
-        end if
-        if (store_schema_version(db) < 9) then
-            ! Changes (fy_change): one per reviewed branch, with its versions and
-            ! comments; a landing may land a change.
-            call db_exec(db, 'BEGIN;'// &
-                'CREATE TABLE changes (id INTEGER PRIMARY KEY, repo TEXT NOT NULL,'// &
-                ' number INTEGER NOT NULL, change_key TEXT NOT NULL, branch TEXT NOT NULL,'// &
-                ' title TEXT NOT NULL, description TEXT NOT NULL, author TEXT NOT NULL,'// &
-                " state TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL,"// &
-                ' updated_at TEXT NOT NULL, commit_id TEXT, UNIQUE (repo, number));'// &
-                'CREATE TABLE change_versions (change INTEGER NOT NULL, version INTEGER NOT NULL,'// &
-                ' head TEXT NOT NULL, base TEXT NOT NULL, pusher TEXT, created_at TEXT NOT NULL,'// &
-                ' PRIMARY KEY (change, version));'// &
-                'CREATE TABLE change_comments (id INTEGER PRIMARY KEY, change INTEGER NOT NULL,'// &
-                ' account TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL);'// &
-                'ALTER TABLE landings ADD COLUMN change INTEGER;'// &
-                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (9);'// &
-                'COMMIT;', stat)
-            if (stat /= SQLITE_OK) then
-                call db_exec(db, 'ROLLBACK;', version)
-                return
-            end if
-        end if
-        if (store_schema_version(db) < 10) then
-            ! Issues (fy_issue), numbered with the changes of their repository.
-            call db_exec(db, 'BEGIN;'// &
-                'CREATE TABLE issues (id INTEGER PRIMARY KEY, repo TEXT NOT NULL,'// &
-                ' number INTEGER NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,'// &
-                " author TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open',"// &
-                ' created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (repo, number));'// &
-                'CREATE TABLE issue_comments (id INTEGER PRIMARY KEY, issue INTEGER NOT NULL,'// &
-                ' account TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL);'// &
-                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (10);'// &
-                'COMMIT;', stat)
-            if (stat /= SQLITE_OK) then
-                call db_exec(db, 'ROLLBACK;', version)
-                return
-            end if
-        end if
-        if (store_schema_version(db) < 11) then
-            ! Verifications of main are jobs too (kind 'verify', fy_verify), and
-            ! their runner checks run .fortyard/verify; a regression found by
-            ! bisection is reported once per culprit commit.
-            call db_exec(db, 'BEGIN;'// &
-                "ALTER TABLE landings ADD COLUMN kind TEXT NOT NULL DEFAULT 'landing';"// &
-                "ALTER TABLE checks ADD COLUMN kind TEXT NOT NULL DEFAULT 'check';"// &
-                'CREATE TABLE verify_reports (id INTEGER PRIMARY KEY, repo TEXT NOT NULL,'// &
-                " culprit TEXT NOT NULL, issue INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'open',"// &
-                ' created_at TEXT NOT NULL, UNIQUE (repo, culprit));'// &
-                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (11);'// &
-                'COMMIT;', stat)
-            if (stat /= SQLITE_OK) then
-                call db_exec(db, 'ROLLBACK;', version)
-                return
-            end if
-        end if
-        if (store_schema_version(db) < 12) then
-            ! A repository can count its changes and issues from a set number,
-            ! so a fork does not continue the numbers in its upstream's history.
-            call db_exec(db, 'BEGIN;ALTER TABLE repos ADD COLUMN number_next INTEGER;'// &
-                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (12);'// &
-                'COMMIT;', stat)
-            if (stat /= SQLITE_OK) then
-                call db_exec(db, 'ROLLBACK;', version)
-                return
-            end if
-        end if
-        if (store_schema_version(db) < 13) then
-            ! Review state of a change (fy_review): NULL until reviewed, then
-            ! 'ai-reviewed' or 'human-reviewed'; 'requested' asks for a review
-            ! and 'failed' records one that gave no usable answer. Changes
-            ! landed before reviews existed are not reviewed.
-            call db_exec(db, 'BEGIN;ALTER TABLE changes ADD COLUMN review_state TEXT;'// &
-                'ALTER TABLE changes ADD COLUMN flagged INTEGER NOT NULL DEFAULT 0;'// &
-                'ALTER TABLE changes ADD COLUMN flag_reason TEXT;'// &
-                "UPDATE changes SET review_state = 'none' WHERE state <> 'open';"// &
-                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (13);'// &
-                'COMMIT;', stat)
-            if (stat /= SQLITE_OK) then
-                call db_exec(db, 'ROLLBACK;', version)
-                return
-            end if
-        end if
-        if (store_schema_version(db) < 14) then
-            ! The audit log (fy_audit): each row carries the hash of the row
-            ! before it. The triggers keep fortyard itself from changing a row;
-            ! whoever removes them is found by the chain. audit_head names the
-            ! newest row, which has no successor to give its removal away.
-            call db_exec(db, 'BEGIN;'// &
-                'CREATE TABLE audit (id INTEGER PRIMARY KEY, at TEXT NOT NULL,'// &
-                ' actor TEXT NOT NULL, event TEXT NOT NULL, subject TEXT NOT NULL,'// &
-                ' detail TEXT NOT NULL, prev TEXT NOT NULL, hash TEXT NOT NULL);'// &
-                'CREATE TRIGGER audit_keeps_rows BEFORE DELETE ON audit BEGIN'// &
-                " SELECT raise(ABORT, 'the audit log is append-only'); END;"// &
-                'CREATE TRIGGER audit_keeps_content BEFORE UPDATE ON audit BEGIN'// &
-                " SELECT raise(ABORT, 'the audit log is append-only'); END;"// &
-                'CREATE TABLE audit_head (one INTEGER PRIMARY KEY CHECK (one = 1),'// &
-                ' id INTEGER NOT NULL, hash TEXT NOT NULL);'// &
-                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (14);'// &
-                'COMMIT;', stat)
-            if (stat /= SQLITE_OK) then
-                call db_exec(db, 'ROLLBACK;', version)
-                return
-            end if
-        end if
-        if (store_schema_version(db) < 15) then
-            ! The policy of a repository (fy_policy). The defaults are what
-            ! every repository did before there were policies.
-            ! changes.reviewed_head: the head of the version a review read.
-            call db_exec(db, 'BEGIN;'// &
-                "ALTER TABLE repos ADD COLUMN policy_tests TEXT NOT NULL DEFAULT 'full';"// &
-                "ALTER TABLE repos ADD COLUMN policy_review TEXT NOT NULL DEFAULT 'after';"// &
-                'ALTER TABLE repos ADD COLUMN policy_bisect INTEGER NOT NULL DEFAULT 1;'// &
-                'ALTER TABLE repos ADD COLUMN policy_batch INTEGER NOT NULL DEFAULT 8;'// &
-                'ALTER TABLE repos ADD COLUMN policy_unreviewed_limit INTEGER NOT NULL DEFAULT 0;'// &
-                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (15);'// &
-                'ALTER TABLE changes ADD COLUMN reviewed_head TEXT;'// &
-                'COMMIT;', stat)
-            if (stat /= SQLITE_OK) then
-                call db_exec(db, 'ROLLBACK;', version)
-                return
-            end if
-        end if
-    end subroutine store_migrate
+        call stmt_finalize(st)
+    end subroutine migration_applied
+
+    subroutine migration_record(db, name, hash, stat)
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: name, hash
+        integer, intent(out) :: stat
+        type(stmt_t) :: st
+
+        call db_prepare(db, 'INSERT INTO migrations (name, hash, applied_at) VALUES'// &
+            ' (?1, ?2, '//NOW//');', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, name, stat)
+        call stmt_bind_text(st, 2, hash, stat)
+        stat = stmt_step(st)
+        if (stat == SQLITE_DONE) stat = SQLITE_OK
+        call stmt_finalize(st)
+    end subroutine migration_record
 
     function store_schema_version(db) result(version)
         type(db_t), intent(in) :: db

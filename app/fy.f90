@@ -218,9 +218,10 @@ contains
             write (error_unit, '(a)') 'fy: '//data//' is not initialized; run fy serve --init'
             call quit(1)
         end if
-        call store_open(data//'/fortyard.db', db, stat)
+        call store_open(data//'/fortyard.db', db, stat, text)
         if (stat /= 0) then
-            write (error_unit, '(a)') 'fy: database: '//db_errmsg(db)
+            if (len(text) == 0) text = db_errmsg(db)
+            write (error_unit, '(a)') 'fy: database: '//text
             call quit(1)
         end if
         if (flag('--init')) then
