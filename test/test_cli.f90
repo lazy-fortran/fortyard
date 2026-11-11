@@ -108,7 +108,7 @@ program test_cli
     call check(stat == 0 .and. index(out, '{"repo":"demo","days":30,') == 1 .and. &
         index(out, '"landed":1,') > 0, 'fy stats REPO --days N --json prints the answer: '//out)
     call run('cd '//work//' && '//env//fy//' board --stats --days 1')
-    call check(stat == 0 .and. index(out, 'Queue numbers · demo · 1 days') == 1 .and. &
+    call check(stat == 0 .and. index(out, 'Queue numbers · demo · 1 day'//new_line('a')) == 1 .and. &
         index(out, ' landed          1   ') > 0, &
         'fy board --stats prints those of the checkout''s repository: '//out)
     call run(env//fy//' stats --days 5')

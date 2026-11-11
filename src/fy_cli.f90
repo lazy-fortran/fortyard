@@ -147,12 +147,18 @@ contains
         !! The queue numbers of GET /api/v1/stats, one line per measure the
         !! answer has; a measure it lacks has no line.
         character(len=*), intent(in) :: body
-        character(len=:), allocatable :: text, repo, line, field
+        character(len=:), allocatable :: text, repo, line, field, days
         character(len=1), parameter :: NL = new_line('a')
 
         repo = cli_field(body, 'repo')
         if (len(repo) == 0) repo = 'all repositories'
-        text = 'Queue numbers · '//repo//' · '//cli_field(body, 'days')//' days'//NL
+        days = cli_field(body, 'days')
+        if (days == '1') then
+            days = '1 day'
+        else
+            days = days//' days'
+        end if
+        text = 'Queue numbers · '//repo//' · '//days//NL
         if (.not. has('landings_per_hour')) then
             text = text//'No landings in this window.'//NL
         else
