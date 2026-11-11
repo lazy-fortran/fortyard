@@ -60,7 +60,10 @@ working tree on the loopback address and `scripts/dev-down.sh` stops it.
 - [ ] Account deactivation and token revocation when Keycloak disables a user.
 - [ ] restic backup of the database and repositories, and the scheduled restore
       test; backup target to be decided.
-- [ ] Runtime bounds checks kept on in release builds of the request parser.
+- [x] Runtime bounds checks kept on in release builds of the request parser:
+      the parsing modules are a package of their own (`parser/`) whose flags
+      keep `-fcheck=bounds` in every profile; malformed and truncated requests
+      are tested.
 - [x] A worker that dies, for example on a Fortran runtime error, loses only
       its own requests; the supervisor replaces it.
 
@@ -108,7 +111,10 @@ In order:
       authentication, streamed in both directions; repositories are mirrors or
       primary (`fy repo create`, `fy repo mode`); pushes need the admin scope
       until roles exist. SSH later.
-- [ ] Size limit and repository checks on receive; same checks in `fy push`.
+- [x] Size limit on receive: a push that brings a file over 1 MiB (or over the
+      bytes in `.fortyard/size-limit`) outside `.fortyard/allow-large` is
+      refused and names the file; `fy push` and `fy land` check before sending.
+      Format and the same size limit are checked again at landing.
 - [x] Changes, minimal: a push to a branch other than `main` and `wip/...`
       opens or updates a change (title and description from its commits,
       versions matched by `Change-Id` or branch, comments, interdiff); landing
@@ -141,8 +147,13 @@ In order:
 - [x] `fy` covers the daily work: `fy land` pushes, lands and follows a
       branch; `fy jobs`, `fy job`, `fy landings` print tables and logs;
       `fy login` stores a proxy; `fy git-credential` serves plain git.
-- [ ] `fy mcp` grows with each step (changes, land, queue status).
-- [ ] Audit log (append-only, hash-chained) from the first landing on.
+- [ ] `fy mcp` grows with each step. Done: one tool per operation with an input
+      schema for repositories, changes, issues, landing a branch, jobs and
+      landings. Open: the tools of the MP steps, until MP19.
+- [x] Audit log (append-only, hash-chained): landings, tokens, repositories,
+      releases and sign-ins are recorded; `fy audit list`, `fy audit verify`
+      and `/api/v1/audit` (admin). Open: publishing the newest hash daily
+      outside the instance ([Workflow](doc/workflow.md#audit)).
 
 ### M4a Namespaces
 
@@ -392,10 +403,12 @@ steps, tool calls, tokens and metered compute and never relies on measured
 model speed. Items that also appear in milestones above are pulled forward;
 the others are new.
 
-- [ ] S1 Policy settings per repository: tests before landing (full suite,
-      affected cases within a budget, none), review before or after landing,
-      bisection and repair on or off, batch size, limit on unreviewed
-      changes. Defaults keep today's behaviour.
+- [x] S1 Policy settings per repository (`fy repo policy NAME [KEY=VALUE ...]`):
+      tests before landing (`full`, `none`; `affected` is stored and behaves as
+      `full` until results per case exist, #62), review before or after
+      landing, bisection on or off, batch size, limit on unreviewed changes.
+      Defaults keep the behaviour. Open: reverts and fixes of flagged changes
+      are not yet exempt from the limit.
 - [ ] S2 `fy runner` with heartbeats and per-case limits (M3); the lease of a
       check is MP4. Done:
       remote runners on build hosts (HTTPS through curl, a mirror and a kept
