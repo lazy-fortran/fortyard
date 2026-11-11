@@ -173,7 +173,10 @@ In order:
       transcripts linked to outcomes. See [Workflow](doc/workflow.md).
 - [x] First depth of review, without a sandbox: a model behind an
       OpenAI-compatible API (`FY_REVIEW_URL`, `FY_REVIEW_MODEL`,
-      `FY_REVIEW_KEY`; none: no reviews) reads the diff of each landed change;
+      `FY_REVIEW_KEY`; none: no reviews) reads the diff of each landed change
+      (tried by hand with Qwen3.8-Flash-Next on two changes of this repository:
+      it needs `FY_REVIEW_EXTRA='"enable_thinking":false'`, since with thinking
+      on it spends the whole output budget reasoning and returns no review);
       its review is a comment of the account `review-agent`, and a change it
       flags is listed for a person (`fy change list --flagged`) until one
       marks it reviewed (`fy change reviewed N`). `fy change review N` asks

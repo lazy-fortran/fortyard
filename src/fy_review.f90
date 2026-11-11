@@ -3,8 +3,8 @@ module fy_review
     !! and writes a review, which fortyard posts as a comment of the account
     !! `review-agent`, and says whether a person should look at the change.
     !! The model runs behind an OpenAI-compatible chat API (FY_REVIEW_URL,
-    !! FY_REVIEW_MODEL, optionally FY_REVIEW_KEY); without FY_REVIEW_URL there
-    !! are no reviews. The model sees the diff only and runs nothing, and its
+    !! FY_REVIEW_MODEL, optionally FY_REVIEW_KEY, FY_REVIEW_MAX_TOKENS and
+    !! FY_REVIEW_EXTRA); without FY_REVIEW_URL there are no reviews. The model sees the diff only and runs nothing, and its
     !! answer is published only in the form asked for.
     use, intrinsic :: iso_fortran_env, only: error_unit, int64
     use fx_json_build, only: json_escape_string
@@ -192,7 +192,7 @@ contains
         character(len=*), intent(in) :: prompt
         character(len=:), allocatable, intent(out) :: answer, model
         integer, intent(out) :: stat
-        character(len=:), allocatable :: url, key, curl, conf, payload, reply
+        character(len=:), allocatable :: url, key, curl, conf, payload, reply, budget, extra
         character(len=65536) :: buf
         character(len=16) :: argv(3)
         character(len=40) :: env(1)
@@ -205,9 +205,18 @@ contains
         model = env_value('FY_REVIEW_MODEL')
         key = env_value('FY_REVIEW_KEY')
         if (len(model) == 0) model = 'default'
+        ! Output tokens, the model's reasoning included: a reasoning model that
+        ! runs out of them returns no review at all.
+        budget = env_value('FY_REVIEW_MAX_TOKENS')
+        if (len(budget) == 0 .or. verify(budget, '0123456789') > 0) budget = '16384'
+        ! Further members of the request, as JSON text, for what a model needs
+        ! beyond the common API (for example "enable_thinking":false).
+        extra = env_value('FY_REVIEW_EXTRA')
+        if (len(extra) > 0) extra = ','//extra
         curl = proc_find('curl')
         if (len(url) == 0 .or. len(curl) == 0) return
-        payload = '{"model":"'//json_escape_string(model)//'","temperature":0,"messages":['// &
+        payload = '{"model":"'//json_escape_string(model)//'","max_tokens":'//budget//extra// &
+            ',"messages":['// &
             '{"role":"system","content":"'//json_escape_string(INSTRUCTIONS)//'"},'// &
             '{"role":"user","content":"'//json_escape_string(prompt)//'"}]}'
         conf = 'url = "'//quoted(url//'/chat/completions')//'"'//NL//'max-time = 1800'//NL// &
