@@ -22,7 +22,7 @@ module fy_store
     public :: store_check_add, store_check_claim, store_check_finish, store_check_get, &
         store_check_release
 
-    integer, parameter, public :: SCHEMA_VERSION = 13
+    integer, parameter, public :: SCHEMA_VERSION = 14
 
     type :: token_identity_t
         logical :: found = .false.
@@ -287,6 +287,28 @@ contains
                 'ALTER TABLE changes ADD COLUMN flag_reason TEXT;'// &
                 "UPDATE changes SET review_state = 'none' WHERE state <> 'open';"// &
                 'DELETE FROM schema_version; INSERT INTO schema_version VALUES (13);'// &
+                'COMMIT;', stat)
+            if (stat /= SQLITE_OK) then
+                call db_exec(db, 'ROLLBACK;', version)
+                return
+            end if
+        end if
+        if (store_schema_version(db) < 14) then
+            ! The audit log (fy_audit): each row carries the hash of the row
+            ! before it. The triggers keep fortyard itself from changing a row;
+            ! whoever removes them is found by the chain. audit_head names the
+            ! newest row, which has no successor to give its removal away.
+            call db_exec(db, 'BEGIN;'// &
+                'CREATE TABLE audit (id INTEGER PRIMARY KEY, at TEXT NOT NULL,'// &
+                ' actor TEXT NOT NULL, event TEXT NOT NULL, subject TEXT NOT NULL,'// &
+                ' detail TEXT NOT NULL, prev TEXT NOT NULL, hash TEXT NOT NULL);'// &
+                'CREATE TRIGGER audit_keeps_rows BEFORE DELETE ON audit BEGIN'// &
+                " SELECT raise(ABORT, 'the audit log is append-only'); END;"// &
+                'CREATE TRIGGER audit_keeps_content BEFORE UPDATE ON audit BEGIN'// &
+                " SELECT raise(ABORT, 'the audit log is append-only'); END;"// &
+                'CREATE TABLE audit_head (one INTEGER PRIMARY KEY CHECK (one = 1),'// &
+                ' id INTEGER NOT NULL, hash TEXT NOT NULL);'// &
+                'DELETE FROM schema_version; INSERT INTO schema_version VALUES (14);'// &
                 'COMMIT;', stat)
             if (stat /= SQLITE_OK) then
                 call db_exec(db, 'ROLLBACK;', version)

@@ -49,12 +49,19 @@ module fy_sqlite
             integer(c_int) :: rc
         end function sqlite3_exec
 
-        function sqlite3_busy_timeout(db, ms) bind(C) result(rc)
-            import :: c_ptr, c_int
+        function sqlite3_busy_handler(db, handler, arg) bind(C) result(rc)
+            import :: c_ptr, c_funptr, c_int
             type(c_ptr), value :: db
-            integer(c_int), value :: ms
+            type(c_funptr), value :: handler
+            type(c_ptr), value :: arg
             integer(c_int) :: rc
-        end function sqlite3_busy_timeout
+        end function sqlite3_busy_handler
+
+        function c_usleep(usec) bind(C, name='usleep') result(rc)
+            import :: c_int
+            integer(c_int), value :: usec
+            integer(c_int) :: rc
+        end function c_usleep
 
         function sqlite3_errmsg(db) bind(C) result(msg)
             import :: c_ptr
@@ -133,8 +140,23 @@ contains
         stat = sqlite3_open_v2(path//c_null_char, db%handle, &
             ior(OPEN_READWRITE, OPEN_CREATE), c_null_ptr)
         if (stat /= SQLITE_OK) return
-        stat = sqlite3_busy_timeout(db%handle, 5000_c_int)
+        stat = sqlite3_busy_handler(db%handle, c_funloc(busy_wait), c_null_ptr)
     end subroutine db_open
+
+    function busy_wait(arg, tries) bind(C) result(again)
+        !! Asks for a locked database every millisecond for about five
+        !! seconds. SQLite's own timeout ends up asking every 100 ms, and a
+        !! process that waits like that loses the lock again and again to
+        !! one that writes without pause, until its time is up.
+        type(c_ptr), value :: arg
+        integer(c_int), value :: tries
+        integer(c_int) :: again, rc
+
+        again = 0
+        if (tries >= 5000) return
+        rc = c_usleep(1000_c_int)
+        again = 1
+    end function busy_wait
 
     subroutine db_close(db)
         type(db_t), intent(inout) :: db

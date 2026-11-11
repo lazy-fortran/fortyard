@@ -11,6 +11,7 @@ module fy_server
     use fy_review, only: review_enabled, reviewer_main
     use fy_land, only: land_branch, land_candidate, land_hook_install, land_check
     use fy_issue, only: issue_api
+    use fy_audit, only: audit_t, audit_append, audit_list, audit_verify, audit_json
     use fy_verify, only: verifier_main, verify_request
     use fy_change, only: change_t, change_sync, change_by_id, change_by_branch, change_landed, &
         change_next_number, change_api, change_message
@@ -341,6 +342,7 @@ contains
             if (mode /= 'primary') then
                 call store_landing_finish(db, l%id, 'failed', '', &
                     'Only a primary repository lands branches.')
+                call audit_landing(l, .false., '')
                 call events_notify('jobs')
                 cycle
             end if
@@ -502,11 +504,26 @@ contains
             else
                 call store_landing_finish(db, l%id, 'failed', '', log)
             end if
+            call audit_landing(l, ok, commit)
             call events_notify('jobs')
             write (error_unit, '(a)') 'fy: landing '//itoa(int(l%id))//' of '//l%repo//' '// &
                 l%branch//merge(' landed', ' failed', ok)
             flush (error_unit)
         end subroutine finish
+
+        subroutine audit_landing(l, ok, commit)
+            type(landing_t), intent(in) :: l
+            logical, intent(in) :: ok
+            character(len=*), intent(in) :: commit
+
+            if (ok) then
+                call audit_append(db, l%account, 'landing.landed', l%repo, 'landing '// &
+                    itoa(int(l%id))//' of '//l%branch//' as '//commit)
+            else
+                call audit_append(db, l%account, 'landing.failed', l%repo, 'landing '// &
+                    itoa(int(l%id))//' of '//l%branch)
+            end if
+        end subroutine audit_landing
 
         function tmp_dir() result(s)
             character(len=:), allocatable :: s
@@ -590,6 +607,12 @@ contains
                 if (stat /= 0) then
                     call fail(res, 409, 'repository exists')
                     return
+                end if
+                if (len(upstream) == 0) then
+                    call audit_append(db, who%account, 'repo.created', name, 'primary')
+                else
+                    call audit_append(db, who%account, 'repo.created', name, &
+                        'mirror of '//upstream)
                 end if
                 res%code = 201
                 res%body = '{"name":"'//name//'"}'
@@ -951,6 +974,7 @@ contains
                 call fail(res, 404, 'no such repository')
                 return
             end if
+            call audit_append(db, who%account, 'repo.mode', target, mode)
             if (mode == 'primary') call land_hook_install(repo_path(target), status)
             res%body = '{"name":"'//json_escape_string(target)//'","mode":"'//mode//'"}'
         end subroutine set_mode
@@ -1175,6 +1199,8 @@ contains
                     else
                         call execute_command_line('mv -f '''//part//''' '''//dir// &
                             '/release.tar''')
+                        call audit_append(db, who%account, 'release.uploaded', &
+                            repo//' '//version, 'sha256 '//hex)
                         res%body = '{"version":"'//version//'","sha256":"'//hex// &
                             '","state":"ready"}'
                     end if
@@ -1355,6 +1381,8 @@ contains
                 call checks_route(req, db, res)
             else if (req%path == '/api/v1/jobs' .or. index(req%path, '/api/v1/jobs/') == 1) then
                 call jobs_route(req, db, res)
+            else if (req%path == '/api/v1/audit' .or. req%path == '/api/v1/audit/verify') then
+                call audit_route(req, db, res)
             else if (req%path == '/api/v1/repos' .or. index(req%path, '/api/v1/repos/') == 1) then
                 call repos_route(req, db, res)
             else if (index(req%path, '/api/v1/tokens/') == 1) then
@@ -1577,6 +1605,66 @@ contains
 
     end subroutine jobs_route
 
+    subroutine audit_route(req, db, res)
+        !! GET /api/v1/audit[?before=ID][&limit=N]: the audit log, newest entry
+        !! first, at most N (50, up to 200) entries older than entry ID; "next"
+        !! is the "before" of the following page, or 0 after the oldest entry.
+        !! GET /api/v1/audit/verify: recomputes the chain; "broken" is the first
+        !! entry that does not fit, or 0. Both need the admin scope.
+        type(http_request_t), intent(in) :: req
+        type(db_t), intent(in) :: db
+        type(response_t), intent(inout) :: res
+        type(token_identity_t) :: who
+        type(audit_t), allocatable :: rows(:)
+        character(len=:), allocatable :: text, reason, head
+        character(len=24) :: num, total
+        integer(int64) :: before, next, count, broken
+        integer :: limit, ios, k
+
+        if (.not. authenticated(req, db, who, res)) return
+        if (.not. method_is(req, 'GET', res)) return
+        if (index(' '//who%scopes//' ', ' admin ') == 0) then
+            call fail(res, 403, 'the audit log needs the admin scope')
+            return
+        end if
+        if (req%path == '/api/v1/audit/verify') then
+            call audit_verify(db, count, broken, reason, head)
+            write (total, '(i0)') count
+            write (num, '(i0)') broken
+            res%body = '{"intact":'//json_bool(broken == 0)//',"checked":'//trim(total)// &
+                ',"broken":'//trim(num)//',"reason":"'//json_escape_string(reason)// &
+                '","head":"'//head//'"}'
+            return
+        end if
+        before = 0
+        limit = 50
+        ios = 0
+        text = http_query_param(req%query, 'before')
+        if (len(text) > 0) then
+            ios = 1
+            if (len(text) < 19 .and. verify(text, '0123456789') == 0) &
+                read (text, *, iostat=ios) before
+        end if
+        text = http_query_param(req%query, 'limit')
+        if (len(text) > 0 .and. ios == 0) then
+            ios = 1
+            if (len(text) < 10 .and. verify(text, '0123456789') == 0) &
+                read (text, *, iostat=ios) limit
+        end if
+        if (ios /= 0 .or. limit < 1 .or. limit > 200) then
+            call fail(res, 400, 'before is an entry number and limit is 1 to 200')
+            return
+        end if
+        call audit_list(db, before, limit, rows, next)
+        res%body = '{"entries":['
+        do k = 1, size(rows)
+            if (k > 1) res%body = res%body//','
+            res%body = res%body//audit_json(rows(k))
+        end do
+        write (num, '(i0)') next
+        res%body = res%body//'],"next":'//trim(num)//'}'
+    end subroutine audit_route
+
     logical function method_is(req, method, res)
         type(http_request_t), intent(in) :: req
         character(len=*), intent(in) :: method
@@ -1670,6 +1758,7 @@ contains
             call fail(res, 500, 'token not created')
             return
         end if
+        call audit_append(db, who%account, 'token.created', name, 'scopes '//scopes)
         res%code = 201
         res%body = '{"token":"'//token//'","name":"'//json_escape_string(name)// &
             '","scopes":"'//json_escape_string(scopes)//'"}'
@@ -1710,6 +1799,7 @@ contains
         type(token_identity_t), intent(in) :: who
         integer(int64), intent(in) :: id
         type(response_t), intent(inout) :: res
+        character(len=24) :: num
         logical :: found
 
         call store_token_revoke(db, who%account_id, id, found)
@@ -1717,6 +1807,9 @@ contains
             call fail(res, 404, 'no such token')
             return
         end if
+        write (num, '(i0)') id
+        call audit_append(db, who%account, 'token.revoked', '#'//trim(num), &
+            'by token '//who%token_name)
         res%body = '{"revoked":true}'
     end subroutine revoke_token
 
@@ -1748,6 +1841,7 @@ contains
             call fail(res, 500, 'session not created')
             return
         end if
+        call audit_append(db, who%account, 'sign-in', 'session', 'with token '//who%token_name)
         res%headers = 'Set-Cookie: '//SESSION_COOKIE//'='//session// &
             '; Path='//cookie_path()//'; HttpOnly; SameSite=Strict'//secure()// &
             '; Max-Age='//SESSION_MAX_AGE//CRLF
@@ -1759,9 +1853,14 @@ contains
         type(db_t), intent(in) :: db
         type(response_t), intent(inout) :: res
         character(len=:), allocatable :: token
+        type(token_identity_t) :: who
 
         token = http_cookie(req, SESSION_COOKIE)
-        if (len(token) > 0) call store_token_revoke_hash(db, token)
+        if (len(token) > 0) then
+            call store_token_lookup(db, token, who)
+            call store_token_revoke_hash(db, token)
+            if (who%found) call audit_append(db, who%account, 'sign-out', 'session', '')
+        end if
         res%headers = 'Set-Cookie: '//SESSION_COOKIE// &
             '=; Path='//cookie_path()//'; HttpOnly; SameSite=Strict'//secure()//'; Max-Age=0'//CRLF
         res%body = '{"closed":true}'
@@ -1838,6 +1937,8 @@ contains
         if (.not. oidc_is_admin(oidc, claims%sub)) then
             write (error_unit, '(a)') 'fy: sign-in refused for '//claims%username// &
                 ' ('//claims%sub//')'
+            call audit_append(db, claims%username, 'sign-in.refused', 'session', &
+                'subject '//claims%sub//' of the provider has no access')
             call login_page(res, 403, 'You are signed in as '//claims%username// &
                 ', but this account has no access to fortyard yet. '// &
                 'Please ask an administrator.')
@@ -1854,6 +1955,8 @@ contains
             call login_page(res, 500, 'The session could not be created.')
             return
         end if
+        call audit_append(db, 'admin', 'sign-in', 'session', 'as '//claims%username// &
+            ' ('//claims%sub//') through the provider')
         ! A page, not a redirect: the browser came from the provider, and a
         ! redirect would still count as cross-site and withhold the Strict cookie.
         res%code = 200

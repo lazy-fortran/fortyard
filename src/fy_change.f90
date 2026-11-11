@@ -8,6 +8,7 @@ module fy_change
     use, intrinsic :: iso_fortran_env, only: int64
     use fx_json_build, only: json_escape_string
     use fx_json_parse, only: json_extract_string
+    use fy_audit, only: audit_append
     use fy_events, only: events_notify
     use fy_proc, only: proc_run
     use fy_sqlite, only: db_t, stmt_t, db_prepare, db_exec, stmt_bind_text, &
@@ -562,6 +563,13 @@ contains
                 end if
                 call exec_bind(db, 'UPDATE changes SET state = ?2, updated_at = '//NOW// &
                     ' WHERE id = ?1;', c%id, s)
+                if (s == 'closed' .and. c%state /= s) then
+                    call audit_append(db, account, 'change.closed', repo//'#'//itoa(c%number), &
+                        c%title)
+                else if (c%state /= s) then
+                    call audit_append(db, account, 'change.reopened', &
+                        repo//'#'//itoa(c%number), c%title)
+                end if
             end if
             call change_get(db, repo, c%number, c, ok)
             answer = change_json(db, c)

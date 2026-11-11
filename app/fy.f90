@@ -1,6 +1,7 @@
 program fy
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit, int64
     use fx_json_build, only: json_escape_string
+    use fy_audit, only: audit_append
     use fy_build_info, only: FY_VERSION, FY_COMMIT
     use fy_runner, only: runner_main
     use fy_mcp, only: mcp_main
@@ -50,6 +51,8 @@ program fy
         call cmd_change()
     case ('issue')
         call cmd_issue()
+    case ('audit')
+        call cmd_audit()
     case ('git-credential')
         call cmd_git_credential()
     case ('mcp')
@@ -119,6 +122,11 @@ contains
             '                      verify main''s newest commit with the full suite', &
             '  job ID [--wait]     a job''s state and log; --wait follows it', &
             '                      (--json: the answer of the API instead of text)', &
+            '  audit list [--before ID] [--limit N] [--json]', &
+            '                      the audit log, newest entry first (admin)', &
+            '  audit verify [--json]', &
+            '                      recompute the hash chain of the audit log and name', &
+            '                      the first entry that was altered or removed (admin)', &
             '  git-credential get  git credential helper for the stored login:', &
             '                      git config --global credential.SERVER.helper', &
             '                      ''!fy git-credential''', &
@@ -205,6 +213,7 @@ contains
         if (flag('--init')) then
             call store_bootstrap(db, token, stat)
             if (stat /= 0) error stop 'fy: bootstrap failed'
+            call audit_append(db, 'admin', 'token.created', 'bootstrap', 'scopes admin')
             write (output_unit, '(a)') 'Administrator token (shown once, store it now):', token
             return
         end if
@@ -914,6 +923,50 @@ contains
             call quit(2)
         end select
     end subroutine cmd_issue
+
+    subroutine cmd_audit()
+        !! fy audit list [--before ID] [--limit N]: the audit log, newest first.
+        !! fy audit verify: has the server recompute the chain; status 1 and
+        !! the first entry that does not fit when it is broken.
+        type(config_t) :: cfg
+        character(len=:), allocatable :: body, path
+        integer :: code, stat
+
+        call config_load(cfg)
+        call require_login(cfg)
+        select case (positional(1))
+        case ('list')
+            path = '/api/v1/audit?limit='//option('--limit', '50')
+            if (len(option('--before', '')) > 0) path = path//'&before='//option('--before', '')
+            call client_request(cfg%server, 'GET', path, cfg%token, '', code, body, stat)
+            if (stat /= 0 .or. code /= 200 .or. flag('--json')) then
+                call report(code, body, stat)
+                return
+            end if
+            write (output_unit, '(a)', advance='no') cli_table(body, 'entries', &
+                [character(len=8) :: 'id', 'at', 'actor', 'event', 'subject', 'detail'])
+            if (cli_field(body, 'next') /= '0') write (output_unit, '(a)') &
+                'older entries: fy audit list --before '//cli_field(body, 'next')
+        case ('verify')
+            call client_request(cfg%server, 'GET', '/api/v1/audit/verify', cfg%token, '', code, &
+                body, stat)
+            if (stat /= 0 .or. code /= 200) call report(code, body, stat)
+            if (flag('--json')) then
+                write (output_unit, '(a)') body
+            else if (cli_field(body, 'intact') == 'true') then
+                write (output_unit, '(a)') 'audit log intact: '//cli_field(body, 'checked')// &
+                    ' entries, newest hash '//cli_field(body, 'head')
+            else
+                write (output_unit, '(a)') 'audit log broken at entry '// &
+                    cli_field(body, 'broken')//': '//cli_field(body, 'reason')
+            end if
+            if (cli_field(body, 'intact') /= 'true') call quit(1)
+        case default
+            write (error_unit, '(a)') 'fy: usage: fy audit list [--before ID] [--limit N] [--json] |'// &
+                ' verify [--json]'
+            call quit(2)
+        end select
+    end subroutine cmd_audit
 
     subroutine quit(status)
         !! Ends fy with `status` after its output, without a runtime message.
