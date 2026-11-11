@@ -5,6 +5,19 @@ Delivery order for [DESIGN.md](DESIGN.md),
 behaviour is covered by tests that run with `fo test` and it runs on the
 development instance.
 
+## Open work
+
+What is started or decided and not finished, each with its issue:
+
+- #60 Enable the review agent in production (server configuration).
+- #61 Shared build cache: finish and land fo's client.
+- #62 Eventual correctness per test case.
+- #63 Two changes or issues created at the same moment can get the same
+  number.
+- #64 Web image build time after an LFortran pin change is unmeasured.
+- Changes #45 (test that a new release takes over without refusing
+  requests) and #47 (remote runner over HTTPS) are open and undecided.
+
 ## Development instance
 
 One long-running instance inside the WireGuard network follows `main`: a
@@ -116,7 +129,8 @@ In order:
       every fpm test run again), after landing checks; a failure after a pass
       is bisected over main's commits, reported as an issue with the log and
       on the culprit's change, and closed when main passes again; `fy verify`.
-      Case level (keys from fo's plan, staleness, flaky detection) follows.
+      Case level (keys from fo's plan, staleness, flaky detection) follows
+      (#62).
 - [x] Batched merge queue (landings queued behind a running one share a
       candidate and its check; a failing candidate is split), `Change-Id`
       trailers, landing from a change page.
@@ -180,7 +194,8 @@ In order:
       its review is a comment of the account `review-agent`, and a change it
       flags is listed for a person (`fy change list --flagged`) until one
       marks it reviewed (`fy change reviewed N`). `fy change review N` asks
-      for a review of any change.
+      for a review of any change. Off in production until the server is
+      configured (#60).
 
 ### M5 Web views of repositories
 
@@ -200,7 +215,8 @@ elsewhere.
 
 ## Stage B: hosted instance
 
-- M6 Shared build cache and the fo client.
+- M6 Shared build cache and the fo client (the server side is live; fo's
+  client is an unfinished draft, #61).
 - M6a Downstream consumers: dependency graph across repositories, consumer
   cases in the pool keyed by dependency snapshot, classified outcomes
   (regression only against a passing baseline), libneo's registry imported
