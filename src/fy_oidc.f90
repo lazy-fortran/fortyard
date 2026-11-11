@@ -1,19 +1,46 @@
 module fy_oidc
     !! Sign-in through an OpenID Connect provider (Keycloak): authorization code
     !! flow with PKCE, the code exchanged by the server with its client secret.
-    use, intrinsic :: iso_c_binding, only: c_long
-    use, intrinsic :: iso_fortran_env, only: int8, int64
-    use fx_hash, only: sha256_string
-    use fx_json_parse, only: json_extract_string, json_extract_int, json_parser_t, &
-        json_event_t, json_parser_init, json_parser_next, JSON_KEY, JSON_STRING, &
-        JSON_END_OF_INPUT, JSON_ERROR, JSON_ARRAY_END
-    use fy_proc, only: proc_spawn, proc_find, proc_exit_status, fd_read, fd_write_all, &
-        fd_close
+    use, intrinsic :: iso_c_binding, only: &
+        c_long
+    use, intrinsic :: iso_fortran_env, only: &
+        int64, &
+        int8
+    use fx_hash, only: &
+        sha256_string
+    use fx_json_parse, only: &
+        JSON_ARRAY_END, &
+        JSON_END_OF_INPUT, &
+        JSON_ERROR, &
+        JSON_KEY, &
+        JSON_STRING, &
+        json_event_t, &
+        json_extract_int, &
+        json_extract_string, &
+        json_parser_init, &
+        json_parser_next, &
+        json_parser_t
+    use fy_proc, only: &
+        fd_close, &
+        fd_read, &
+        fd_write_all, &
+        proc_exit_status, &
+        proc_find, &
+        proc_spawn
     implicit none
     private
-    public :: oidc_config_t, oidc_load, oidc_authorize_url, oidc_exchange, oidc_check
-    public :: oidc_claims_t, pkce_challenge, base64url_encode, base64url_decode
-    public :: oidc_is_admin, oidc_value_ok
+    public :: &
+        base64url_decode, &
+        base64url_encode, &
+        oidc_authorize_url, &
+        oidc_check, &
+        oidc_claims_t, &
+        oidc_config_t, &
+        oidc_exchange, &
+        oidc_is_admin, &
+        oidc_load, &
+        oidc_value_ok, &
+        pkce_challenge
 
     type :: oidc_config_t
         logical :: enabled = .false.

@@ -1,8 +1,14 @@
 program test_mirror
     !! A server with a data directory mirrors a repository on its own and
     !! answers the repository API from the mirror.
-    use fy_posix, only: tcp_listen, tcp_connect, sock_send_all, sock_recv, sock_close, &
-        sock_bound_port, sock_set_timeouts
+    use fy_posix, only: &
+        sock_bound_port, &
+        sock_close, &
+        sock_recv, &
+        sock_send_all, &
+        sock_set_timeouts, &
+        tcp_connect, &
+        tcp_listen
     use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, SIGTERM
     use fy_server, only: server_supervise, server_set_data_dir, server_set_mirror_interval
     use fy_sqlite, only: db_t, db_close

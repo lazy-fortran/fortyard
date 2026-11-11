@@ -13,20 +13,57 @@ module fy_policy
     !!   batch             1..BATCH_MAX             most landings in one candidate
     !!   unreviewed_limit  0 (no limit) or N        nothing is queued to land
     !!                     while N landed changes wait for a review
-    use, intrinsic :: iso_fortran_env, only: int64
-    use fx_json_build, only: json_escape_string
-    use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init_strict, &
-        json_parser_next, JSON_OBJECT_START, JSON_OBJECT_END, JSON_ARRAY_START, JSON_ARRAY_END, &
-        JSON_KEY, JSON_STRING, JSON_INTEGER, JSON_ERROR, JSON_END_OF_INPUT
-    use fy_change, only: change_t, change_by_id, change_last_version
-    use fy_store, only: store_landing_add
-    use fy_sqlite, only: db_t, stmt_t, db_prepare, db_exec, stmt_bind_text, stmt_bind_int, stmt_step, &
-        stmt_text, stmt_int, stmt_finalize, SQLITE_OK, SQLITE_ROW
+    use, intrinsic :: iso_fortran_env, only: &
+        int64
+    use fx_json_build, only: &
+        json_escape_string
+    use fx_json_parse, only: &
+        JSON_ARRAY_END, &
+        JSON_ARRAY_START, &
+        JSON_END_OF_INPUT, &
+        JSON_ERROR, &
+        JSON_INTEGER, &
+        JSON_KEY, &
+        JSON_OBJECT_END, &
+        JSON_OBJECT_START, &
+        JSON_STRING, &
+        json_event_t, &
+        json_parser_init_strict, &
+        json_parser_next, &
+        json_parser_t
+    use fy_change, only: &
+        change_by_id, &
+        change_last_version, &
+        change_t
+    use fy_sqlite, only: &
+        SQLITE_OK, &
+        SQLITE_ROW, &
+        db_exec, &
+        db_prepare, &
+        db_t, &
+        stmt_bind_int, &
+        stmt_bind_text, &
+        stmt_finalize, &
+        stmt_int, &
+        stmt_step, &
+        stmt_t, &
+        stmt_text
+    use fy_store, only: &
+        store_landing_add
     implicit none
     private
 
-    public :: policy_t, policy_get, policy_put, policy_set, policy_json, policy_from_json, &
-        policy_reviewed, policy_unreviewed, policy_refusal, policy_queue
+    public :: &
+        policy_from_json, &
+        policy_get, &
+        policy_json, &
+        policy_put, &
+        policy_queue, &
+        policy_refusal, &
+        policy_reviewed, &
+        policy_set, &
+        policy_t, &
+        policy_unreviewed
 
     integer, parameter, public :: BATCH_MAX = 64
     character(len=*), parameter, public :: POLICY_KEYS = &

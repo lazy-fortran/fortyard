@@ -5,9 +5,16 @@ module fy_posix
     implicit none
     private
 
-    public :: tcp_listen, tcp_accept, tcp_connect, sock_close
-    public :: sock_send_all, sock_recv, sock_set_timeouts, sock_bound_port
-    public :: activated_listen_fd
+    public :: &
+        activated_listen_fd, &
+        sock_bound_port, &
+        sock_close, &
+        sock_recv, &
+        sock_send_all, &
+        sock_set_timeouts, &
+        tcp_accept, &
+        tcp_connect, &
+        tcp_listen
 
     integer(c_int), parameter :: AF_INET = 2, SOCK_STREAM = 1
     integer(c_int), parameter :: SOL_SOCKET = 1, SO_REUSEADDR = 2

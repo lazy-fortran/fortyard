@@ -2,10 +2,22 @@ program test_worker_pool
     !! The server in a forked supervisor with 2 worker processes of 2 threads:
     !! idle connections must not block other clients, and killed workers must
     !! be replaced without the service going away.
-    use fy_posix, only: tcp_listen, tcp_connect, sock_send_all, sock_recv, sock_close, &
-        sock_bound_port, sock_set_timeouts
-    use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, &
-        SIGKILL, SIGTERM
+    use fy_posix, only: &
+        sock_bound_port, &
+        sock_close, &
+        sock_recv, &
+        sock_send_all, &
+        sock_set_timeouts, &
+        tcp_connect, &
+        tcp_listen
+    use fy_proc, only: &
+        SIGKILL, &
+        SIGTERM, &
+        proc_exit, &
+        proc_fork, &
+        proc_kill, &
+        proc_sleep_ms, &
+        proc_wait
     use fy_server, only: server_supervise
     use fy_sqlite, only: db_t, db_close
     use fy_store, only: store_open

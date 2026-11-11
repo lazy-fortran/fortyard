@@ -3,15 +3,36 @@ module fy_audit
     !! an append-only table. Every row carries the hash of the row before it
     !! and the SHA-256 of that hash with its own content, so a row that was
     !! altered or removed later breaks the chain from there on.
-    use, intrinsic :: iso_fortran_env, only: error_unit, int64
-    use fx_hash, only: sha256_string
-    use fx_json_build, only: json_escape_string
-    use fy_sqlite, only: db_t, stmt_t, db_exec, db_prepare, stmt_bind_text, stmt_bind_int, &
-        stmt_step, stmt_text, stmt_int, stmt_finalize, SQLITE_OK, SQLITE_ROW, SQLITE_DONE
+    use, intrinsic :: iso_fortran_env, only: &
+        error_unit, &
+        int64
+    use fx_hash, only: &
+        sha256_string
+    use fx_json_build, only: &
+        json_escape_string
+    use fy_sqlite, only: &
+        SQLITE_DONE, &
+        SQLITE_OK, &
+        SQLITE_ROW, &
+        db_exec, &
+        db_prepare, &
+        db_t, &
+        stmt_bind_int, &
+        stmt_bind_text, &
+        stmt_finalize, &
+        stmt_int, &
+        stmt_step, &
+        stmt_t, &
+        stmt_text
     implicit none
     private
 
-    public :: audit_t, audit_append, audit_list, audit_verify, audit_json
+    public :: &
+        audit_append, &
+        audit_json, &
+        audit_list, &
+        audit_t, &
+        audit_verify
 
     !! What the first row carries as the hash of its predecessor.
     character(len=64), parameter, public :: AUDIT_GENESIS = repeat('0', 64)

@@ -4,18 +4,32 @@ module fy_route
     !! /PATH/-/tree/DIR, /PATH/-/blob/FILE, /PATH/-/commits, /PATH/-/commit/ID.
     !! The application's own pages are /, /tokens and /server; the first
     !! segments in RESERVED can never name a group or repository.
+    use fy_pages
     implicit none
     private
 
-    public :: route_t, route_parse, route_is_page, route_href, url_encode, url_decode
-    public :: go, go_take, route_set_base, at
+    public :: &
+        at, &
+        go, &
+        go_take, &
+        route_href, &
+        route_is_page, &
+        route_parse, &
+        route_set_base, &
+        route_t, &
+        url_decode, &
+        url_encode
 
-    integer, parameter, public :: R_REPOS = 1, R_TOKENS = 2, R_SERVER = 3, R_TREE = 4, &
-        R_BLOB = 5, R_COMMITS = 6, R_COMMIT = 7, R_MISSING = 8, R_JOBS = 9, R_CHANGES = 10, &
-        R_CHANGE = 11, R_ISSUES = 12, R_ISSUE = 13
-
-    character(len=7), parameter :: RESERVED(*) = [character(len=7) :: 'tokens', 'server', 'jobs', &
-        'status', 'healthz', 'api', 'app', '-']
+    !! First segments that never name a group or repository, sorted.
+    character(len=32), parameter :: RESERVED(*) = [character(len=32) :: &
+        '-', &
+        'api', &
+        'app', &
+        'healthz', &
+        'jobs', &
+        'server', &
+        'status', &
+        'tokens']
 
     type :: route_t
         integer :: kind = R_MISSING
@@ -69,11 +83,17 @@ contains
         else
             first = p(2:qpos)
         end if
-        if (first == 'tokens' .and. qpos == 0) r%kind = R_TOKENS
-        if (first == 'server' .and. qpos == 0) r%kind = R_SERVER
-        if (first == 'jobs' .and. qpos == 0) then
-            r%kind = R_JOBS
-            r%repo = url_decode(query_value(q, 'repo'))
+        ! The application's own pages, sorted by name.
+        if (qpos == 0) then
+            select case (first)
+            case ('jobs')
+                r%kind = R_JOBS
+                r%repo = url_decode(query_value(q, 'repo'))
+            case ('server')
+                r%kind = R_SERVER
+            case ('tokens')
+                r%kind = R_TOKENS
+            end select
         end if
         if (is_reserved(first)) return
 
@@ -87,27 +107,30 @@ contains
         end if
         if (len(r%repo) == 0 .or. index(r%repo, '//') > 0) return
         r%repo = url_decode(r%repo)
-        if (rest == 'tree' .or. rest == 'commits') then
-            r%kind = merge(R_TREE, R_COMMITS, rest == 'tree')
-        else if (index(rest, 'tree/') == 1) then
-            r%kind = R_TREE
-            r%path = url_decode(rest(6:))
-        else if (index(rest, 'blob/') == 1 .and. len(rest) > 5) then
+        ! The pages of a repository, sorted by name; no two match one rest.
+        if (index(rest, 'blob/') == 1 .and. len(rest) > 5) then
             r%kind = R_BLOB
             r%path = url_decode(rest(6:))
-        else if (index(rest, 'commit/') == 1 .and. len(rest) > 7) then
-            r%kind = R_COMMIT
-            r%path = url_decode(rest(8:))
         else if (rest == 'changes') then
             r%kind = R_CHANGES
         else if (index(rest, 'changes/') == 1 .and. len(rest) > 8) then
             r%kind = R_CHANGE
             r%path = rest(9:)
+        else if (index(rest, 'commit/') == 1 .and. len(rest) > 7) then
+            r%kind = R_COMMIT
+            r%path = url_decode(rest(8:))
+        else if (rest == 'commits') then
+            r%kind = R_COMMITS
         else if (rest == 'issues') then
             r%kind = R_ISSUES
         else if (index(rest, 'issues/') == 1 .and. len(rest) > 7) then
             r%kind = R_ISSUE
             r%path = rest(8:)
+        else if (rest == 'tree') then
+            r%kind = R_TREE
+        else if (index(rest, 'tree/') == 1) then
+            r%kind = R_TREE
+            r%path = url_decode(rest(6:))
         end if
     end subroutine route_parse
 
@@ -166,25 +189,25 @@ contains
         if (present(path)) sub = url_encode(path)
         href = '/'//url_encode(repo)
         select case (kind)
-        case (R_TREE)
-            if (len(sub) > 0) href = href//'/-/tree/'//sub
         case (R_BLOB)
             href = href//'/-/blob/'//sub
             if (present(plain)) then
                 if (plain) href = href//'?plain=1'
             end if
-        case (R_COMMITS)
-            href = href//'/-/commits'
-        case (R_COMMIT)
-            href = href//'/-/commit/'//sub
-        case (R_CHANGES)
-            href = href//'/-/changes'
         case (R_CHANGE)
             href = href//'/-/changes/'//sub
-        case (R_ISSUES)
-            href = href//'/-/issues'
+        case (R_CHANGES)
+            href = href//'/-/changes'
+        case (R_COMMIT)
+            href = href//'/-/commit/'//sub
+        case (R_COMMITS)
+            href = href//'/-/commits'
         case (R_ISSUE)
             href = href//'/-/issues/'//sub
+        case (R_ISSUES)
+            href = href//'/-/issues'
+        case (R_TREE)
+            if (len(sub) > 0) href = href//'/-/tree/'//sub
         end select
         href = at(href)
     end function route_href

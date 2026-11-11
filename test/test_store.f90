@@ -1,9 +1,18 @@
 program test_store
     use fy_sqlite, only: db_t, db_close, db_exec
-    use fy_store, only: store_open, store_bootstrap, store_token_lookup, &
-        store_token_create, store_schema_version, token_identity_t, SCHEMA_VERSION, &
-        store_snapshot, store_check_add, store_check_claim, store_check_finish, &
-        store_check_release
+    use fy_store, only: &
+        SCHEMA_VERSION, &
+        store_bootstrap, &
+        store_check_add, &
+        store_check_claim, &
+        store_check_finish, &
+        store_check_release, &
+        store_open, &
+        store_schema_version, &
+        store_snapshot, &
+        store_token_create, &
+        store_token_lookup, &
+        token_identity_t
     use, intrinsic :: iso_fortran_env, only: int64
     implicit none
 

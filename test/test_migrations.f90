@@ -5,11 +5,26 @@ program test_migrations
     use fx_hash, only: sha256_string
     use fy_migrations, only: migration_t, migration_add, migrations_registry
     use fy_proc, only: proc_fork, proc_exit, proc_wait, proc_kill, proc_sleep_ms, SIGTERM
-    use fy_sqlite, only: db_t, stmt_t, db_open, db_close, db_exec, db_prepare, stmt_step, &
-        stmt_int, stmt_finalize, SQLITE_ROW
-    use fy_store, only: store_open, store_migrate_numbered, store_migrate_named, &
-        store_schema_version, store_bootstrap, store_token_lookup, token_identity_t, &
-        SCHEMA_VERSION
+    use fy_sqlite, only: &
+        SQLITE_ROW, &
+        db_close, &
+        db_exec, &
+        db_open, &
+        db_prepare, &
+        db_t, &
+        stmt_finalize, &
+        stmt_int, &
+        stmt_step, &
+        stmt_t
+    use fy_store, only: &
+        SCHEMA_VERSION, &
+        store_bootstrap, &
+        store_migrate_named, &
+        store_migrate_numbered, &
+        store_open, &
+        store_schema_version, &
+        store_token_lookup, &
+        token_identity_t
     implicit none
 
     character(len=*), parameter :: path = 'build/test_migrations.db'

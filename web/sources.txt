@@ -1,0 +1,24 @@
+# Fortran sources of the browser application, one path or pattern per line
+# relative to the repository, in the order they are compiled: a file comes
+# after the modules it uses. Read by scripts/build-web.sh.
+
+# Browser bindings.
+web/fy_fetch.f90
+web/fy_nav.f90
+web/fy_stream.f90
+
+# Shared parts, in dependency order.
+src/ui/fy_pages.f90
+src/ui/fy_route.f90
+src/ui/fy_highlight.f90
+src/ui/fy_diff.f90
+src/ui/fy_markdown.f90
+src/ui/fy_time.f90
+src/ui/fy_code_lines.f90
+
+# Pages: every file of this name. A page uses the files above and no other
+# page, so a new page needs no entry here.
+src/ui/fy_*_view.f90
+
+# The application, which uses every page.
+src/ui/fy_ui_app.f90

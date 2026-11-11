@@ -1,14 +1,29 @@
 module fy_http
     !! HTTP/1.1 requests and responses, one request per connection.
-    use, intrinsic :: iso_fortran_env, only: int64, compiler_options
-    use fy_posix, only: sock_recv, sock_send_all
+    use, intrinsic :: iso_fortran_env, only: &
+        compiler_options, &
+        int64
+    use fy_posix, only: &
+        sock_recv, &
+        sock_send_all
     implicit none
     private
 
-    public :: http_request_t, http_parse_head, http_read_request
-    public :: http_send_response, http_status_text, http_bearer_token, http_cookie
-    public :: http_query_param, http_percent_decode, http_read_head, http_read_body
-    public :: http_basic_password, http_chunk_size, http_compiler_options
+    public :: &
+        http_basic_password, &
+        http_bearer_token, &
+        http_chunk_size, &
+        http_compiler_options, &
+        http_cookie, &
+        http_parse_head, &
+        http_percent_decode, &
+        http_query_param, &
+        http_read_body, &
+        http_read_head, &
+        http_read_request, &
+        http_request_t, &
+        http_send_response, &
+        http_status_text
 
     integer, parameter, public :: HTTP_MAX_HEAD = 65536
     integer, parameter, public :: HTTP_MAX_BODY = 1048576

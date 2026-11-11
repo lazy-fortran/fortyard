@@ -3,29 +3,56 @@ module fy_mcp
     !! Each tool is one request of the stored login to the server's API and
     !! answers with the API's JSON; job answers as fy job prints it, with the
     !! end of the log only.
-    use fx_json_build, only: json_escape_string
-    use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init_strict, &
-        json_parser_next, JSON_OBJECT_START, JSON_OBJECT_END, JSON_ARRAY_START, JSON_ARRAY_END, &
-        JSON_KEY, JSON_STRING, JSON_INTEGER, JSON_REAL, JSON_ERROR, JSON_END_OF_INPUT, &
-        JSON_MAX_DEPTH
-    use fx_mcp, only: mcp_read_message, mcp_send_response, MCP_FRAME_BARE_JSON
-    use fy_cli, only: cli_field, cli_tail
-    use fy_client, only: client_request, config_t, config_load
-    use fy_repo, only: repo_name_ok, repo_ref_ok
+    use fx_json_build, only: &
+        json_escape_string
+    use fx_json_parse, only: &
+        JSON_ARRAY_END, &
+        JSON_ARRAY_START, &
+        JSON_END_OF_INPUT, &
+        JSON_ERROR, &
+        JSON_INTEGER, &
+        JSON_KEY, &
+        JSON_MAX_DEPTH, &
+        JSON_OBJECT_END, &
+        JSON_OBJECT_START, &
+        JSON_REAL, &
+        JSON_STRING, &
+        json_event_t, &
+        json_parser_init_strict, &
+        json_parser_next, &
+        json_parser_t
+    use fx_mcp, only: &
+        MCP_FRAME_BARE_JSON, &
+        mcp_read_message, &
+        mcp_send_response
+    use fy_cli, only: &
+        cli_field, &
+        cli_tail
+    use fy_client, only: &
+        client_request, &
+        config_load, &
+        config_t
+    use fy_repo, only: &
+        repo_name_ok, &
+        repo_ref_ok
     implicit none
     private
 
-    public :: mcp_main
+    public :: &
+        mcp_main
 
     !! An issue or a comment may be long; fx's own loop stops at 32 kB.
     integer, parameter :: MAX_MESSAGE = 1048576
-    integer, parameter :: N_TOOLS = 21
 
     !! Name, description and arguments of each tool; ? marks an optional one.
-    character(len=*), parameter :: TOOLS(3, N_TOOLS) = reshape([character(len=64) :: &
+    !! One tool per line, grouped by what it works on; tools/list answers in
+    !! this order.
+    character(len=64), parameter :: TOOL_LINES(*) = [character(len=64) :: &
+    ! server
         'whoami', 'Account of the stored fortyard token', '', &
         'version', 'Version of the fortyard server', '', &
         'repos', 'Repositories of the server', '', &
+    ! changes
         'changes', 'Changes of a repository, the open ones by default', 'repo state?', &
         'change', 'A change with its versions, comments and landings', 'repo number', &
         'change_diff', 'The diff of a change', 'repo number version? from?', &
@@ -33,17 +60,22 @@ module fy_mcp
         'change_close', 'Close a change', 'repo number', &
         'change_reopen', 'Reopen a closed change', 'repo number', &
         'change_land', 'Queue the landing of a change (admin); answers its job', 'repo number', &
+    ! issues
         'issues', 'Issues of a repository, the open ones by default', 'repo state?', &
         'issue', 'An issue with its comments', 'repo number', &
         'issue_new', 'Open an issue', 'repo title body?', &
         'issue_comment', 'Comment on an issue', 'repo number body', &
         'issue_close', 'Close an issue', 'repo number', &
         'issue_reopen', 'Reopen a closed issue', 'repo number', &
+    ! landings
         'land', 'Queue the landing of a pushed branch (admin); answers its job', 'repo branch', &
         'landings', 'Recent landings of a repository', 'repo', &
+    ! jobs
         'jobs', 'Running, waiting and recent jobs', 'repo?', &
         'job', 'A job: its state and the end of its log', 'id lines?', &
-        'verify', 'Queue a verification of main with the full suite (admin)', 'repo'], [3, N_TOOLS])
+        'verify', 'Queue a verification of main with the full suite (admin)', 'repo']
+    integer, parameter :: N_TOOLS = size(TOOL_LINES) / 3
+    character(len=*), parameter :: TOOLS(3, N_TOOLS) = reshape(TOOL_LINES, [3, N_TOOLS])
 
 contains
 

@@ -6,8 +6,11 @@
 # and its data into that template for each page.
 # Needs LFortran and an emscripten SDK in EMSDK_PATH, and fx and fortui under
 # SRCDIR/build/dependencies (fo build fetches them at the versions fpm.toml
-# pins); FORTUI_DIR overrides the fortui checkout.
+# pins); FORTUI_DIR overrides the fortui checkout. The application's own
+# sources are listed in web/sources.txt.
 set -eu
+# The pages are found by pattern; their order must not follow the locale.
+export LC_ALL=C
 src=$(cd "$1" && pwd)
 out=$2
 deps=$src/build/dependencies
@@ -15,11 +18,15 @@ fx=$deps/fx/src
 fortui=${FORTUI_DIR:-$deps/fortui}
 mkdir -p "$out"
 rm -f "$out"/fy_app.*
-FORTUI_WEB_SOURCES="$fx/fx_string.f90 $fx/fx_json_build.f90 $fx/fx_json_parse.f90 \
-$src/web/fy_fetch.f90 $src/web/fy_nav.f90 $src/web/fy_stream.f90 $src/src/ui/fy_route.f90 $src/src/ui/fy_highlight.f90 $src/src/ui/fy_diff.f90 \
-$src/src/ui/fy_markdown.f90 $src/src/ui/fy_time.f90 $src/src/ui/fy_code_lines.f90 \
-$src/src/ui/fy_repo_view.f90 $src/src/ui/fy_change_view.f90 $src/src/ui/fy_jobs_view.f90 \
-$src/src/ui/fy_ui_app.f90" \
+sources="$fx/fx_string.f90 $fx/fx_json_build.f90 $fx/fx_json_parse.f90"
+# A last line without newline counts too.
+while read -r f || [ -n "$f" ]; do
+    case $f in
+    '' | '#'*) ;;
+    *) for g in "$src"/$f; do sources="$sources $g"; done ;;
+    esac
+done < "$src/web/sources.txt"
+FORTUI_WEB_SOURCES="$sources" \
 FORTUI_WEB_JS="$src/web/fy_web.js" \
     "$fortui/web/build.sh" "$src/web/fy_app.f90" "$out" >/dev/null
 rm -rf "$out/obj" "$out/fortui.css"

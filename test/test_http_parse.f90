@@ -1,6 +1,11 @@
 program test_http_parse
-    use fy_http, only: http_request_t, http_parse_head, http_bearer_token, HTTP_MAX_BODY, &
-        http_query_param, http_percent_decode
+    use fy_http, only: &
+        HTTP_MAX_BODY, &
+        http_bearer_token, &
+        http_parse_head, &
+        http_percent_decode, &
+        http_query_param, &
+        http_request_t
     implicit none
 
     character(len=2), parameter :: CRLF = achar(13)//achar(10)

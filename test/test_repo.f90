@@ -1,6 +1,15 @@
 program test_repo
-    use fy_repo, only: repo_name_ok, repo_ref_ok, repo_path_ok, repo_log_json, repo_tree_json, &
-        repo_blob, repo_commit_json, repo_refs_json, repo_clone, repo_fetch
+    use fy_repo, only: &
+        repo_blob, &
+        repo_clone, &
+        repo_commit_json, &
+        repo_fetch, &
+        repo_log_json, &
+        repo_name_ok, &
+        repo_path_ok, &
+        repo_ref_ok, &
+        repo_refs_json, &
+        repo_tree_json
     implicit none
 
     character(len=*), parameter :: up = 'build/test_repo_up', mirror = 'build/test_repo.git'

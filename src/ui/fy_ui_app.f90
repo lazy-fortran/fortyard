@@ -5,27 +5,76 @@ module fy_ui_app
     !! into the server, which composes the first frame of a page with the same
     !! code and sends it as HTML with the responses that produced it.
     use fortui
-    use fx_json_build, only: json_escape_string
-    use fx_json_parse, only: json_extract_string, json_extract_bool, json_parser_t, json_event_t, &
-        json_parser_init, json_parser_next, JSON_KEY, JSON_STRING, JSON_INTEGER, &
-        JSON_BOOL, JSON_OBJECT_END, JSON_END_OF_INPUT, JSON_ERROR
-    use fy_fetch, only: request_t, fetch_start, fetch_ready
-    use fy_nav, only: nav_push, nav_popped, nav_title, nav_assign, nav_set_pref, nav_copy
-    use fy_route, only: route_t, route_parse, route_href, go, go_take, at, R_REPOS, R_TOKENS, &
-        R_SERVER, R_TREE, R_BLOB, R_COMMITS, R_COMMIT, R_MISSING, R_JOBS, R_CHANGES, R_CHANGE, &
-        R_ISSUES, R_ISSUE
-    use fy_jobs_view, only: jobs_view_show, jobs_view_hide, jobs_view_receive, &
-        jobs_view_compose, jobs_view_title
-    use fy_change_view, only: change_view_show, change_view_receive, change_view_compose, &
-        change_view_title, change_view_repo, change_view_missing
-    use fy_repo_view, only: repo_view_reset, repo_view_show, repo_view_list, &
-        repo_view_compose, repo_view_list_compose, repo_view_receive, repo_view_title, &
-        repo_view_repo, repo_view_missing
-    use fy_time, only: ago, day_of, when
+    use fx_json_build, only: &
+        json_escape_string
+    use fx_json_parse, only: &
+        JSON_BOOL, &
+        JSON_END_OF_INPUT, &
+        JSON_ERROR, &
+        JSON_INTEGER, &
+        JSON_KEY, &
+        JSON_OBJECT_END, &
+        JSON_STRING, &
+        json_event_t, &
+        json_extract_bool, &
+        json_extract_string, &
+        json_parser_init, &
+        json_parser_next, &
+        json_parser_t
+    use fy_change_view, only: &
+        change_view_compose, &
+        change_view_missing, &
+        change_view_receive, &
+        change_view_repo, &
+        change_view_show, &
+        change_view_title
+    use fy_fetch, only: &
+        fetch_ready, &
+        fetch_start, &
+        request_t
+    use fy_jobs_view, only: &
+        jobs_view_compose, &
+        jobs_view_hide, &
+        jobs_view_receive, &
+        jobs_view_show, &
+        jobs_view_title
+    use fy_nav, only: &
+        nav_assign, &
+        nav_copy, &
+        nav_popped, &
+        nav_push, &
+        nav_set_pref, &
+        nav_title
+    use fy_pages
+    use fy_repo_view, only: &
+        repo_view_compose, &
+        repo_view_list, &
+        repo_view_list_compose, &
+        repo_view_missing, &
+        repo_view_receive, &
+        repo_view_repo, &
+        repo_view_reset, &
+        repo_view_show, &
+        repo_view_title
+    use fy_route, only: &
+        at, &
+        go, &
+        go_take, &
+        route_href, &
+        route_parse, &
+        route_t
+    use fy_time, only: &
+        ago, &
+        day_of, &
+        when
     implicit none
     private
 
-    public :: app_start, app_compose, app_title, app_missing
+    public :: &
+        app_compose, &
+        app_missing, &
+        app_start, &
+        app_title
 
     type :: token_row_t
         integer :: id = 0
@@ -120,17 +169,17 @@ contains
         if (page /= R_JOBS) call jobs_view_hide()
         if (.not. signed_in) return
         select case (page)
-        case (R_REPOS)
-            call repo_view_list()
+        case (R_BLOB, R_COMMIT, R_COMMITS, R_TREE)
+            call repo_view_show(r)
+        case (R_CHANGE, R_CHANGES, R_ISSUE, R_ISSUES)
+            call change_view_show(r)
         case (R_JOBS)
             call jobs_view_show(r%repo)
+        case (R_REPOS)
+            call repo_view_list()
         case (R_TOKENS)
             copied = .false.
             call fetch_start(tokens_req, 'GET', '/api/v1/tokens')
-        case (R_TREE, R_BLOB, R_COMMITS, R_COMMIT)
-            call repo_view_show(r)
-        case (R_CHANGES, R_CHANGE, R_ISSUES, R_ISSUE)
-            call change_view_show(r)
         end select
     end subroutine show
 
@@ -158,18 +207,18 @@ contains
             return
         end if
         select case (page)
-        case (R_REPOS)
-            s = 'Repositories · fortyard'
-        case (R_TOKENS)
-            s = 'Access tokens · fortyard'
-        case (R_SERVER)
-            s = 'Server · fortyard'
+        case (R_CHANGE, R_CHANGES, R_ISSUE, R_ISSUES)
+            s = change_view_title()//' · fortyard'
         case (R_JOBS)
             s = jobs_view_title()//' · fortyard'
         case (R_MISSING)
             s = 'Page not found · fortyard'
-        case (R_CHANGES, R_CHANGE, R_ISSUES, R_ISSUE)
-            s = change_view_title()//' · fortyard'
+        case (R_REPOS)
+            s = 'Repositories · fortyard'
+        case (R_SERVER)
+            s = 'Server · fortyard'
+        case (R_TOKENS)
+            s = 'Access tokens · fortyard'
         case default
             s = repo_view_title()//' · fortyard'
         end select
@@ -177,9 +226,17 @@ contains
 
     logical function app_missing()
         !! Whether the page shown does not exist (the server answers 404).
-        app_missing = signed_in .and. (page == R_MISSING .or. (in_repo(page) .and. &
-            page <= R_COMMIT .and. repo_view_missing()) .or. (page >= R_CHANGES .and. &
-            change_view_missing()))
+        select case (page)
+        case (R_BLOB, R_COMMIT, R_COMMITS, R_TREE)
+            app_missing = repo_view_missing()
+        case (R_CHANGE, R_CHANGES, R_ISSUE, R_ISSUES)
+            app_missing = change_view_missing()
+        case (R_MISSING)
+            app_missing = .true.
+        case default
+            app_missing = .false.
+        end select
+        app_missing = signed_in .and. app_missing
     end function app_missing
 
     subroutine app_compose()
@@ -210,18 +267,18 @@ contains
             call sign_in_view()
         else
             select case (page)
-            case (R_REPOS)
-                call repo_view_list_compose(index(scopes, 'admin') > 0)
-            case (R_TOKENS)
-                call tokens_view()
-            case (R_SERVER)
-                call server_view()
+            case (R_CHANGE, R_CHANGES, R_ISSUE, R_ISSUES)
+                call change_view_compose(index(scopes, 'admin') > 0, page_w < 600.0)
             case (R_JOBS)
                 call jobs_view_compose(page_w < 600.0)
             case (R_MISSING)
                 call missing_view()
-            case (R_CHANGES, R_CHANGE, R_ISSUES, R_ISSUE)
-                call change_view_compose(index(scopes, 'admin') > 0, page_w < 600.0)
+            case (R_REPOS)
+                call repo_view_list_compose(index(scopes, 'admin') > 0)
+            case (R_SERVER)
+                call server_view()
+            case (R_TOKENS)
+                call tokens_view()
             case default
                 call repo_view_compose()
             end select
@@ -283,26 +340,33 @@ contains
     logical function in_repo(kind)
         !! Whether a page of this kind belongs to a repository.
         integer, intent(in) :: kind
-        in_repo = (kind >= R_TREE .and. kind <= R_COMMIT) .or. &
-            (kind >= R_CHANGES .and. kind <= R_ISSUE)
+        select case (kind)
+        case (R_BLOB, R_COMMIT, R_COMMITS, R_TREE)
+            in_repo = .true.
+        case (R_CHANGE, R_CHANGES, R_ISSUE, R_ISSUES)
+            in_repo = .true.
+        case default
+            in_repo = .false.
+        end select
     end function in_repo
 
     function page_repo() result(s)
         !! The repository of the page shown.
         character(len=:), allocatable :: s
-        if (page >= R_CHANGES) then
+        select case (page)
+        case (R_CHANGE, R_CHANGES, R_ISSUE, R_ISSUES)
             s = change_view_repo()
-        else
+        case default
             s = repo_view_repo()
-        end if
+        end select
     end function page_repo
 
     function page_name(kind) result(s)
         integer, intent(in) :: kind
         character(len=:), allocatable :: s
         select case (kind)
-        case (R_TOKENS); s = "Access tokens"
         case (R_SERVER); s = "Server"
+        case (R_TOKENS); s = "Access tokens"
         case default; s = "Repositories"
         end select
     end function page_name
@@ -595,9 +659,9 @@ contains
             call apply_whoami(whoami_req%body, whoami_req%status)
             if (signed_in) call show(here)
         end if
-        call repo_view_receive()
         call change_view_receive()
         call jobs_view_receive()
+        call repo_view_receive()
         if (fetch_ready(tokens_req)) then
             if (tokens_req%status == 200) call parse_tokens(tokens_req%body)
         end if

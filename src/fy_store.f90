@@ -1,30 +1,81 @@
 module fy_store
     !! Schema, accounts and API tokens. Tokens are stored only as SHA-256
     !! hashes; the plaintext is shown once when created.
-    use, intrinsic :: iso_fortran_env, only: int8, int64
-    use fx_hash, only: sha256_string
-    use fy_proc, only: proc_sleep_ms
-    use fy_migrations, only: migration_t, migrations_registry
-    use fy_sqlite, only: db_t, stmt_t, db_open, db_exec, db_errmsg, db_prepare, &
-        stmt_bind_text, stmt_bind_int, stmt_step, stmt_text, stmt_int, &
-        stmt_finalize, db_deny_transaction, SQLITE_OK, SQLITE_ROW, SQLITE_DONE, SQLITE_BUSY, &
-        SQLITE_AUTH
+    use, intrinsic :: iso_fortran_env, only: &
+        int64, &
+        int8
+    use fx_hash, only: &
+        sha256_string
+    use fy_migrations, only: &
+        migration_t, &
+        migrations_registry
+    use fy_proc, only: &
+        proc_sleep_ms
+    use fy_sqlite, only: &
+        SQLITE_AUTH, &
+        SQLITE_BUSY, &
+        SQLITE_DONE, &
+        SQLITE_OK, &
+        SQLITE_ROW, &
+        db_deny_transaction, &
+        db_errmsg, &
+        db_exec, &
+        db_open, &
+        db_prepare, &
+        db_t, &
+        stmt_bind_int, &
+        stmt_bind_text, &
+        stmt_finalize, &
+        stmt_int, &
+        stmt_step, &
+        stmt_t, &
+        stmt_text
     implicit none
     private
 
-    public :: store_open, store_migrate, store_schema_version, store_snapshot
-    public :: store_migrate_numbered, store_migrate_named
-    public :: store_bootstrap, store_token_lookup, store_token_create, store_account_find
-    public :: store_token_list, store_token_revoke, store_token_revoke_hash
-    public :: token_identity_t, token_info_t, random_token
-    public :: repo_info_t, store_repo_add, store_repo_list, store_repo_fetched, store_repo_set_mode, &
-        store_repo_set_number, store_landing_take
-    public :: landing_t, store_landing_add, store_landing_next, store_landing_requeue
-    public :: store_landing_finish, store_landing_list
-    public :: release_t, store_release_add, store_release_ready, store_release_list
-    public :: store_jobs, store_job, store_job_counts, store_jobs_state
-    public :: store_check_add, store_check_claim, store_check_finish, store_check_get, &
-        store_check_release
+    public :: &
+        landing_t, &
+        random_token, &
+        release_t, &
+        repo_info_t, &
+        store_account_find, &
+        store_bootstrap, &
+        store_check_add, &
+        store_check_claim, &
+        store_check_finish, &
+        store_check_get, &
+        store_check_release, &
+        store_job, &
+        store_job_counts, &
+        store_jobs, &
+        store_jobs_state, &
+        store_landing_add, &
+        store_landing_finish, &
+        store_landing_list, &
+        store_landing_next, &
+        store_landing_requeue, &
+        store_landing_take, &
+        store_migrate, &
+        store_migrate_named, &
+        store_migrate_numbered, &
+        store_open, &
+        store_release_add, &
+        store_release_list, &
+        store_release_ready, &
+        store_repo_add, &
+        store_repo_fetched, &
+        store_repo_list, &
+        store_repo_set_mode, &
+        store_repo_set_number, &
+        store_schema_version, &
+        store_snapshot, &
+        store_token_create, &
+        store_token_list, &
+        store_token_lookup, &
+        store_token_revoke, &
+        store_token_revoke_hash, &
+        token_identity_t, &
+        token_info_t
 
     !! The last numbered migration. Frozen: later migrations have names
     !! (fy_migrations) and leave the version alone, so a release from before

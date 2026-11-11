@@ -7,18 +7,32 @@ module fy_runner
     !! repository fetched over the API's git endpoint, asks for work every few
     !! seconds, and stops when the server runs a different release, so that it
     !! restarts on the same one. Either way it talks to the server over its API.
-    use, intrinsic :: iso_fortran_env, only: error_unit, int64
-    use fx_json_build, only: json_escape_string
-    use fx_json_parse, only: json_extract_string
-    use fy_client, only: client_request
-    use fy_events, only: events_set_dir, events_watch_open, events_wait
-    use fy_land, only: land_check
-    use fy_proc, only: proc_run, proc_readlink, proc_sleep_ms
-    use fy_build_info, only: FY_COMMIT
+    use, intrinsic :: iso_fortran_env, only: &
+        error_unit, &
+        int64
+    use fx_json_build, only: &
+        json_escape_string
+    use fx_json_parse, only: &
+        json_extract_string
+    use fy_build_info, only: &
+        FY_COMMIT
+    use fy_client, only: &
+        client_request
+    use fy_events, only: &
+        events_set_dir, &
+        events_wait, &
+        events_watch_open
+    use fy_land, only: &
+        land_check
+    use fy_proc, only: &
+        proc_readlink, &
+        proc_run, &
+        proc_sleep_ms
     implicit none
     private
 
-    public :: runner_main
+    public :: &
+        runner_main
 
 contains
 

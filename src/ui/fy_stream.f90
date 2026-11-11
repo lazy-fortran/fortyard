@@ -4,7 +4,10 @@ module fy_stream
     implicit none
     private
 
-    public :: stream_open, stream_count, stream_close
+    public :: &
+        stream_close, &
+        stream_count, &
+        stream_open
 
 contains
 

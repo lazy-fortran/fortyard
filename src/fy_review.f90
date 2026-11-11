@@ -8,20 +8,46 @@ module fy_review
     !! FY_REVIEW_MODEL, optionally FY_REVIEW_KEY, FY_REVIEW_MAX_TOKENS and
     !! FY_REVIEW_EXTRA); without FY_REVIEW_URL there are no reviews. The model sees the diff only and runs nothing, and its
     !! answer is published only in the form asked for.
-    use, intrinsic :: iso_fortran_env, only: error_unit, int64
-    use fx_json_build, only: json_escape_string
-    use fx_json_parse, only: json_extract_string
-    use fy_change, only: change_t, change_comment, change_review_set, change_review_next, &
-        change_last_version
-    use fy_events, only: events_watch_open, events_wait, events_notify
-    use fy_proc, only: proc_run, proc_spawn, proc_find, proc_exit_status, proc_exit, &
-        proc_sleep_ms, fd_write_all, fd_close, fd_read
-    use fy_sqlite, only: db_t
-    use fy_store, only: store_open
+    use, intrinsic :: iso_fortran_env, only: &
+        error_unit, &
+        int64
+    use fx_json_build, only: &
+        json_escape_string
+    use fx_json_parse, only: &
+        json_extract_string
+    use fy_change, only: &
+        change_comment, &
+        change_last_version, &
+        change_review_next, &
+        change_review_set, &
+        change_t
+    use fy_events, only: &
+        events_notify, &
+        events_wait, &
+        events_watch_open
+    use fy_proc, only: &
+        fd_close, &
+        fd_read, &
+        fd_write_all, &
+        proc_exit, &
+        proc_exit_status, &
+        proc_find, &
+        proc_run, &
+        proc_sleep_ms, &
+        proc_spawn
+    use fy_sqlite, only: &
+        db_t
+    use fy_store, only: &
+        store_open
     implicit none
     private
 
-    public :: review_enabled, reviewer_main, review_change, review_parse, review_prompt
+    public :: &
+        review_change, &
+        review_enabled, &
+        review_parse, &
+        review_prompt, &
+        reviewer_main
 
     character(len=*), parameter :: AGENT = 'review-agent'
     !! Most of a diff the model is given; the rest is named as left out.

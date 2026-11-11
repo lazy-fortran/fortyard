@@ -4,8 +4,15 @@ program test_numbers
     !! different numbers.
     use fy_issue, only: issue_open
     use fy_proc, only: proc_fork, proc_exit, proc_wait
-    use fy_sqlite, only: db_t, stmt_t, db_close, db_prepare, stmt_step, stmt_int, &
-        stmt_finalize, SQLITE_ROW
+    use fy_sqlite, only: &
+        SQLITE_ROW, &
+        db_close, &
+        db_prepare, &
+        db_t, &
+        stmt_finalize, &
+        stmt_int, &
+        stmt_step, &
+        stmt_t
     use fy_store, only: store_open, store_repo_add
     implicit none
 

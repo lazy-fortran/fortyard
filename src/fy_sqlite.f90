@@ -2,14 +2,26 @@ module fy_sqlite
     !! Minimal SQLite binding: open, exec, prepared statements with text and
     !! integer parameters.
     use, intrinsic :: iso_c_binding
-    use, intrinsic :: iso_fortran_env, only: int64
+    use, intrinsic :: iso_fortran_env, only: &
+        int64
     implicit none
     private
 
-    public :: db_t, stmt_t
-    public :: db_open, db_close, db_exec, db_errmsg, db_deny_transaction
-    public :: db_prepare, stmt_bind_text, stmt_bind_int, stmt_step
-    public :: stmt_text, stmt_int, stmt_finalize
+    public :: &
+        db_close, &
+        db_deny_transaction, &
+        db_errmsg, &
+        db_exec, &
+        db_open, &
+        db_prepare, &
+        db_t, &
+        stmt_bind_int, &
+        stmt_bind_text, &
+        stmt_finalize, &
+        stmt_int, &
+        stmt_step, &
+        stmt_t, &
+        stmt_text
 
     integer, parameter, public :: SQLITE_OK = 0, SQLITE_BUSY = 5, SQLITE_AUTH = 23, &
         SQLITE_ROW = 100, SQLITE_DONE = 101

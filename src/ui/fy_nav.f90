@@ -4,7 +4,13 @@ module fy_nav
     implicit none
     private
 
-    public :: nav_push, nav_popped, nav_title, nav_assign, nav_set_pref, nav_copy
+    public :: &
+        nav_assign, &
+        nav_copy, &
+        nav_popped, &
+        nav_push, &
+        nav_set_pref, &
+        nav_title
 
 contains
 

@@ -1,8 +1,23 @@
 program test_highlight
-    use fortui, only: UI_TONE_KEYWORD, UI_TONE_STRING, UI_TONE_COMMENT, UI_TONE_NUMBER, &
-        UI_TONE_TYPE, UI_TONE_PREPROC, UI_TONE_STRONG, UI_TONE_NORMAL
-    use fy_highlight, only: highlight, lang_of, LANG_FORTRAN, LANG_C, LANG_PYTHON, &
-        LANG_TOML, LANG_SHELL, LANG_NONE, LANG_CMAKE
+    use fortui, only: &
+        UI_TONE_COMMENT, &
+        UI_TONE_KEYWORD, &
+        UI_TONE_NORMAL, &
+        UI_TONE_NUMBER, &
+        UI_TONE_PREPROC, &
+        UI_TONE_STRING, &
+        UI_TONE_STRONG, &
+        UI_TONE_TYPE
+    use fy_highlight, only: &
+        LANG_C, &
+        LANG_CMAKE, &
+        LANG_FORTRAN, &
+        LANG_NONE, &
+        LANG_PYTHON, &
+        LANG_SHELL, &
+        LANG_TOML, &
+        highlight, &
+        lang_of
     implicit none
 
     integer :: state

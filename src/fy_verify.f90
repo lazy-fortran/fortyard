@@ -10,19 +10,52 @@ module fy_verify
     !! comment on the change that landed it. The issue is closed when main
     !! passes again. Verifications are jobs of kind "verify"; runners take them
     !! after landing checks.
-    use, intrinsic :: iso_fortran_env, only: int64, error_unit
-    use fy_sqlite, only: db_t, stmt_t, db_prepare, db_exec, stmt_bind_text, stmt_bind_int, &
-        stmt_step, stmt_text, stmt_int, stmt_finalize, SQLITE_OK, SQLITE_ROW
-    use fy_store, only: store_open, store_repo_list, repo_info_t, store_check_add, store_check_get
-    use fy_events, only: events_watch_open, events_wait, events_notify
-    use fy_proc, only: proc_run, proc_exit
-    use fy_issue, only: issue_open, issue_comment, issue_set_state
-    use fy_change, only: change_t, change_get, change_comment
-    use fy_policy, only: policy_t, policy_get
+    use, intrinsic :: iso_fortran_env, only: &
+        error_unit, &
+        int64
+    use fy_change, only: &
+        change_comment, &
+        change_get, &
+        change_t
+    use fy_events, only: &
+        events_notify, &
+        events_wait, &
+        events_watch_open
+    use fy_issue, only: &
+        issue_comment, &
+        issue_open, &
+        issue_set_state
+    use fy_policy, only: &
+        policy_get, &
+        policy_t
+    use fy_proc, only: &
+        proc_exit, &
+        proc_run
+    use fy_sqlite, only: &
+        SQLITE_OK, &
+        SQLITE_ROW, &
+        db_exec, &
+        db_prepare, &
+        db_t, &
+        stmt_bind_int, &
+        stmt_bind_text, &
+        stmt_finalize, &
+        stmt_int, &
+        stmt_step, &
+        stmt_t, &
+        stmt_text
+    use fy_store, only: &
+        repo_info_t, &
+        store_check_add, &
+        store_check_get, &
+        store_open, &
+        store_repo_list
     implicit none
     private
 
-    public :: verifier_main, verify_request
+    public :: &
+        verifier_main, &
+        verify_request
 
     character(len=*), parameter :: NOW = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
     !! Commits of main looked back for the last passing verification.

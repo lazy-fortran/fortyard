@@ -2,14 +2,26 @@ module fy_repo
     !! Mirrored git repositories: validation of names, refs and paths from
     !! requests, and read-only queries answered by git subprocesses. Each query
     !! returns JSON for the API.
-    use fx_json_build, only: json_escape_string
-    use fy_proc, only: proc_run
+    use fx_json_build, only: &
+        json_escape_string
+    use fy_proc, only: &
+        proc_run
     implicit none
     private
 
-    public :: repo_name_ok, repo_ref_ok, repo_path_ok
-    public :: repo_log_json, repo_tree_json, repo_blob, repo_commit_json, repo_refs_json
-    public :: repo_fetch, repo_clone, repo_init, repo_push_tags
+    public :: &
+        repo_blob, &
+        repo_clone, &
+        repo_commit_json, &
+        repo_fetch, &
+        repo_init, &
+        repo_log_json, &
+        repo_name_ok, &
+        repo_path_ok, &
+        repo_push_tags, &
+        repo_ref_ok, &
+        repo_refs_json, &
+        repo_tree_json
 
     integer, parameter, public :: BLOB_MAX = 1048576
     integer, parameter, public :: DIFF_MAX = 524288

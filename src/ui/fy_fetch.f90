@@ -4,12 +4,18 @@ module fy_fetch
     !! the server's own routing (`fetch_serve`), and the answers are kept so the
     !! page can carry them to the browser (`fetch_served_json`). Otherwise a
     !! request is never sent and never finishes.
-    use fx_json_build, only: json_escape_string
+    use fx_json_build, only: &
+        json_escape_string
     implicit none
     private
 
-    public :: request_t, fetch_start, fetch_ready, fetch_serve, fetch_served_json
-    public :: fetch_handler_i
+    public :: &
+        fetch_handler_i, &
+        fetch_ready, &
+        fetch_serve, &
+        fetch_served_json, &
+        fetch_start, &
+        request_t
 
     type :: request_t
         integer :: id = 0

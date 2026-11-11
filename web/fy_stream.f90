@@ -2,11 +2,16 @@ module fy_stream
     !! Server-sent event streams: the browser keeps the connection, counts the
     !! events of a topic and wakes the frame loop on each one, so a live page
     !! learns of changes without asking.
-    use, intrinsic :: iso_c_binding, only: c_int, c_char
+    use, intrinsic :: iso_c_binding, only: &
+        c_char, &
+        c_int
     implicit none
     private
 
-    public :: stream_open, stream_count, stream_close
+    public :: &
+        stream_close, &
+        stream_count, &
+        stream_open
 
     interface
         integer(c_int) function js_open(p, np, t, nt) bind(C, name="fy_stream_open")

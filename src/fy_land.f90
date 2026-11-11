@@ -4,11 +4,19 @@ module fy_land
     !! then moves forward to it and is pushed to the repository's mirror. A
     !! branch that is `main` plus one merge commit lands as that merge, so the
     !! merged history (such as an upstream's) stays an ancestor of `main`.
-    use fy_proc, only: proc_run, proc_find
+    use fy_proc, only: &
+        proc_find, &
+        proc_run
     implicit none
     private
 
-    public :: land_branch, land_candidate, land_hook_install, land_check, land_push_check, check_runner_i
+    public :: &
+        check_runner_i, &
+        land_branch, &
+        land_candidate, &
+        land_check, &
+        land_hook_install, &
+        land_push_check
 
     abstract interface
         subroutine check_runner_i(repo, ref, passed, log)

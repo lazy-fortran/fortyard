@@ -1,8 +1,14 @@
 program test_server_roundtrip
     !! Real sockets in one thread: the client's request waits in the kernel
     !! until the server accepts and answers it.
-    use fy_posix, only: tcp_listen, tcp_accept, tcp_connect, sock_send_all, &
-        sock_recv, sock_close, sock_bound_port
+    use fy_posix, only: &
+        sock_bound_port, &
+        sock_close, &
+        sock_recv, &
+        sock_send_all, &
+        tcp_accept, &
+        tcp_connect, &
+        tcp_listen
     use fy_server, only: serve_connection, server_set_web_dir, server_set_data_dir
     use fx_hash, only: sha256_string
     use fy_sqlite, only: db_t, db_close

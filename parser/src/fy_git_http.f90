@@ -2,13 +2,27 @@ module fy_git_http
     !! Git's smart HTTP protocol (clone, fetch, push) through `git http-backend`
     !! as a CGI program. Request and response bodies are passed through in
     !! blocks, so a large clone or push needs no more memory than a small one.
-    use fy_http, only: http_request_t, http_status_text, http_chunk_size
-    use fy_posix, only: sock_recv, sock_send_all
-    use fy_proc, only: proc_spawn, proc_find, proc_exit_status, fd_read, fd_write_all, fd_close
+    use fy_http, only: &
+        http_chunk_size, &
+        http_request_t, &
+        http_status_text
+    use fy_posix, only: &
+        sock_recv, &
+        sock_send_all
+    use fy_proc, only: &
+        fd_close, &
+        fd_read, &
+        fd_write_all, &
+        proc_exit_status, &
+        proc_find, &
+        proc_spawn
     implicit none
     private
 
-    public :: git_http_route, git_http_serve, git_http_copy_chunked
+    public :: &
+        git_http_copy_chunked, &
+        git_http_route, &
+        git_http_serve
 
     character(len=2), parameter :: CRLF = achar(13)//achar(10)
     !! Largest request body passed on (a push), in bytes.

@@ -1,12 +1,22 @@
 module fy_nav
     !! The browser's location, history and preferences: each page of the
     !! application has its own address, and Back and Forward move between them.
-    use, intrinsic :: iso_c_binding, only: c_int, c_char
+    use, intrinsic :: iso_c_binding, only: &
+        c_char, &
+        c_int
     implicit none
     private
 
-    public :: nav_push, nav_popped, nav_title, nav_location, nav_base, nav_assign, nav_set_pref, &
-        nav_pref, nav_copy
+    public :: &
+        nav_assign, &
+        nav_base, &
+        nav_copy, &
+        nav_location, &
+        nav_popped, &
+        nav_pref, &
+        nav_push, &
+        nav_set_pref, &
+        nav_title
 
     interface
         subroutine js_call(what, p, np, q, nq) bind(C, name="fy_nav_call")

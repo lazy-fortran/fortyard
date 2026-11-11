@@ -3,8 +3,14 @@ program test_login
     !! endpoint is a file:// URL, so curl returns a prepared answer offline.
     use, intrinsic :: iso_c_binding, only: c_long
     use, intrinsic :: iso_fortran_env, only: int8
-    use fy_posix, only: tcp_listen, tcp_accept, tcp_connect, sock_send_all, &
-        sock_recv, sock_close, sock_bound_port
+    use fy_posix, only: &
+        sock_bound_port, &
+        sock_close, &
+        sock_recv, &
+        sock_send_all, &
+        tcp_accept, &
+        tcp_connect, &
+        tcp_listen
     use fy_server, only: serve_connection, server_set_data_dir
     use fy_sqlite, only: db_t
     use fy_store, only: store_open, store_bootstrap

@@ -4,8 +4,14 @@ program test_review
     !! and a change the model flags is listed for a person until one marks it
     !! reviewed. An answer without the closing FLAG line is never published.
     use fy_posix, only: tcp_listen, sock_bound_port, sock_close
-    use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, proc_setenv, &
-        SIGTERM
+    use fy_proc, only: &
+        SIGTERM, &
+        proc_exit, &
+        proc_fork, &
+        proc_kill, &
+        proc_setenv, &
+        proc_sleep_ms, &
+        proc_wait
     use fy_review, only: review_parse
     use fy_server, only: server_supervise, server_set_data_dir
     use fy_sqlite, only: db_t, db_close

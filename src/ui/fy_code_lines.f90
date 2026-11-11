@@ -3,13 +3,32 @@ module fy_code_lines
     !! with muted line numbers: a file's lines and a diff's files, shared by
     !! the repository and change pages.
     use fortui
-    use fy_highlight, only: highlight, lang_of
-    use fy_diff, only: diff_file_t, parse_patch, DL_ADDED, DL_REMOVED, DL_HUNK, DL_NOTE
+    use fy_diff, only: &
+        DL_ADDED, &
+        DL_HUNK, &
+        DL_NOTE, &
+        DL_REMOVED, &
+        diff_file_t, &
+        parse_patch
+    use fy_highlight, only: &
+        highlight, &
+        lang_of
     implicit none
     private
 
-    public :: line_t, shown_file_t, diff_load, diff_compose, numbered, plain, plain_lines, &
-        gutter, right, untab, badge_tone, MAX_DIFF_LINES
+    public :: &
+        MAX_DIFF_LINES, &
+        badge_tone, &
+        diff_compose, &
+        diff_load, &
+        gutter, &
+        line_t, &
+        numbered, &
+        plain, &
+        plain_lines, &
+        right, &
+        shown_file_t, &
+        untab
 
     type :: line_t
         character(len=:), allocatable :: s

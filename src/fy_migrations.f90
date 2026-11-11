@@ -31,7 +31,10 @@ module fy_migrations
     implicit none
     private
 
-    public :: migration_t, migration_add, migrations_registry
+    public :: &
+        migration_add, &
+        migration_t, &
+        migrations_registry
 
     type :: migration_t
         character(len=:), allocatable :: name, sql

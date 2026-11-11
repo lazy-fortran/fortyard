@@ -3,15 +3,30 @@ module fy_client
     !! inside a private network is spoken directly; an https:// server is
     !! reached through curl (as the sign-in does), so runners on other hosts
     !! can use the public address.
-    use fy_posix, only: tcp_connect, sock_send_all, sock_recv, sock_close, &
-        sock_set_timeouts
-    use fy_proc, only: proc_find, proc_spawn, fd_read, fd_write_all, fd_close, &
-        proc_exit_status
+    use fy_posix, only: &
+        sock_close, &
+        sock_recv, &
+        sock_send_all, &
+        sock_set_timeouts, &
+        tcp_connect
+    use fy_proc, only: &
+        fd_close, &
+        fd_read, &
+        fd_write_all, &
+        proc_exit_status, &
+        proc_find, &
+        proc_spawn
     implicit none
     private
 
-    public :: client_request, parse_url, config_t, config_load, config_save, &
-        config_path, client_set_proxy
+    public :: &
+        client_request, &
+        client_set_proxy, &
+        config_load, &
+        config_path, &
+        config_save, &
+        config_t, &
+        parse_url
 
     character(len=2), parameter :: CRLF = achar(13)//achar(10)
     !! A proxy for every request (curl's syntax, e.g. socks5h://127.0.0.1:1080),

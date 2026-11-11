@@ -4,8 +4,14 @@ program test_verify_resume
     !! it: a running verification whose check passed is recorded as passed, one
     !! without a check is cancelled.
     use, intrinsic :: iso_fortran_env, only: int64
-    use fy_posix, only: tcp_listen, tcp_connect, sock_send_all, sock_recv, sock_close, &
-        sock_bound_port, sock_set_timeouts
+    use fy_posix, only: &
+        sock_bound_port, &
+        sock_close, &
+        sock_recv, &
+        sock_send_all, &
+        sock_set_timeouts, &
+        tcp_connect, &
+        tcp_listen
     use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, SIGTERM
     use fy_server, only: server_supervise, server_set_data_dir, server_set_checks
     use fy_sqlite, only: db_t, db_close, db_exec

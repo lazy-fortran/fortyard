@@ -4,17 +4,48 @@ module fy_jobs_view
     !! stays current through the server's event stream: each event fetches the
     !! jobs again, and a timer advances the durations of running jobs.
     use fortui
-    use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init, json_parser_next, &
-        JSON_KEY, JSON_STRING, JSON_INTEGER, JSON_OBJECT_START, JSON_OBJECT_END, &
-        JSON_ARRAY_START, JSON_ARRAY_END, JSON_END_OF_INPUT, JSON_ERROR, json_extract_string
-    use fy_fetch, only: request_t, fetch_start, fetch_ready
-    use fy_stream, only: stream_open, stream_count, stream_close
-    use fy_route, only: at, go, url_encode, route_href, R_COMMIT
-    use fy_time, only: ago, seconds_since, seconds_between, duration
+    use fx_json_parse, only: &
+        JSON_ARRAY_END, &
+        JSON_ARRAY_START, &
+        JSON_END_OF_INPUT, &
+        JSON_ERROR, &
+        JSON_INTEGER, &
+        JSON_KEY, &
+        JSON_OBJECT_END, &
+        JSON_OBJECT_START, &
+        JSON_STRING, &
+        json_event_t, &
+        json_extract_string, &
+        json_parser_init, &
+        json_parser_next, &
+        json_parser_t
+    use fy_fetch, only: &
+        fetch_ready, &
+        fetch_start, &
+        request_t
+    use fy_pages
+    use fy_route, only: &
+        at, &
+        go, &
+        route_href, &
+        url_encode
+    use fy_stream, only: &
+        stream_close, &
+        stream_count, &
+        stream_open
+    use fy_time, only: &
+        ago, &
+        duration, &
+        seconds_between, &
+        seconds_since
     implicit none
     private
 
-    public :: jobs_view_show, jobs_view_hide, jobs_view_receive, jobs_view_compose, &
+    public :: &
+        jobs_view_compose, &
+        jobs_view_hide, &
+        jobs_view_receive, &
+        jobs_view_show, &
         jobs_view_title
 
     type :: job_t

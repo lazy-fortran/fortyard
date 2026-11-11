@@ -3,12 +3,20 @@ module fy_highlight
     !! byte where each run ends and its tone. One line at a time; `state`
     !! carries constructs that span lines (C block comments, Python
     !! triple-quoted strings) from one line to the next.
-    use fortui, only: UI_TONE_KEYWORD, UI_TONE_STRING, UI_TONE_COMMENT, UI_TONE_NUMBER, &
-        UI_TONE_TYPE, UI_TONE_PREPROC, UI_TONE_STRONG
+    use fortui, only: &
+        UI_TONE_COMMENT, &
+        UI_TONE_KEYWORD, &
+        UI_TONE_NUMBER, &
+        UI_TONE_PREPROC, &
+        UI_TONE_STRING, &
+        UI_TONE_STRONG, &
+        UI_TONE_TYPE
     implicit none
     private
 
-    public :: lang_of, highlight
+    public :: &
+        highlight, &
+        lang_of
     integer, parameter, public :: LANG_NONE = 0, LANG_FORTRAN = 1, LANG_C = 2, &
         LANG_SHELL = 3, LANG_PYTHON = 4, LANG_TOML = 5, LANG_YAML = 6, LANG_CMAKE = 7, &
         LANG_MARKDOWN = 8, LANG_JS = 9

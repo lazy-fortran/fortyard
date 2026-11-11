@@ -3,10 +3,22 @@ program test_policy_bisect
     !! main is reported once, without further runs and without blaming a
     !! change; with bisect=on, the commit that broke it is found.
     use, intrinsic :: iso_fortran_env, only: int64
-    use fy_posix, only: tcp_listen, tcp_connect, sock_send_all, sock_recv, sock_close, &
-        sock_bound_port, sock_set_timeouts
-    use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, proc_setenv, &
-        SIGTERM
+    use fy_posix, only: &
+        sock_bound_port, &
+        sock_close, &
+        sock_recv, &
+        sock_send_all, &
+        sock_set_timeouts, &
+        tcp_connect, &
+        tcp_listen
+    use fy_proc, only: &
+        SIGTERM, &
+        proc_exit, &
+        proc_fork, &
+        proc_kill, &
+        proc_setenv, &
+        proc_sleep_ms, &
+        proc_wait
     use fy_server, only: server_supervise, server_set_data_dir, server_set_checks
     use fy_runner, only: runner_main
     use fy_sqlite, only: db_t, db_close

@@ -2,11 +2,20 @@ program fy_app
     !! The fortyard browser application: starts at the page's location, from
     !! the responses the server sent with the page, and hands its frames to the
     !! browser.
-    use fortui, only: ui_init, ui_run
-    use fortui_web, only: web_backend_t
-    use fy_ui_app, only: app_start, app_compose
-    use fy_nav, only: nav_location, nav_pref, nav_base
-    use fy_route, only: route_set_base
+    use fortui, only: &
+        ui_init, &
+        ui_run
+    use fortui_web, only: &
+        web_backend_t
+    use fy_nav, only: &
+        nav_base, &
+        nav_location, &
+        nav_pref
+    use fy_route, only: &
+        route_set_base
+    use fy_ui_app, only: &
+        app_compose, &
+        app_start
     implicit none
     integer :: stat
 

@@ -1,11 +1,20 @@
 module fy_time
     !! Times of commits and fetches as people read them.
-    use, intrinsic :: iso_fortran_env, only: int64
-    use fortui, only: ui_str
+    use, intrinsic :: iso_fortran_env, only: &
+        int64
+    use fortui, only: &
+        ui_str
     implicit none
     private
 
-    public :: ago, when, epoch, day_of, seconds_since, seconds_between, duration
+    public :: &
+        ago, &
+        day_of, &
+        duration, &
+        epoch, &
+        seconds_between, &
+        seconds_since, &
+        when
 
 contains
 

@@ -3,7 +3,10 @@ module fy_diff
     implicit none
     private
 
-    public :: diff_file_t, diff_line_t, parse_patch
+    public :: &
+        diff_file_t, &
+        diff_line_t, &
+        parse_patch
     integer, parameter, public :: DL_CONTEXT = 0, DL_ADDED = 1, DL_REMOVED = 2, DL_HUNK = 3, &
         DL_NOTE = 4
 

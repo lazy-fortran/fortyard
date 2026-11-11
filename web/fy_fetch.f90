@@ -1,10 +1,15 @@
 module fy_fetch
     !! Asynchronous HTTP requests from the browser application to its server.
-    use, intrinsic :: iso_c_binding, only: c_int, c_char
+    use, intrinsic :: iso_c_binding, only: &
+        c_char, &
+        c_int
     implicit none
     private
 
-    public :: request_t, fetch_start, fetch_ready
+    public :: &
+        fetch_ready, &
+        fetch_start, &
+        request_t
 
     type :: request_t
         integer :: id = 0

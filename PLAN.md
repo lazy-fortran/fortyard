@@ -203,7 +203,7 @@ starts when the letters before it have landed.
       content hashes in the database. Versions 1 to 15 stay, with the version
       row frozen at 15, so the previous release still starts. A duplicate name
       or a changed body of an applied migration refuses to migrate.
-- [ ] MP2 (B) One name per line, sorted, in the lists every feature extends:
+- [x] MP2 (B) One name per line, sorted, in the lists every feature extends:
       the `public` and `use ..., only:` lists of the store, change and server
       modules, the usage text and the MCP actions. Lands with nothing else in
       flight; two branches that each add a store procedure then merge in these

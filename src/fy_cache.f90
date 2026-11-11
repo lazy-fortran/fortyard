@@ -9,16 +9,28 @@ module fy_cache
     !! reads and writes. KEY is 64 hexadecimal digits. Objects are kept on local
     !! disk under DATA/cache and removed least recently used first once they
     !! exceed FY_CACHE_MAX (bytes, K/M/G suffixes; default 10G).
-    use, intrinsic :: iso_fortran_env, only: int64, error_unit
-    use fx_hash, only: sha256_file
-    use fy_http, only: http_request_t, http_send_response, http_bearer_token
-    use fy_posix, only: sock_recv
-    use fy_sqlite, only: db_t
-    use fy_store, only: token_identity_t, store_token_lookup
+    use, intrinsic :: iso_fortran_env, only: &
+        error_unit, &
+        int64
+    use fx_hash, only: &
+        sha256_file
+    use fy_http, only: &
+        http_bearer_token, &
+        http_request_t, &
+        http_send_response
+    use fy_posix, only: &
+        sock_recv
+    use fy_sqlite, only: &
+        db_t
+    use fy_store, only: &
+        store_token_lookup, &
+        token_identity_t
     implicit none
     private
 
-    public :: cache_route, cache_serve
+    public :: &
+        cache_route, &
+        cache_serve
 
     integer(int64), parameter :: MAX_OBJECT = 67108864_int64
     character(len=*), parameter :: PREFIX = '/cache/v1/'

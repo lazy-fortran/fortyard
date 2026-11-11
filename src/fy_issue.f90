@@ -7,16 +7,36 @@ module fy_issue
     !!   GET  /api/v1/repos/REPO/issues/N
     !!   POST /api/v1/repos/REPO/issues/N {"title","body","state"}
     !!   POST /api/v1/repos/REPO/issues/N/comments {"body"}
-    use, intrinsic :: iso_fortran_env, only: int64
-    use fx_json_build, only: json_escape_string
-    use fx_json_parse, only: json_extract_string
-    use fy_change, only: change_next_number
-    use fy_sqlite, only: db_t, stmt_t, db_prepare, db_exec, stmt_bind_text, stmt_bind_int, stmt_step, &
-        stmt_text, stmt_int, stmt_finalize, SQLITE_OK, SQLITE_ROW, SQLITE_DONE
+    use, intrinsic :: iso_fortran_env, only: &
+        int64
+    use fx_json_build, only: &
+        json_escape_string
+    use fx_json_parse, only: &
+        json_extract_string
+    use fy_change, only: &
+        change_next_number
+    use fy_sqlite, only: &
+        SQLITE_DONE, &
+        SQLITE_OK, &
+        SQLITE_ROW, &
+        db_exec, &
+        db_prepare, &
+        db_t, &
+        stmt_bind_int, &
+        stmt_bind_text, &
+        stmt_finalize, &
+        stmt_int, &
+        stmt_step, &
+        stmt_t, &
+        stmt_text
     implicit none
     private
 
-    public :: issue_api, issue_open, issue_comment, issue_set_state
+    public :: &
+        issue_api, &
+        issue_comment, &
+        issue_open, &
+        issue_set_state
 
     character(len=*), parameter :: NOW = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
     character(len=*), parameter :: COLUMNS = 'id, number, title, body, author, state,'// &

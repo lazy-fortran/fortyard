@@ -5,22 +5,55 @@ module fy_change_view
     !!   /REPO/-/changes, /REPO/-/changes/N, /REPO/-/changes/N/files
     !!   /REPO/-/issues, /REPO/-/issues/N, /REPO/-/issues/new
     use fortui
-    use fx_json_build, only: json_escape_string
-    use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init, json_parser_next, &
-        JSON_KEY, JSON_STRING, JSON_INTEGER, JSON_OBJECT_START, JSON_OBJECT_END, &
-        JSON_ARRAY_START, JSON_ARRAY_END, JSON_END_OF_INPUT, JSON_ERROR, json_extract_string, &
-        json_extract_int
-    use fy_fetch, only: request_t, fetch_start, fetch_ready
-    use fy_markdown, only: md_doc_t, md_parse, md_compose
-    use fy_code_lines, only: shown_file_t, diff_load, diff_compose
-    use fy_route, only: route_t, at, go, url_encode, route_href, R_CHANGES, R_CHANGE, R_ISSUES, &
-        R_ISSUE, R_COMMIT
-    use fy_time, only: ago
+    use fx_json_build, only: &
+        json_escape_string
+    use fx_json_parse, only: &
+        JSON_ARRAY_END, &
+        JSON_ARRAY_START, &
+        JSON_END_OF_INPUT, &
+        JSON_ERROR, &
+        JSON_INTEGER, &
+        JSON_KEY, &
+        JSON_OBJECT_END, &
+        JSON_OBJECT_START, &
+        JSON_STRING, &
+        json_event_t, &
+        json_extract_int, &
+        json_extract_string, &
+        json_parser_init, &
+        json_parser_next, &
+        json_parser_t
+    use fy_code_lines, only: &
+        diff_compose, &
+        diff_load, &
+        shown_file_t
+    use fy_fetch, only: &
+        fetch_ready, &
+        fetch_start, &
+        request_t
+    use fy_markdown, only: &
+        md_compose, &
+        md_doc_t, &
+        md_parse
+    use fy_pages
+    use fy_route, only: &
+        at, &
+        go, &
+        route_href, &
+        route_t, &
+        url_encode
+    use fy_time, only: &
+        ago
     implicit none
     private
 
-    public :: change_view_show, change_view_receive, change_view_compose, change_view_title, &
-        change_view_repo, change_view_missing
+    public :: &
+        change_view_compose, &
+        change_view_missing, &
+        change_view_receive, &
+        change_view_repo, &
+        change_view_show, &
+        change_view_title
 
     type :: row_t
         integer :: number = 0, versions = 0, comments = 0

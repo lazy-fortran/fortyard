@@ -5,20 +5,48 @@ module fy_change
     !! branch. Every version's head is kept under refs/fortyard/changes/N/V, so
     !! its diff stays readable after the branch is gone. Issues and changes
     !! share one number sequence per repository with the "(#N)" of main.
-    use, intrinsic :: iso_fortran_env, only: int64
-    use fx_json_build, only: json_escape_string
-    use fx_json_parse, only: json_extract_string
-    use fy_audit, only: audit_append
-    use fy_events, only: events_notify
-    use fy_proc, only: proc_run
-    use fy_sqlite, only: db_t, stmt_t, db_prepare, db_exec, stmt_bind_text, &
-        stmt_bind_int, stmt_step, stmt_text, stmt_int, stmt_finalize, SQLITE_OK, SQLITE_ROW
+    use, intrinsic :: iso_fortran_env, only: &
+        int64
+    use fx_json_build, only: &
+        json_escape_string
+    use fx_json_parse, only: &
+        json_extract_string
+    use fy_audit, only: &
+        audit_append
+    use fy_events, only: &
+        events_notify
+    use fy_proc, only: &
+        proc_run
+    use fy_sqlite, only: &
+        SQLITE_OK, &
+        SQLITE_ROW, &
+        db_exec, &
+        db_prepare, &
+        db_t, &
+        stmt_bind_int, &
+        stmt_bind_text, &
+        stmt_finalize, &
+        stmt_int, &
+        stmt_step, &
+        stmt_t, &
+        stmt_text
     implicit none
     private
 
-    public :: change_t, change_sync, change_get, change_by_id, change_by_branch, change_comment, change_landed, &
-        change_next_number, change_api, change_message, change_review_set, &
-        change_review_next, change_last_version
+    public :: &
+        change_api, &
+        change_by_branch, &
+        change_by_id, &
+        change_comment, &
+        change_get, &
+        change_landed, &
+        change_last_version, &
+        change_message, &
+        change_next_number, &
+        change_review_next, &
+        change_review_set, &
+        change_sync, &
+        change_t
 
     type :: change_t
         integer(int64) :: id = 0

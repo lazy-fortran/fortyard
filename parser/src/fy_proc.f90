@@ -4,11 +4,28 @@ module fy_proc
     implicit none
     private
 
-    public :: proc_fork, proc_wait_any, proc_wait, proc_kill, proc_exit, proc_pid
-    public :: proc_die_with_parent, proc_sleep_ms, proc_run, proc_spawn, proc_find
-    public :: fd_read, fd_write_all, fd_close, proc_exit_status
-    public :: proc_poll_child, proc_readlink, proc_reexec, proc_setenv
-    public :: SIGTERM, SIGKILL
+    public :: &
+        SIGKILL, &
+        SIGTERM, &
+        fd_close, &
+        fd_read, &
+        fd_write_all, &
+        proc_die_with_parent, &
+        proc_exit, &
+        proc_exit_status, &
+        proc_find, &
+        proc_fork, &
+        proc_kill, &
+        proc_pid, &
+        proc_poll_child, &
+        proc_readlink, &
+        proc_reexec, &
+        proc_run, &
+        proc_setenv, &
+        proc_sleep_ms, &
+        proc_spawn, &
+        proc_wait, &
+        proc_wait_any
 
     integer, parameter :: SIGKILL = 9, SIGTERM = 15
     integer(c_int), parameter :: PR_SET_PDEATHSIG = 1

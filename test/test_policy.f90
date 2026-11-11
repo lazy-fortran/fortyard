@@ -6,14 +6,25 @@ program test_policy
     !! unreviewed_limit how many landed changes may wait for a review.
     use, intrinsic :: iso_fortran_env, only: int64
     use fy_change, only: change_t, change_get, change_review_set, change_review_next
-    use fy_policy, only: policy_t, policy_get, policy_put, policy_set, policy_from_json, &
-        policy_json, policy_unreviewed, policy_refusal
+    use fy_policy, only: &
+        policy_from_json, &
+        policy_get, &
+        policy_json, &
+        policy_put, &
+        policy_refusal, &
+        policy_set, &
+        policy_t, &
+        policy_unreviewed
     use fy_posix, only: tcp_listen, sock_bound_port, sock_close
     use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, SIGTERM
     use fy_server, only: server_supervise, server_set_data_dir
     use fy_sqlite, only: db_t, db_close, db_exec
-    use fy_store, only: store_open, store_bootstrap, store_repo_add, store_token_create, &
-        store_landing_add
+    use fy_store, only: &
+        store_bootstrap, &
+        store_landing_add, &
+        store_open, &
+        store_repo_add, &
+        store_token_create
     implicit none
 
     character(len=*), parameter :: data = 'build/test_policy_data', work = 'build/test_policy_work'

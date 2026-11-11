@@ -1,21 +1,57 @@
 program fy
-    use, intrinsic :: iso_fortran_env, only: error_unit, output_unit, int64
-    use fx_json_build, only: json_escape_string
-    use fy_audit, only: audit_append
-    use fy_build_info, only: FY_VERSION, FY_COMMIT
-    use fy_runner, only: runner_main
-    use fy_mcp, only: mcp_main
-    use fy_client, only: client_request, config_t, config_load, config_save, client_set_proxy
-    use fy_cli, only: cli_table, cli_field, cli_tail
-    use fy_land, only: land_push_check
-    use fy_policy, only: policy_t, policy_set, POLICY_KEYS
-    use fy_proc, only: proc_setenv, proc_sleep_ms
-    use fy_posix, only: tcp_listen, activated_listen_fd, sock_bound_port
-    use fy_server, only: server_supervise, server_set_web_dir, server_set_data_dir, &
-        server_set_base, server_set_follow, server_set_checks, &
-        server_set_mirror_interval
-    use fy_sqlite, only: db_t, db_errmsg, db_close
-    use fy_store, only: store_open, store_bootstrap
+    use, intrinsic :: iso_fortran_env, only: &
+        error_unit, &
+        int64, &
+        output_unit
+    use fx_json_build, only: &
+        json_escape_string
+    use fy_audit, only: &
+        audit_append
+    use fy_build_info, only: &
+        FY_COMMIT, &
+        FY_VERSION
+    use fy_cli, only: &
+        cli_field, &
+        cli_table, &
+        cli_tail
+    use fy_client, only: &
+        client_request, &
+        client_set_proxy, &
+        config_load, &
+        config_save, &
+        config_t
+    use fy_land, only: &
+        land_push_check
+    use fy_mcp, only: &
+        mcp_main
+    use fy_policy, only: &
+        POLICY_KEYS, &
+        policy_set, &
+        policy_t
+    use fy_posix, only: &
+        activated_listen_fd, &
+        sock_bound_port, &
+        tcp_listen
+    use fy_proc, only: &
+        proc_setenv, &
+        proc_sleep_ms
+    use fy_runner, only: &
+        runner_main
+    use fy_server, only: &
+        server_set_base, &
+        server_set_checks, &
+        server_set_data_dir, &
+        server_set_follow, &
+        server_set_mirror_interval, &
+        server_set_web_dir, &
+        server_supervise
+    use fy_sqlite, only: &
+        db_close, &
+        db_errmsg, &
+        db_t
+    use fy_store, only: &
+        store_bootstrap, &
+        store_open
     implicit none
 
     character(len=:), allocatable :: command
@@ -24,40 +60,40 @@ program fy
     ! Asking for help never runs a command: `fy land --help` once landed.
     if (wants_help()) command = 'help'
     select case (command)
-    case ('serve')
-        call cmd_serve()
-    case ('login')
-        call cmd_login()
-    case ('whoami')
-        call cmd_get('/api/v1/whoami')
-    case ('token')
-        call cmd_token()
-    case ('repo')
-        call cmd_repo()
-    case ('runner')
-        call cmd_runner()
+    case ('audit')
+        call cmd_audit()
+    case ('change')
+        call cmd_change()
+    case ('git-credential')
+        call cmd_git_credential()
+    case ('issue')
+        call cmd_issue()
+    case ('job')
+        call cmd_job()
+    case ('jobs')
+        call cmd_jobs()
     case ('land')
         call cmd_land()
     case ('landings')
         call cmd_landings()
-    case ('jobs')
-        call cmd_jobs()
-    case ('verify')
-        call cmd_verify()
-    case ('job')
-        call cmd_job()
-    case ('push')
-        call cmd_push()
-    case ('change')
-        call cmd_change()
-    case ('issue')
-        call cmd_issue()
-    case ('audit')
-        call cmd_audit()
-    case ('git-credential')
-        call cmd_git_credential()
+    case ('login')
+        call cmd_login()
     case ('mcp')
         call mcp_main()
+    case ('push')
+        call cmd_push()
+    case ('repo')
+        call cmd_repo()
+    case ('runner')
+        call cmd_runner()
+    case ('serve')
+        call cmd_serve()
+    case ('token')
+        call cmd_token()
+    case ('verify')
+        call cmd_verify()
+    case ('whoami')
+        call cmd_get('/api/v1/whoami')
     case ('version', '--version')
         write (output_unit, '(a)') 'fy '//FY_VERSION//' ('//FY_COMMIT//')'
     case ('', 'help', '--help', '-h')
@@ -74,15 +110,18 @@ contains
         write (output_unit, '(a)') &
             'usage: fy <command> [options]', &
             '', &
+        ! the server
             '  serve [--data DIR] [--listen HOST:PORT] [--workers P] [--threads T]', &
             '        [--web DIR] [--mirror-interval SECONDS] [--init]', &
             '                      run the server; --init creates the data directory', &
             '                      and prints the administrator token once', &
+        ! login and tokens
             '  login --server URL [--proxy URL] [--token-file F]', &
             '                      check and store a login; the token comes from F or', &
             '                      standard input', &
             '  whoami              show the account of the stored token', &
             '  token create NAME   create a token with the scopes of the current one', &
+        ! repositories
             '  repo add NAME URL   mirror a repository (https or ssh URL; admin only)', &
             '  repo create NAME    create an empty repository that takes pushes (admin)', &
             '  repo mode NAME MODE primary: take pushes; mirror: follow upstream (admin)', &
@@ -101,8 +140,10 @@ contains
             '                        changes wait for a review (0: no limit)', &
             '  repo list           list repositories', &
             '                      clone and push: git clone http://x:TOKEN@HOST/NAME.git', &
+        ! runners
             '  runner --server URL --token-file F --data DIR [--follow LINK]', &
             '                      perform landing checks for the server (scope runner)', &
+        ! landing and pushing
             '  land [BRANCH] [--repo NAME] [--no-push] [--no-wait]', &
             '                      push HEAD to BRANCH, land it on main after its check', &
             '                      passed and follow it to the end (admin)', &
@@ -111,6 +152,7 @@ contains
             '                      (push and land send no file over 1 MiB, or over the bytes', &
             '                      in .fortyard/size-limit, that .fortyard/allow-large does', &
             '                      not allow)', &
+        ! changes
             '  change list [--all] open changes (--all: also landed and closed ones)', &
             '  change view N       a change with its versions, comments and landings', &
             '  change diff N [--version V] [--from W]', &
@@ -123,11 +165,13 @@ contains
             '  change reviewed N   a person reviewed it; clears its flag (admin)', &
             '  change list --flagged   changes the review agent flagged for a person', &
             '                      (change and push take --repo NAME outside a checkout)', &
+        ! issues
             '  issue list [--all]  open issues (--all: also closed ones)', &
             '  issue view N        an issue with its comments', &
             '  issue new --title T [--body-file F|-]', &
             '  issue comment N [-m TEXT], issue edit N [--title T] [--body-file F|-]', &
             '  issue close N, issue reopen N', &
+        ! landings, jobs and verification
             '  landings [REPO]     recent landings of a repository', &
             '  jobs [REPO]         running, waiting and recent jobs (landings and', &
             '                      verifications of main)', &
@@ -135,17 +179,20 @@ contains
             '                      verify main''s newest commit with the full suite', &
             '  job ID [--wait]     a job''s state and log; --wait follows it', &
             '                      (--json: the answer of the API instead of text)', &
+        ! the audit log
             '  audit list [--before ID] [--limit N] [--json]', &
             '                      the audit log, newest entry first (admin)', &
             '  audit verify [--json]', &
             '                      recompute the hash chain of the audit log and name', &
             '                      the first entry that was altered or removed (admin)', &
+        ! git and agents
             '  git-credential get  git credential helper for the stored login:', &
             '                      git config --global credential.SERVER.helper', &
             '                      ''!fy git-credential''', &
             '  mcp                 MCP server on standard input and output for agents:', &
             '                      tools for repositories, changes, issues, landings', &
             '                      and jobs, each with the arguments it lists', &
+        ! the program itself
             '  version             print the version'
     end subroutine usage
 

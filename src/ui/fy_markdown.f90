@@ -3,11 +3,16 @@ module fy_markdown
     !! fenced code with highlighting, rules; inline code, strong, emphasis and
     !! links as runs. Parsed once, composed every frame.
     use fortui
-    use fy_highlight, only: highlight, lang_of
+    use fy_highlight, only: &
+        highlight, &
+        lang_of
     implicit none
     private
 
-    public :: md_doc_t, md_parse, md_compose
+    public :: &
+        md_compose, &
+        md_doc_t, &
+        md_parse
 
     integer, parameter :: B_PARA = 1, B_HEAD = 2, B_ITEM = 3, B_QUOTE = 4, B_CODE = 5, &
         B_RULE = 6, B_CELL = 7, B_HEAD_CELL = 8

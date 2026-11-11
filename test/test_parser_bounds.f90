@@ -6,13 +6,27 @@ program test_parser_bounds
     !! string anywhere in this corpus stops the program.
     use fx_json_parse, only: json_extract_string
     use fy_change, only: change_sync
-    use fy_http, only: http_request_t, http_parse_head, http_bearer_token, http_cookie, &
-        http_query_param, http_percent_decode, http_basic_password, http_chunk_size, &
+    use fy_http, only: &
+        HTTP_MAX_HEAD, &
+        http_basic_password, &
+        http_bearer_token, &
+        http_chunk_size, &
         http_compiler_options, &
-        HTTP_MAX_HEAD
+        http_cookie, &
+        http_parse_head, &
+        http_percent_decode, &
+        http_query_param, &
+        http_request_t
     use fy_git_http, only: git_http_route, git_http_copy_chunked
-    use fy_posix, only: tcp_listen, tcp_accept, tcp_connect, sock_send_all, sock_recv, &
-        sock_close, sock_bound_port, sock_set_timeouts
+    use fy_posix, only: &
+        sock_bound_port, &
+        sock_close, &
+        sock_recv, &
+        sock_send_all, &
+        sock_set_timeouts, &
+        tcp_accept, &
+        tcp_connect, &
+        tcp_listen
     use fy_server, only: serve_connection, server_set_data_dir
     use fy_sqlite, only: db_t, db_close
     use fy_store, only: store_open, store_bootstrap

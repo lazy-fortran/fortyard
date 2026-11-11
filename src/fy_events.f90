@@ -5,12 +5,18 @@ module fy_events
     !! that through inotify and for its client in one poll(2), so a waiting
     !! stream costs no work at all until something happens.
     use, intrinsic :: iso_c_binding
-    use fy_posix, only: sock_send_all
+    use fy_posix, only: &
+        sock_send_all
     implicit none
     private
 
-    public :: events_set_dir, events_notify, events_stream, events_watch_open, events_wait, &
-        events_watch_close
+    public :: &
+        events_notify, &
+        events_set_dir, &
+        events_stream, &
+        events_wait, &
+        events_watch_close, &
+        events_watch_open
 
     integer(c_int), parameter :: IN_CLOSE_WRITE = 8, IN_MOVED_TO = 128, IN_CLOEXEC = 524288
     integer(c_short), parameter :: POLLIN = 1

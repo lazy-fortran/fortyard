@@ -1,14 +1,30 @@
 module fy_cli
     !! Text output of the command line client: API answers as aligned tables
     !! and single fields, for people rather than for scripts.
-    use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init, json_parser_next, &
-        JSON_OBJECT_START, JSON_OBJECT_END, JSON_ARRAY_START, JSON_ARRAY_END, JSON_KEY, &
-        JSON_STRING, JSON_INTEGER, JSON_REAL, JSON_BOOL, JSON_NULL_VAL, JSON_ERROR, &
-        JSON_END_OF_INPUT
+    use fx_json_parse, only: &
+        JSON_ARRAY_END, &
+        JSON_ARRAY_START, &
+        JSON_BOOL, &
+        JSON_END_OF_INPUT, &
+        JSON_ERROR, &
+        JSON_INTEGER, &
+        JSON_KEY, &
+        JSON_NULL_VAL, &
+        JSON_OBJECT_END, &
+        JSON_OBJECT_START, &
+        JSON_REAL, &
+        JSON_STRING, &
+        json_event_t, &
+        json_parser_init, &
+        json_parser_next, &
+        json_parser_t
     implicit none
     private
 
-    public :: cli_table, cli_field, cli_tail
+    public :: &
+        cli_field, &
+        cli_table, &
+        cli_tail
 
     type :: cell_t
         character(len=:), allocatable :: s

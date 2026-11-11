@@ -1,57 +1,194 @@
 module fy_server
     !! Request routing for `fy serve`.
-    use, intrinsic :: iso_fortran_env, only: error_unit, output_unit, int64
-    use fx_json_build, only: json_escape_string
-    use fx_json_parse, only: json_extract_string
-    use fy_build_info, only: FY_VERSION, FY_COMMIT, FY_BUILT
-    use fy_http, only: http_request_t, http_read_request, http_send_response, &
-        http_bearer_token, http_cookie, http_query_param, http_read_head, http_read_body, &
-        http_basic_password
-    use fy_git_http, only: git_http_route, git_http_serve
-    use fy_review, only: review_enabled, reviewer_main
-    use fy_land, only: land_branch, land_candidate, land_hook_install, land_check
-    use fy_issue, only: issue_api
-    use fy_audit, only: audit_t, audit_append, audit_list, audit_verify, audit_json
-    use fy_policy, only: policy_t, policy_get, policy_put, policy_from_json, policy_json, &
-        policy_refusal, policy_queue
-    use fy_verify, only: verifier_main, verify_request
-    use fy_change, only: change_t, change_sync, change_by_id, change_by_branch, change_landed, &
-        change_next_number, change_api, change_message
-    use fy_events, only: events_set_dir, events_notify, events_stream, events_watch_open, &
-        events_wait, events_watch_close
-    use fortui, only: ui_init, ui_frame_begin, ui_present, ui_shutdown
-    use fortui_backend_headless, only: headless_backend_t
-    use fortui_html, only: ui_frame_html
-    use fy_ui_app, only: app_start, app_compose, app_title, app_missing
-    use fy_fetch, only: fetch_serve, fetch_served_json
-    use fy_route, only: route_is_page, route_set_base
-    use fy_repo, only: repo_name_ok, repo_ref_ok, repo_path_ok, repo_log_json, repo_tree_json, &
-        repo_blob, repo_commit_json, repo_refs_json, repo_clone, repo_fetch, repo_init, repo_push_tags
-    use fy_posix, only: tcp_accept, sock_close, sock_set_timeouts, sock_recv
-    use fy_sqlite, only: db_t
-    use fy_oidc, only: oidc_config_t, oidc_load, oidc_authorize_url, oidc_exchange, &
-        oidc_check, oidc_claims_t, oidc_is_admin, oidc_value_ok
-    use fy_proc, only: proc_fork, proc_wait_any, proc_exit, proc_pid, &
-        proc_die_with_parent, proc_sleep_ms, proc_poll_child, proc_readlink, proc_reexec, proc_kill, proc_wait, SIGTERM
-    use fx_hash, only: sha256_file
-    use fy_cache, only: cache_route, cache_serve
-    use fy_store, only: store_account_find, random_token
-    use fy_store, only: token_identity_t, token_info_t, store_token_lookup, store_token_create, &
-        store_open, store_token_list, store_token_revoke, store_token_revoke_hash, repo_info_t, &
-        store_repo_add, store_repo_list, store_repo_fetched, store_repo_set_mode, store_repo_set_number, landing_t, &
-        store_landing_add, store_landing_next, store_landing_take, store_landing_requeue, store_landing_finish, &
+    use, intrinsic :: iso_fortran_env, only: &
+        error_unit, &
+        int64, &
+        output_unit
+    use fortui, only: &
+        ui_frame_begin, &
+        ui_init, &
+        ui_present, &
+        ui_shutdown
+    use fortui_backend_headless, only: &
+        headless_backend_t
+    use fortui_html, only: &
+        ui_frame_html
+    use fx_hash, only: &
+        sha256_file
+    use fx_json_build, only: &
+        json_escape_string
+    use fx_json_parse, only: &
+        json_extract_string
+    use fy_audit, only: &
+        audit_append, &
+        audit_json, &
+        audit_list, &
+        audit_t, &
+        audit_verify
+    use fy_build_info, only: &
+        FY_BUILT, &
+        FY_COMMIT, &
+        FY_VERSION
+    use fy_cache, only: &
+        cache_route, &
+        cache_serve
+    use fy_change, only: &
+        change_api, &
+        change_by_branch, &
+        change_by_id, &
+        change_landed, &
+        change_message, &
+        change_next_number, &
+        change_sync, &
+        change_t
+    use fy_events, only: &
+        events_notify, &
+        events_set_dir, &
+        events_stream, &
+        events_wait, &
+        events_watch_close, &
+        events_watch_open
+    use fy_fetch, only: &
+        fetch_serve, &
+        fetch_served_json
+    use fy_git_http, only: &
+        git_http_route, &
+        git_http_serve
+    use fy_http, only: &
+        http_basic_password, &
+        http_bearer_token, &
+        http_cookie, &
+        http_query_param, &
+        http_read_body, &
+        http_read_head, &
+        http_read_request, &
+        http_request_t, &
+        http_send_response
+    use fy_issue, only: &
+        issue_api
+    use fy_land, only: &
+        land_branch, &
+        land_candidate, &
+        land_check, &
+        land_hook_install
+    use fy_oidc, only: &
+        oidc_authorize_url, &
+        oidc_check, &
+        oidc_claims_t, &
+        oidc_config_t, &
+        oidc_exchange, &
+        oidc_is_admin, &
+        oidc_load, &
+        oidc_value_ok
+    use fy_policy, only: &
+        policy_from_json, &
+        policy_get, &
+        policy_json, &
+        policy_put, &
+        policy_queue, &
+        policy_refusal, &
+        policy_t
+    use fy_posix, only: &
+        sock_close, &
+        sock_recv, &
+        sock_set_timeouts, &
+        tcp_accept
+    use fy_proc, only: &
+        SIGTERM, &
+        proc_die_with_parent, &
+        proc_exit, &
+        proc_fork, &
+        proc_kill, &
+        proc_pid, &
+        proc_poll_child, &
+        proc_readlink, &
+        proc_reexec, &
+        proc_sleep_ms, &
+        proc_wait, &
+        proc_wait_any
+    use fy_repo, only: &
+        repo_blob, &
+        repo_clone, &
+        repo_commit_json, &
+        repo_fetch, &
+        repo_init, &
+        repo_log_json, &
+        repo_name_ok, &
+        repo_path_ok, &
+        repo_push_tags, &
+        repo_ref_ok, &
+        repo_refs_json, &
+        repo_tree_json
+    use fy_review, only: &
+        review_enabled, &
+        reviewer_main
+    use fy_route, only: &
+        route_is_page, &
+        route_set_base
+    use fy_sqlite, only: &
+        db_close, &
+        db_t
+    use fy_store, only: &
+        landing_t, &
+        random_token, &
+        release_t, &
+        repo_info_t, &
+        store_account_find, &
+        store_check_add, &
+        store_check_claim, &
+        store_check_finish, &
+        store_check_get, &
         store_check_release, &
-        store_landing_list, release_t, store_release_add, store_release_ready, store_release_list, &
-        store_jobs, store_job, store_job_counts, store_jobs_state, store_snapshot, &
-        store_check_add, store_check_claim, store_check_finish, store_check_get
-    use fy_sqlite, only: db_close
+        store_job, &
+        store_job_counts, &
+        store_jobs, &
+        store_jobs_state, &
+        store_landing_add, &
+        store_landing_finish, &
+        store_landing_list, &
+        store_landing_next, &
+        store_landing_requeue, &
+        store_landing_take, &
+        store_open, &
+        store_release_add, &
+        store_release_list, &
+        store_release_ready, &
+        store_repo_add, &
+        store_repo_fetched, &
+        store_repo_list, &
+        store_repo_set_mode, &
+        store_repo_set_number, &
+        store_snapshot, &
+        store_token_create, &
+        store_token_list, &
+        store_token_lookup, &
+        store_token_revoke, &
+        store_token_revoke_hash, &
+        token_identity_t, &
+        token_info_t
+    use fy_ui_app, only: &
+        app_compose, &
+        app_missing, &
+        app_start, &
+        app_title
+    use fy_verify, only: &
+        verifier_main, &
+        verify_request
     implicit none
     private
 
-    public :: server_loop, serve_connection, route, server_supervise, server_set_web_dir
-    public :: server_set_data_dir, server_set_mirror_interval, server_set_base, server_set_follow, &
-        server_set_checks
-    public :: response_t
+    public :: &
+        response_t, &
+        route, &
+        serve_connection, &
+        server_loop, &
+        server_set_base, &
+        server_set_checks, &
+        server_set_data_dir, &
+        server_set_follow, &
+        server_set_mirror_interval, &
+        server_set_web_dir, &
+        server_supervise
 
     character(len=*), parameter :: JSON = 'application/json'
     character(len=*), parameter :: SESSION_COOKIE = 'fy_session'
@@ -680,6 +817,11 @@ contains
             end if
         end if
         if (req%method == 'POST' .and. len(rest) > 5) then
+            ! Sorted by suffix.
+            if (rest(len(rest) - 4:) == '/land') then
+                call queue_landing(rest(1:len(rest) - 5))
+                return
+            end if
             if (rest(len(rest) - 4:) == '/mode') then
                 call set_mode(rest(1:len(rest) - 5))
                 return
@@ -689,10 +831,6 @@ contains
                     call set_number(rest(1:len(rest) - 8))
                     return
                 end if
-            end if
-            if (rest(len(rest) - 4:) == '/land') then
-                call queue_landing(rest(1:len(rest) - 5))
-                return
             end if
             if (len(rest) > 7) then
                 if (rest(len(rest) - 6:) == '/verify') then
@@ -737,12 +875,6 @@ contains
             return
         end if
         select case (sub)
-        case ('refs')
-            call repo_refs_json(repo_path(name), res%body, status)
-        case ('log')
-            call repo_log_json(repo_path(name), ref, 100, res%body, status)
-        case ('tree')
-            call repo_tree_json(repo_path(name), ref, path, res%body, status)
         case ('blob')
             call repo_blob(repo_path(name), ref, path, res%body, status)
             if (status == 413) then
@@ -750,6 +882,12 @@ contains
                 return
             end if
             res%ctype = 'text/plain; charset=utf-8'
+        case ('log')
+            call repo_log_json(repo_path(name), ref, 100, res%body, status)
+        case ('refs')
+            call repo_refs_json(repo_path(name), res%body, status)
+        case ('tree')
+            call repo_tree_json(repo_path(name), ref, path, res%body, status)
         case default
             if (index(sub, 'commits/') /= 1 .or. .not. repo_ref_ok(sub(9:))) then
                 call fail(res, 404, 'not found')
@@ -1403,11 +1541,8 @@ contains
         res%body = ''
         res%headers = ''
         res%cache = 'no-store'
+        ! Exact paths, then prefixes, each sorted by path; no two match one request.
         select case (req%path)
-        case ('/healthz')
-            if (.not. method_is(req, 'GET', res)) return
-            res%ctype = 'text/plain; charset=utf-8'
-            res%body = 'ok '//FY_VERSION//' '//FY_COMMIT//new_line('a')
         case ('/', '/index.html')
             if (.not. method_is(req, 'GET', res)) return
             res%code = 404
@@ -1417,32 +1552,6 @@ contains
                 res%ctype = 'text/html; charset=utf-8'
                 res%body = status_page()
             end if
-        case ('/status')
-            if (.not. method_is(req, 'GET', res)) return
-            res%ctype = 'text/html; charset=utf-8'
-            res%body = status_page()
-        case ('/api/v1/version')
-            if (.not. method_is(req, 'GET', res)) return
-            res%body = version_json()
-        case ('/api/v1/whoami')
-            if (.not. method_is(req, 'GET', res)) return
-            if (.not. authenticated(req, db, who, res)) return
-            res%body = '{"account":"'//json_escape_string(who%account)// &
-                '","token":"'//json_escape_string(who%token_name)// &
-                '","scopes":"'//json_escape_string(who%scopes)//'"}'
-        case ('/api/v1/tokens')
-            if (req%method == 'GET') then
-                if (.not. authenticated(req, db, who, res)) return
-                call list_tokens(db, who, res)
-            else if (req%method == 'POST') then
-                if (.not. authenticated(req, db, who, res)) return
-                call create_token(req, db, who, res)
-            else
-                call fail(res, 405, 'use GET or POST')
-            end if
-        case ('/login')
-            if (.not. method_is(req, 'GET', res)) return
-            call login_start(res)
         case ('/-/login/callback')
             if (.not. method_is(req, 'GET', res)) return
             call login_finish(req, db, res)
@@ -1454,16 +1563,43 @@ contains
             else
                 call fail(res, 405, 'use POST or DELETE')
             end if
+        case ('/api/v1/tokens')
+            if (req%method == 'GET') then
+                if (.not. authenticated(req, db, who, res)) return
+                call list_tokens(db, who, res)
+            else if (req%method == 'POST') then
+                if (.not. authenticated(req, db, who, res)) return
+                call create_token(req, db, who, res)
+            else
+                call fail(res, 405, 'use GET or POST')
+            end if
+        case ('/api/v1/version')
+            if (.not. method_is(req, 'GET', res)) return
+            res%body = version_json()
+        case ('/api/v1/whoami')
+            if (.not. method_is(req, 'GET', res)) return
+            if (.not. authenticated(req, db, who, res)) return
+            res%body = '{"account":"'//json_escape_string(who%account)// &
+                '","token":"'//json_escape_string(who%token_name)// &
+                '","scopes":"'//json_escape_string(who%scopes)//'"}'
+        case ('/healthz')
+            if (.not. method_is(req, 'GET', res)) return
+            res%ctype = 'text/plain; charset=utf-8'
+            res%body = 'ok '//FY_VERSION//' '//FY_COMMIT//new_line('a')
+        case ('/login')
+            if (.not. method_is(req, 'GET', res)) return
+            call login_start(res)
+        case ('/status')
+            if (.not. method_is(req, 'GET', res)) return
+            res%ctype = 'text/html; charset=utf-8'
+            res%body = status_page()
         case default
-            if (index(req%path, '/app/') == 1) then
-                if (.not. method_is(req, 'GET', res)) return
-                call static_file(req, req%path(6:), res)
+            if (req%path == '/api/v1/audit' .or. req%path == '/api/v1/audit/verify') then
+                call audit_route(req, db, res)
             else if (index(req%path, '/api/v1/checks/') == 1) then
                 call checks_route(req, db, res)
             else if (req%path == '/api/v1/jobs' .or. index(req%path, '/api/v1/jobs/') == 1) then
                 call jobs_route(req, db, res)
-            else if (req%path == '/api/v1/audit' .or. req%path == '/api/v1/audit/verify') then
-                call audit_route(req, db, res)
             else if (req%path == '/api/v1/repos' .or. index(req%path, '/api/v1/repos/') == 1) then
                 call repos_route(req, db, res)
             else if (index(req%path, '/api/v1/tokens/') == 1) then
@@ -1480,6 +1616,9 @@ contains
                 if (.not. method_is(req, 'POST', res)) return
                 if (.not. authenticated(req, db, who, res)) return
                 call revoke_token(db, who, id, res)
+            else if (index(req%path, '/app/') == 1) then
+                if (.not. method_is(req, 'GET', res)) return
+                call static_file(req, req%path(6:), res)
             else
                 call fail(res, 404, 'not found')
                 if (route_is_page(req%path) .and. allocated(web_dir) .and. req%method == 'GET') &

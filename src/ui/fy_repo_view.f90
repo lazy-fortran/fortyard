@@ -5,25 +5,67 @@ module fy_repo_view
     !! location (fy_route); a page already loaded for the same location is shown
     !! again without asking the server.
     use fortui
-    use fx_json_build, only: json_escape_string
-    use fx_json_parse, only: json_extract_string, json_parser_t, json_event_t, &
-        json_parser_init, json_parser_next, JSON_KEY, JSON_STRING, JSON_INTEGER, JSON_BOOL, &
-        JSON_OBJECT_END, JSON_END_OF_INPUT, JSON_ERROR
-    use fy_fetch, only: request_t, fetch_start, fetch_ready
-    use fy_highlight, only: highlight, lang_of
-    use fy_code_lines, only: line_t, shown_file_t, diff_load, diff_compose, numbered, plain_lines, &
-        right, untab
-    use fy_markdown, only: md_doc_t, md_parse, md_compose
-    use fy_route, only: route_t, route_href, url_encode, go, at, R_TREE, R_BLOB, R_COMMITS, &
-        R_COMMIT
-    use fy_time, only: ago, day_of
-    use fy_nav, only: nav_copy
+    use fx_json_build, only: &
+        json_escape_string
+    use fx_json_parse, only: &
+        JSON_BOOL, &
+        JSON_END_OF_INPUT, &
+        JSON_ERROR, &
+        JSON_INTEGER, &
+        JSON_KEY, &
+        JSON_OBJECT_END, &
+        JSON_STRING, &
+        json_event_t, &
+        json_extract_string, &
+        json_parser_init, &
+        json_parser_next, &
+        json_parser_t
+    use fy_code_lines, only: &
+        diff_compose, &
+        diff_load, &
+        line_t, &
+        numbered, &
+        plain_lines, &
+        right, &
+        shown_file_t, &
+        untab
+    use fy_fetch, only: &
+        fetch_ready, &
+        fetch_start, &
+        request_t
+    use fy_highlight, only: &
+        highlight, &
+        lang_of
+    use fy_markdown, only: &
+        md_compose, &
+        md_doc_t, &
+        md_parse
+    use fy_nav, only: &
+        nav_copy
+    use fy_pages
+    use fy_route, only: &
+        at, &
+        go, &
+        route_href, &
+        route_t, &
+        url_encode
+    use fy_time, only: &
+        ago, &
+        day_of
     implicit none
     private
 
-    public :: repo_view_reset, repo_view_show, repo_view_list, repo_view_compose, &
-        repo_view_list_compose, repo_view_receive, repo_view_title, repo_view_repo, &
-        repo_view_kind, repo_view_missing
+    public :: &
+        repo_view_compose, &
+        repo_view_kind, &
+        repo_view_list, &
+        repo_view_list_compose, &
+        repo_view_missing, &
+        repo_view_receive, &
+        repo_view_repo, &
+        repo_view_reset, &
+        repo_view_show, &
+        repo_view_title
 
     type :: repo_t
         character(len=:), allocatable :: name, upstream, fetched
