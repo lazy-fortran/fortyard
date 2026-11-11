@@ -17,6 +17,7 @@ services:
     environment:
       FY_HOME: /fy
       FY_URL: http://127.0.0.1:8740
+      FY_PUBLIC_URL: "@PUBLIC_URL@"
       FY_BASE: "@BASE@"
       FY_RESTART: follow
       FY_CHECKS: runner

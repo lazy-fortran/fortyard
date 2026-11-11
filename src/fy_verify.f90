@@ -76,7 +76,10 @@ contains
         integer :: stat, i, n, watch
         logical :: busy, changed
 
-        call get_environment_variable('FY_URL', url, n, stat)
+        ! Links in commits and issues are read by people, so they use the public
+        ! address when the server listens on an internal one.
+        call get_environment_variable('FY_PUBLIC_URL', url, n, stat)
+        if (stat /= 0 .or. n == 0) call get_environment_variable('FY_URL', url, n, stat)
         base = ''
         if (stat == 0) base = trim(url)
         call store_open(db_path, db, stat)

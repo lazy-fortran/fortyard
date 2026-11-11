@@ -4,7 +4,7 @@ program test_queue
     !! the candidate fails, it is split, the branch that fails by itself is
     !! refused and the others land.
     use fy_posix, only: tcp_listen, sock_bound_port, sock_close
-    use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, SIGTERM
+    use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, proc_setenv, SIGTERM
     use fy_server, only: server_supervise, server_set_data_dir
     use fy_sqlite, only: db_t, db_close
     use fy_store, only: store_open, store_bootstrap, store_repo_add
@@ -27,6 +27,10 @@ program test_queue
     call store_repo_add(db, 'demo', '', stat, mode='primary')
     call db_close(db)
     call server_set_data_dir(data)
+    ! Commits link to their change at the public address, not the one the server
+    ! listens on.
+    call proc_setenv('FY_URL', 'http://127.0.0.1:1')
+    call proc_setenv('FY_PUBLIC_URL', 'https://example.org/yard')
     call tcp_listen('127.0.0.1', 0, lfd, stat)
     write (num, '(i0)') sock_bound_port(lfd)
     server = 'http://127.0.0.1:'//trim(num)
@@ -81,6 +85,9 @@ program test_queue
     call check(index(out, 'Add C (#') > 0 .and. index(out, 'Add B (#') > 0 .and. &
         index(out, 'Add A (#') > 0 .and. index(out, 'Add A (#') > index(out, 'Add C (#'), &
         'each is its own commit on main, in order: '//out)
+    call run(in//'git log -1 --format=%b FETCH_HEAD')
+    call check(index(out, 'Change: https://example.org/yard/demo/-/changes/') > 0, &
+        'the commit links its change at the public address: '//out)
 
     ! A branch that fails by itself is refused; the others of its candidate land.
     call run(in//branch('slow2', 'S2')//' && '//branch('d', 'D')//' && '//branch('bad', 'BAD')// &
