@@ -151,12 +151,13 @@ branch and open a follow-up change.
 
 ### Server merge and resolution classes
 
-A squash has one of three outcomes:
+A squash has one of four outcomes:
 
 | Class | When | Result |
 |---|---|---|
 | `merge` | git's three-way merge is clean: the two sides changed different hunks | lands without author action |
 | `keep-both` | the file matches a pattern in `.fortyard/merge`, and in every conflicting hunk both sides only inserted lines at the same place (the base side of the hunk is empty) | both insertions are kept, the earlier entry's first; recorded on the entry and shown on the change and its review |
+| `model` | the repository allows it and the conflict is in text the model may merge (see [Merge by the model](#merge-by-the-model)) | the local model merges the conflict regions; recorded, shown on the change and, by the repository's choice, flagged for a person |
 | conflict | anything else | goes to the author as a rebase task |
 
 `keep-both` is for registries and documents whose entries stand alone: a list
@@ -167,6 +168,40 @@ paths reviewed before merge. The class is all or nothing for a member: one
 hunk that modifies or deletes base lines leaves the whole squash a conflict.
 It is not meant for program logic, where two insertions at one place can
 depend on their order or be the same fix twice and still pass the gate.
+
+### Merge by the model
+
+A conflict that `keep-both` does not cover can be merged by the instance's
+local model before it goes back to the author. The repository's policy sets
+`merge.model` to `off` (default), `flag` or `on`.
+
+- **What the model gets.** For each conflicting file: the base, both sides and
+  git's merge of everything that did not conflict, with the conflict regions
+  marked; the title and description of both changes. Nothing else, and no
+  tools: the model merges text, it does not run code.
+- **What it returns.** The text of each conflict region, nothing more. The
+  server puts the regions into git's merge itself, so the model cannot change
+  a line outside a conflict. An answer with conflict markers, with a region
+  missing, or over the budget in tokens is no answer.
+- **The gate decides.** The merged member joins the candidate like any other
+  and lands only if the check passes. If it fails as the only member of a
+  candidate, the entry ends with the reason `conflict` and the rebase task, as
+  if the model had not been asked.
+- **Record and review.** The entry records model, instruction version and the
+  merged regions; the change page and the review show them next to both
+  sides. With `flag` the change is flagged for a person
+  ([Workflow](workflow.md#when-an-agent-flags-a-change-for-a-human)); with
+  `on` it is reviewed like any other landed change. The author's session
+  learns of the merge in the answer of `fy land`.
+- **Never merged by the model:** paths reviewed before merge
+  ([Workflow](workflow.md#review-before-merge)), paths declared `keep-both`,
+  binary files, and a file one side deleted.
+
+The model merges what a person would merge in a minute: two procedures added
+at the same place, two entries in the same list, an argument added on one
+side and a call moved on the other. Whether that trust holds is measured: the
+share of model merges that fail the gate, and the share whose change is later
+reverted or corrected in review.
 
 ### Conflicts and rebase tasks
 
@@ -367,7 +402,9 @@ entry and the pinned commit.
    A runner error, a conflict with a neighbour or a neighbour's failure never
    rejects it.
 5. The server resolves only declared `keep-both` hunks, by rules read from
-   `main`, and records each resolution.
+   `main`, and conflict regions the model merged where the repository allows
+   it; it records each resolution, and never changes a line outside a
+   conflict.
 6. The server never rewrites a user's branch; its own commits live under
    `refs/fortyard/`.
 7. Every entry is queued, waiting with a reason, running, or ended with a
@@ -384,7 +421,7 @@ entry and the pinned commit.
 | Two changes edit the same lines | The earlier lands. The later waits while the earlier is in the candidate, then gets a rebase task; its session syncs and lands again |
 | Two changes pass alone and fail together | The candidate fails and is split; the earlier lands, the later is rejected with the log |
 | Intermittent failure | The failed tree is always run again; a change is rejected only as a single member on a passed base. A rejected version that later lands unchanged is counted as a false rejection |
-| A `keep-both` merge is wrong | The gate fails; the later change ends with `conflict` and is merged by its author |
+| A `keep-both` or model merge is wrong | The gate fails; the later change ends with `conflict` and is merged by its author. A wrong merge that passes the gate is found in review or by verification and reverted like any change |
 | Author pushes while queued or in a candidate | The entry is cancelled, the candidate built again without it; `fy land` queues the new version |
 | Parent of a stack rejected, cancelled or closed | Children wait; the author merges the new parent version (`fy sync --onto`) or rebuilds the branch on `main` without the parent |
 | Server restart or release switch | The lander goes on from rows and refs; the check keeps running |
@@ -405,7 +442,8 @@ From the timestamps of versions, entries, candidates, checks and releases, at
 - share of changes that landed with their first entry, and of the others the
   reason (conflict, check, format);
 - conflicts per path and week (the hot files), conflicts that `keep-both`
-  resolved, and how many of those failed afterwards;
+  and the model resolved, and how many of those failed the gate or were
+  reverted afterwards;
 - candidate size and failure rate, checks per landed change, checks saved by
   reuse, wait of a check for a runner, false rejections;
 - failed verifications of `main` per 100 landings, which is what the

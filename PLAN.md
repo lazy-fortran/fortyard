@@ -260,6 +260,15 @@ starts when the letters before it have landed.
       the MCP action `wait` does the same. After three failed landings of one
       change the next needs the admin scope. A landing queued with `--urgent`
       (admin) goes before those not yet in a candidate.
+- [ ] MP14a (G) Merge by the model (`merge.model` in the repository policy:
+      `off`, `flag`, `on`; off by default): a conflict that `keep-both` does
+      not cover goes to the local model, which returns the text of the
+      conflict regions only; the server puts them into git's merge, the
+      candidate's check decides, and a failure leaves the rebase task as
+      before. The landing records model and merged regions, the change shows
+      them, and with `flag` the change is flagged for a person. Paths reviewed
+      before merge are never merged by the model. Tested with the stub
+      gateway; needs the gateway of #60 in production.
 - [ ] MP15 (G) `fy sync [--onto M] [--continue] [--land]`: merges `main` (or
       the newest version of change M) into the branch with rerere on, stops
       at conflicts with status 3 and the paths, and after `--continue` pushes
