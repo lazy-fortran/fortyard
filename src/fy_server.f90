@@ -240,8 +240,8 @@ contains
         !! Pre-forked workers share the listening socket, each with its own
         !! database connection. A worker that dies, for example on a Fortran
         !! runtime error, takes only its own requests down and is replaced. Inside a
-        !! worker, OpenMP threads run their own accept loops, so a long-lived
-        !! connection holds one thread rather than one process.
+        !! worker, `nthreads` single-threaded processes run their own accept
+        !! loops (worker_main), so a long-lived connection holds one of them.
         integer, intent(in) :: lfd, nworkers, nthreads
         character(len=*), intent(in) :: db_path
         ! Slot nworkers + 1, when there is a data directory, is the process that
@@ -1265,21 +1265,62 @@ contains
     end function upstream_ok
 
     subroutine worker_main(lfd, db_path, nthreads)
+        !! Serves `nthreads` connections at once, each in its own
+        !! single-threaded process. Not in OpenMP threads: gfortran keeps the
+        !! length of every deferred-length character function result in a
+        !! static variable, so threads calling such functions at once corrupt
+        !! each other's strings and the heap (#91).
         integer, intent(in) :: lfd, nthreads
         character(len=*), intent(in) :: db_path
-        type(db_t) :: db
-        integer :: stat
+        integer :: pids(nthreads), i, pid, status, me
+        integer(int64) :: started(nthreads), now, rate
 
-        !$omp parallel num_threads(nthreads) default(none) private(db, stat) &
-        !$omp shared(lfd, db_path)
-        call store_open(db_path, db, stat)
-        if (stat /= 0) then
-            write (error_unit, '(a)') 'fy: worker thread cannot open the database'
-            flush (error_unit)
-            call proc_exit(1)
-        end if
-        call server_loop(lfd, db)
-        !$omp end parallel
+        me = proc_pid()
+        do i = 1, nthreads
+            call start(i)
+        end do
+        do
+            call proc_wait_any(pid, status)
+            if (pid <= 0) then
+                call proc_sleep_ms(200)
+                cycle
+            end if
+            do i = 1, nthreads
+                if (pids(i) /= pid) cycle
+                write (error_unit, '(a,i0,a,i0)') 'fy: server process ', pid, &
+                    ' ended with wait status ', status
+                call system_clock(now, rate)
+                if (now - started(i) < rate) call proc_sleep_ms(1000)
+                call start(i)
+            end do
+        end do
+
+    contains
+
+        subroutine start(slot)
+            integer, intent(in) :: slot
+            type(db_t) :: db
+            integer :: stat
+
+            do
+                flush (error_unit)
+                call system_clock(started(slot), rate)
+                pids(slot) = proc_fork()
+                if (pids(slot) >= 0) exit
+                call proc_sleep_ms(1000)
+            end do
+            if (pids(slot) /= 0) return
+            if (.not. proc_die_with_parent(me)) call proc_exit(0)
+            call store_open(db_path, db, stat)
+            if (stat /= 0) then
+                write (error_unit, '(a)') 'fy: worker cannot open the database'
+                flush (error_unit)
+                call proc_exit(1)
+            end if
+            call server_loop(lfd, db)
+            call proc_exit(0)
+        end subroutine start
+
     end subroutine worker_main
 
     subroutine server_loop(lfd, db)
