@@ -12,6 +12,7 @@ module fy_route
         at, &
         go, &
         go_take, &
+        query_value, &
         route_href, &
         route_is_page, &
         route_parse, &
@@ -37,8 +38,10 @@ module fy_route
         character(len=:), allocatable :: repo, path
         !! ?plain=1: a Markdown file as code instead of rendered.
         logical :: plain = .false.
-        !! ?all: a list of changes or issues with the closed and landed ones.
+        !! ?all: a list of issues with the closed ones.
         logical :: all = .false.
+        !! The query of the location, undecoded, for pages with filters.
+        character(len=:), allocatable :: query
     end type route_t
 
     character(len=:), allocatable :: pending
@@ -65,6 +68,7 @@ contains
             p = location
             q = ''
         end if
+        r%query = q
         r%plain = index('&'//q//'&', '&plain=1&') > 0
         r%all = index('&'//q//'&', '&all&') > 0
         do while (len(p) > 1)

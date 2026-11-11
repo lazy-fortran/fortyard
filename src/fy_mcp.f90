@@ -53,7 +53,7 @@ module fy_mcp
         'version', 'Version of the fortyard server', '', &
         'repos', 'Repositories of the server', '', &
     ! changes
-        'changes', 'Changes of a repository, the open ones by default', 'repo state?', &
+        'changes', 'Changes, the open ones by default', 'repo? state? review? attention?', &
         'change', 'A change with its versions, comments and landings', 'repo number', &
         'change_diff', 'The diff of a change', 'repo number version? from?', &
         'change_comment', 'Comment on a change', 'repo number body', &
@@ -254,7 +254,9 @@ contains
         character(len=:), allocatable :: json
 
         select case (name)
+        case ('attention'); json = text_arg('needs-author: the newest entry failed')
         case ('repo'); json = text_arg('Repository name')
+        case ('review'); json = text_arg('flagged or unreviewed')
         case ('number'); json = number_arg('Number of the change or issue')
         case ('state')
             json = text_arg('open (default), closed or all')
@@ -316,6 +318,8 @@ contains
             ! What becomes part of the request's path must not reshape it.
             select case (name)
             case ('repo'); if (len(value) > 0) found = repo_name_ok(value)
+            case ('review', 'attention')
+                found = verify(value, 'abcdefghijklmnopqrstuvwxyz-') == 0
             case ('branch'); if (len(value) > 0) found = repo_ref_ok(value)
             case ('days', 'number', 'id', 'lines', 'version', 'from')
                 found = found .and. verify(value, '0123456789') == 0
@@ -349,8 +353,19 @@ contains
             path = '/api/v1/stats?repo='//repo
             value = argument(message, 'days')
             if (len(value) > 0) path = path//'&days='//value
-        case ('changes', 'issues')
-            path = '/api/v1/repos/'//repo//'/'//tool
+        case ('changes')
+            ! Without a repository: those of every repository.
+            path = '/api/v1/changes'
+            if (len(repo) > 0) path = '/api/v1/repos/'//repo//'/changes'
+            value = argument(message, 'state')
+            if (len(value) == 0) value = 'open'
+            path = path//'?state='//value
+            value = argument(message, 'review')
+            if (len(value) > 0) path = path//'&review='//value
+            value = argument(message, 'attention')
+            if (len(value) > 0) path = path//'&attention='//value
+        case ('issues')
+            path = '/api/v1/repos/'//repo//'/issues'
             value = argument(message, 'state')
             if (len(value) > 0) path = path//'?state='//value
         case ('change'); path = '/api/v1/repos/'//repo//'/changes/'//n

@@ -214,6 +214,40 @@
     padding: 4px 8px; color: var(--mut); font-family: ui-monospace, SFMono-Regular, "SF Mono",
     Menlo, Consolas, "Liberation Mono", monospace; }
   [data-box^="row-c"] a[data-id$="/id"]:hover { background: var(--hover); text-decoration: none; }
+  /* The changes of a repository: a state is a word, coloured only when it is in
+     motion or waits for someone. It is never cut: the reason of a flag, which
+     someone wrote, takes more lines instead. */
+  .fui[data-look="state"] { white-space: nowrap; flex: 0 0 auto; }
+  [data-box="card-changes"] .fui[data-id$="/review"] { white-space: normal; height: auto;
+    max-width: 24em; overflow-wrap: anywhere; }
+  .fui[data-look="state"][data-tone="4"] { color: var(--acc); }
+  [data-box="filters"] { flex-wrap: wrap; align-items: center; row-gap: 4px; }
+  [data-box="filters"] a[data-tone="0"] { color: var(--acc); }
+  [data-box="filters"] a[data-tone="15"] { font-weight: 600; }
+  [data-box="filters"] .fui-k8 { height: 32px; }
+  [data-box="filters"] > .fui-row { flex: 0 0 auto; }
+  /* On a phone a change takes two lines, the same in every row: number, title,
+     session and age; state and review. The whole row is the target of its link
+     and every link and field is at least 44 px high (doc/inspection.md, "The
+     frame of every page"). */
+  @media (max-width: 600px) {
+    [data-box="card-changes"] > .fui-box { display: grid; position: relative; min-height: 44px;
+      align-items: baseline; align-content: center;
+      grid-template-columns: auto auto minmax(0, 1fr) auto auto; column-gap: 10px; row-gap: 2px; }
+    [data-box="card-changes"] > .fui-box > * { min-width: 0; }
+    [data-box="card-changes"] .fui[data-id$="/number"] { grid-area: 1 / 1; }
+    [data-box="card-changes"] a[data-id$="/item"] { grid-area: 1 / 2 / auto / 4; position: static; }
+    [data-box="card-changes"] a[data-id$="/item"]::after { content: ""; position: absolute; inset: 0; }
+    [data-box="card-changes"] .fui[data-id$="/author"] { grid-area: 1 / 4; max-width: 30vw;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    [data-box="card-changes"] .fui[data-id$="/age"] { grid-area: 1 / 5; }
+    [data-box="card-changes"] .fui[data-id$="/state"] { grid-area: 2 / 2; }
+    [data-box="card-changes"] .fui[data-id$="/review"] { grid-area: 2 / 3 / auto / 6;
+      max-width: none; }
+    [data-box="filters"] a.fui, a.fui[data-id$="/newest"], a.fui[data-id$="/older"] {
+      display: inline-flex; align-items: center; min-height: 44px; height: auto; }
+    [data-box="filters"] .fui-k8 { height: 44px; }
+  }
   .fui-box[data-box="card-lastcommit"] { background: var(--sub); padding: 8px 16px; gap: 8px; }
   [data-box="card-lastcommit"] a[data-id$="/lastsubject"] { color: var(--mut); }
   [data-box="card-lastcommit"] a[data-id$="/lastid"], .fui[data-id$="/sha"] {

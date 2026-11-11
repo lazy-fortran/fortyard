@@ -104,6 +104,9 @@ program test_mcp
     ! Longer than the 32 kB at which fx's own loop gives up.
     call tool(33, 'issue_new', demo//',"title":"Long","body":"'//repeat('long ', 8000)//'"')
     call tool(34, 'issue', demo//',"number":3')
+    call tool(37, 'changes', '"state":"all"')
+    call tool(38, 'changes', demo//',"state":"all","review":"flagged"')
+    call tool(39, 'changes', demo//',"review":"a b"')
     call request(35, 'shutdown', '{}')
     ! Nothing after a shutdown is read.
     call request(36, 'ping', '{}')
@@ -127,6 +130,13 @@ program test_mcp
         '"description":"Repository name"},"state":{"type":"string","description":'// &
         '"open (default), closed or all"}}') > 0 .and. index(a, 'landed, flagged or all') > 0, &
         'issues and changes each name their own states: '//a)
+    call check(passed(37) .and. index(answer(37), '\"repo\":\"demo\"') > 0 .and. &
+        index(answer(37), '\"status\":') > 0, &
+        'changes without a repository lists those of all: '//answer(37))
+    call check(passed(38) .and. index(answer(38), '\"changes\":[]') > 0, &
+        'changes filters by review: '//answer(38))
+    call check(index(answer(39), 'changes needs a valid review') > 0, &
+        'changes refuses a review that is no word: '//answer(39))
     call check(passed(3) .and. index(answer(3), '\"name\":\"demo\"') > 0, &
         'repos lists the repositories: '//answer(3))
     call check(passed(4) .and. index(answer(4), '\"branch\":\"first\"') > 0, &

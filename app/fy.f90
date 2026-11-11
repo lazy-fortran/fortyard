@@ -166,7 +166,10 @@ contains
             '                      in .fortyard/size-limit, that .fortyard/allow-large does', &
             '                      not allow)', &
         ! changes
-            '  change list [--all] open changes (--all: also landed and closed ones)', &
+            '  change list [--state open|landed|closed|all] [--review flagged|unreviewed]', &
+            '                      [--attention needs-author] [--all-repos]', &
+            '                      changes, newest activity first; the open ones of', &
+            '                      this repository by default (--all: --state all)', &
             '  change view N       a change with its versions, comments and landings', &
             '  change diff N [--version V] [--from W]', &
             '                      the diff of a version, or between versions W and V', &
@@ -842,7 +845,8 @@ contains
     subroutine cmd_change()
         !! fy change list|view|diff|comment|edit|land|close|reopen ...
         type(config_t) :: cfg
-        character(len=:), allocatable :: what, repo, n, body, path, payload, text, state
+        character(len=:), allocatable :: what, repo, n, body, path, payload, text, state, &
+            review, attention
         integer :: code, stat
 
         call config_load(cfg)
@@ -850,7 +854,9 @@ contains
         what = positional(1)
         n = positional(2)
         repo = option('--repo', '')
-        if (len(repo) == 0) repo = remote_repo(cfg%server)
+        ! The changes of every repository need no checkout.
+        if (len(repo) == 0 .and. .not. (what == 'list' .and. flag('--all-repos'))) &
+            repo = remote_repo(cfg%server)
         path = '/api/v1/repos/'//repo//'/changes'
         if (what /= 'list' .and. (len(n) == 0 .or. verify(n, '0123456789') /= 0)) then
             write (error_unit, '(a)') 'fy: usage: fy change '//what//' NUMBER'
@@ -858,20 +864,44 @@ contains
         end if
         select case (what)
         case ('list')
-            state = 'open'
+            state = option('--state', 'open')
             if (flag('--all')) state = 'all'
             if (flag('--flagged')) state = 'flagged'
-            call client_request(cfg%server, 'GET', path//'?state='//state, cfg%token, '', &
-                code, body, stat)
+            review = option('--review', '')
+            attention = option('--attention', '')
+            if (verify(state//review//attention, 'abcdefghijklmnopqrstuvwxyz-') /= 0) then
+                write (error_unit, '(a)') 'fy: usage: fy change list [--state open|landed|'// &
+                    'closed|all] [--review flagged|unreviewed] [--attention needs-author]'// &
+                    ' [--all-repos]'
+                call quit(2)
+            end if
+            if (flag('--all-repos')) path = '/api/v1/changes'
+            path = path//'?state='//state
+            if (len(review) > 0) path = path//'&review='//review
+            if (len(attention) > 0) path = path//'&attention='//attention
+            call client_request(cfg%server, 'GET', path, cfg%token, '', code, body, stat)
             if (stat /= 0 .or. code /= 200 .or. flag('--json')) call report(code, body, stat)
             if (stat /= 0 .or. code /= 200 .or. flag('--json')) return
-            if (state == 'flagged') then
+            if (state == 'flagged' .and. flag('--all-repos')) then
+                write (output_unit, '(a)', advance='no') cli_table(body, 'changes', &
+                    [character(len=11) :: 'repo', 'number', 'state', 'title', 'flag_reason'])
+            else if (state == 'flagged') then
                 write (output_unit, '(a)', advance='no') cli_table(body, 'changes', &
                     [character(len=11) :: 'number', 'state', 'title', 'flag_reason'])
-                return
+            else if (flag('--all-repos')) then
+                write (output_unit, '(a)', advance='no') cli_table(body, 'changes', &
+                    [character(len=11) :: 'repo', 'number', 'status', 'review', 'flag_reason', &
+                    'author', 'title'])
+            else if (len(review) > 0 .or. len(attention) > 0 .or. option('--state', '') /= '') then
+                ! The words of the changes page.
+                write (output_unit, '(a)', advance='no') cli_table(body, 'changes', &
+                    [character(len=11) :: 'number', 'status', 'review', 'flag_reason', 'author', &
+                    'title'])
+            else
+                write (output_unit, '(a)', advance='no') cli_table(body, 'changes', &
+                    [character(len=8) :: 'number', 'state', 'author', 'versions', 'branch', &
+                    'title'])
             end if
-            write (output_unit, '(a)', advance='no') cli_table(body, 'changes', &
-                [character(len=8) :: 'number', 'state', 'author', 'versions', 'branch', 'title'])
         case ('view')
             call client_request(cfg%server, 'GET', path//'/'//n, cfg%token, '', code, body, stat)
             if (stat /= 0 .or. code /= 200 .or. flag('--json')) call report(code, body, stat)
@@ -1197,7 +1227,8 @@ contains
         do while (i <= command_argument_count())
             if (index(arg(i), '--') == 1) then
                 select case (arg(i))
-                case ('--no-push', '--no-wait', '--wait', '--json', '--init', '--all', '--stats')
+                case ('--no-push', '--no-wait', '--wait', '--json', '--init', '--all', &
+                        '--all-repos', '--stats')
                     i = i + 1
                 case default
                     i = i + 2

@@ -181,7 +181,7 @@ try {
   await until(`${rowLinks} === 'demo | Code | Changes | Issues 0'`, 'the repository row');
   check(await evaluate(rowCurrent) === 'Code', 'the code page has the repository row with Code marked and the open issues counted');
   await click('[data-id$="reporow/changes"]');
-  await until(hasText('No open changes. Pushing a branch opens one: fy push.'), 'the changes from the code');
+  await until(hasText('No changes in demo. Pushing a branch opens one: fy push.'), 'the changes from the code');
   check(await path() === '/demo/-/changes' && await evaluate(rowCurrent) === 'Changes',
     'the row leads from the code to the changes and marks them');
   await click('[data-id$="reporow/issues"]');
@@ -472,6 +472,152 @@ try {
   await until(`!!document.querySelector('[data-id$="/reopen"]') && ${rowCurrent} === 'Issues 1'`, 'the issue as it is now');
   check(true, 'after signing out and in again the issue is shown as it is now, not as the last session saw it');
 
+  // The changes page: every state with its words, newest activity first, and
+  // filters that are links in the address.
+  // The token, not the session: the section before signs out and in again.
+  const api = (to, method = 'GET', body) => fetch(url + 'api/v1/' + to, { method,
+    headers: { Authorization: `Bearer ${admin}`, 'Content-Type': 'application/json' },
+    body: body && JSON.stringify(body) });
+  const listed = async (query) => (await (await api('repos/work/changes?' + query)).json()).changes;
+  // Issues and changes share numbers, and earlier sections open issues here.
+  const num = async (title) => (await listed('state=all')).find((c) => c.title === title).number;
+  const remote = `http://x:${admin}@127.0.0.1:${port}${base}/work.git`;
+  const branch = (name, file, subject) => {
+    writeFileSync(join(wt, file), name + '\n');
+    wg('add', '-A');
+    wg('commit', '-q', '-m', subject);
+    wg('push', '-q', remote, 'HEAD:' + name);
+  };
+  await api('repos/work/changes/1/land', 'POST');
+  for (let i = 0; i < 100 && !(await listed('state=landed')).length; i++) await sleep(100);
+  const first = (await listed('state=landed'))[0];
+  wg('fetch', '-q', remote, 'main');
+  wg('checkout', '-q', '-b', 'second', 'FETCH_HEAD');
+  branch('second', 'more.txt', 'Second idea');
+  wg('checkout', '-q', '-b', 'dropped', 'FETCH_HEAD');
+  branch('dropped', 'less.txt', 'Dropped idea');
+  for (let i = 0; i < 100 && !(await listed('state=all')).find((c) => c.title === 'Dropped idea'); i++) await sleep(100);
+  const second = await num('Second idea'), dropped = await num('Dropped idea');
+  await api(`repos/work/changes/${dropped}`, 'POST', { state: 'closed' });
+  // Unrelated history with the same file cannot land.
+  wg('checkout', '-q', '--orphan', 'clash');
+  branch('clash', 'notes.txt', 'Clashing notes');
+  for (let i = 0; i < 100 && !(await listed('state=all')).find((c) => c.title === 'Clashing notes'); i++) await sleep(100);
+  const clash = await num('Clashing notes');
+  await api(`repos/work/changes/${clash}/land`, 'POST');
+  for (let i = 0; i < 100 && !(await listed('state=all&attention=needs-author')).length; i++) await sleep(100);
+  const rowsShown = `[...document.querySelectorAll('[data-box^="row-i"]')].map((e) => e.dataset.box.slice(5)).join(' ')`;
+  const word = (n, id) => evaluate(`(() => { const e = document.querySelector('[data-box="row-i${n}"] [data-id$="/${id}"]');
+    return e ? e.textContent + '|' + e.dataset.tone : ''; })()`);
+  await load('/work/-/changes');
+  check(await evaluate(`window.__ssrTexts.includes(${JSON.stringify('landed ' + first.commit.slice(0, 7))})`) &&
+    await evaluate(rowsShown) === `${clash} ${dropped} ${second} 1`,
+    'the server renders the changes of every state, the landed one with its commit, newest activity first');
+  check(await adopted(), 'and the WebAssembly adopts that list');
+  check(await word(second, 'state') === 'draft|0' && await word(dropped, 'state') === 'closed|3' &&
+    await word(clash, 'state') === 'needs author · entry 1 of 1|17',
+    'a state is a word: plain, muted when closed, amber when the author is needed');
+  check(await word(second, 'review') === 'unreviewed|17' && await word(second, 'author') === 'bootstrap|3',
+    'a row has its review state and the session (token) that pushed it');
+  // The rows stay until the filtered ones are here: no "Loading..." in between.
+  await evaluate(`window.__card = document.querySelector('[data-box="card-changes"]'); window.__loading = false;
+    new MutationObserver(() => { if (document.getElementById('app').textContent.includes('Loading...')) window.__loading = true; })
+      .observe(document.getElementById('app'), { childList: true, subtree: true, characterData: true })`);
+  await click(linkTo('/work/-/changes?state=landed'));
+  await until(`${rowsShown} === '1'`, 'the landed changes');
+  check(await evaluate(`!window.__loading && window.__card === document.querySelector('[data-box="card-changes"]')`),
+    'a filter keeps the list on the page and never empties it on the way');
+  check(await path() === '/work/-/changes?state=landed' &&
+    await evaluate(`document.querySelector(${JSON.stringify(linkTo('/work/-/changes?state=landed'))}).dataset.tone`) === '15',
+    'a filter is a link: the address names it and the list follows');
+  await click(linkTo('/work/-/changes?state=landed&review=flagged'));
+  await until(hasText('No landed flagged changes in work.'), 'the empty list');
+  check(true, 'an empty list says so in a sentence that names the filters');
+  await click(linkTo('/work/-/changes?state=landed'));
+  await until(`${rowsShown} === '1'`, 'the filter taken back');
+  check(true, 'a filter that is on leads back to the list without it');
+  await load('/work/-/changes?attention=needs-author');
+  check(await evaluate(`window.__ssrTexts.includes('Clashing notes') && !window.__ssrTexts.includes('Second idea')`),
+    'a filtered address is rendered by the server');
+  await load('/work/-/changes');
+  await adopted();
+  const key = async (k, extra = {}) => {
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: k, ...extra });
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', key: k, ...extra });
+  };
+  await key('/', { text: '/' });
+  await until(`(document.activeElement.dataset.id || '').endsWith('/filter')`, 'the filter field focused');
+  check(true, 'the key / moves to the filter field');
+  await evaluate(`document.activeElement.value = ''`);
+  await type('SECOND');
+  await key('Enter', { code: 'Enter', windowsVirtualKeyCode: 13 });
+  await until(`${rowsShown} === '${second}'`, 'the changes matching the text');
+  check(await path() === '/work/-/changes?q=SECOND', 'text typed into the field filters by title, in the address');
+  await load('/work/-/changes?q=dropped&state=closed');
+  check(await evaluate(`${rowsShown} === '${dropped}' && document.querySelector('[data-id$="/filter"]').value === 'dropped'`),
+    'a reload keeps the text and the list');
+  await load('/work/-/changes?before=junk');
+  check(await evaluate(`window.__ssrTexts.includes('This address is no place in the list of changes.')`) &&
+    await evaluate(`!!document.querySelector(${JSON.stringify(linkTo('/work/-/changes?state=landed'))}) &&
+      document.querySelector('[data-id$="/newest"]').getAttribute('href').endsWith('/work/-/changes')`),
+    'an address with a key that is none keeps the filters and leads to the newest changes');
+  await send('Emulation.setDeviceMetricsOverride', { width: 375, height: 740, deviceScaleFactor: 2, mobile: true });
+  await load('/work/-/changes');
+  check(await adopted() && await evaluate(noOverflow) && await evaluate(rowsShown) === `${clash} ${dropped} ${second} 1`,
+    'the changes page is the same page on a phone and fits it');
+  check(await evaluate(`[...document.querySelectorAll('[data-box^="row-i"]')].every((row) => {
+      const at = (id) => row.querySelector('[data-id$="/' + id + '"]');
+      const box = (id) => at(id).getBoundingClientRect();
+      const whole = (e) => e.scrollWidth <= e.clientWidth && e.getBoundingClientRect().right <= innerWidth;
+      const below = (a, b) => box(a).top >= box(b).bottom - 1;
+      const level = (a, b) => box(a).top < box(b).bottom && box(b).top < box(a).bottom;
+      return whole(at('state')) && whole(at('review')) && below('state', 'item') && below('review', 'item') &&
+        level('state', 'review') && level('item', 'author') && level('item', 'age') && level('item', 'number'); })`),
+    'on a phone every row has the same two lines and no state or review is cut');
+  check(await evaluate(`[...document.querySelectorAll('[data-box^="row-i"]')].every((row) => {
+      const s = row.querySelector('[data-id$="/state"]').getBoundingClientRect();
+      const hit = document.elementFromPoint(s.left + s.width / 2, s.top + s.height / 2);
+      return row.getBoundingClientRect().height >= 44 &&
+        hit && hit.closest('a') === row.querySelector('a[data-id$="/item"]'); })`),
+    'on a phone the whole row, at least 44 px high, opens its change');
+  check(await evaluate(`[...document.querySelectorAll('[data-box="filters"] a, [data-box="filters"] input')]
+      .every((e) => e.getBoundingClientRect().height >= 44)`),
+    'on a phone every filter and the filter field are targets of 44 px');
+  await load('/work/-/changes?before=junk');
+  check(await evaluate(`document.querySelector('[data-id$="/newest"]').getBoundingClientRect().height >= 44`),
+    'on a phone the link to the newest changes is a target of 44 px');
+  await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+
+  // A review of an older version is stale: the newest version waits for one.
+  await api(`repos/work/changes/${second}/reviewed`, 'POST');
+  wg('checkout', '-q', 'second');
+  branch('second', 'again.txt', 'Second idea, again');
+  for (let i = 0; i < 100 && !(await listed('state=all')).find((c) => c.number === second && c.review_stale); i++) await sleep(100);
+  await load('/work/-/changes?review=unreviewed');
+  check(await word(second, 'review') === 'approved an older version|17',
+    'a stale review is shown as one, in amber, among the unreviewed changes');
+
+  // More changes than one answer holds: the older ones follow by key.
+  await api('repos', 'POST', { name: 'many' });
+  for (let i = 0; i < 100 && !(await api('repos/many/changes')).ok; i++) await sleep(100);
+  const mt = join(data, 'many');
+  execFileSync('sh', ['-c', `git init -q -b base "$0" && cd "$0" && for i in $(seq 101); do
+    git -c user.name=T -c user.email=t@example.org commit -q --allow-empty -m "Step $i" && git branch b$i || exit 1; done &&
+    git push -q "$1" 'refs/heads/b*:refs/heads/b*'`, mt, remote.replace('/work.git', '/many.git')],
+    { env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+  await load('/many/-/changes');
+  const shown = `document.querySelectorAll('[data-box^="row-i"]').length`;
+  check(await evaluate(shown) === 100 && await evaluate(`!!document.querySelector('[data-id$="/older"]')`),
+    'a long list shows its newest hundred changes and a link to the older ones');
+  await evaluate(`document.querySelector('[data-id$="/older"]').scrollIntoView()`);
+  await click('[data-id$="/older"]');
+  await until(`${shown} === 1`, 'the older changes');
+  check((await path()).startsWith('/many/-/changes?before=') &&
+    await evaluate(`!!document.querySelector('[data-id$="/newest"]')`),
+    'the older changes have their own address, by key, and lead back to the newest');
+  await load('/work/-/changes');
+  await adopted();
+
   if (shot) {
     const png = await send('Page.captureScreenshot', { format: 'png' });
     writeFileSync(shot, Buffer.from(png.result.data, 'base64'));
@@ -514,7 +660,8 @@ try {
   await send('Input.insertText', { text: lands.token });
   await click('[data-id$="/signin"]');
   await until(hasText('admin'), 'signed in with a land token');
-  await load('/work/-/changes/1');
+  // Change 1 has landed by now; an open one is offered for landing.
+  await load(`/work/-/changes/${second}`);
   await until(landButton, 'the Land button for a land session');
   check(true, 'a session with the land scope and without admin is offered the Land button');
 } catch (e) {

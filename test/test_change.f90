@@ -6,11 +6,12 @@ program test_change
     !! lands it as "TITLE (#N)" with the description and the Change-Id, and
     !! marks it landed. A landing without a change takes a number after those
     !! of open changes, and a closed change can be reopened. Issues share the
-    !! numbers.
+    !! numbers. fy change list filters by state, review and attention, also
+    !! over every repository.
     use fy_posix, only: tcp_listen, sock_bound_port, sock_close
     use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, SIGTERM
     use fy_server, only: server_supervise, server_set_data_dir
-    use fy_sqlite, only: db_t, db_close
+    use fy_sqlite, only: db_t, db_close, db_exec
     use fy_store, only: store_open, store_bootstrap, store_repo_add
     implicit none
 
@@ -134,6 +135,42 @@ program test_change
         ' && '//fy//' issue new --title "Counted too" --body-file /dev/null')
     call check(stat == 0 .and. index(out, 'change #6') > 0 .and. index(out, 'issue #7') > 0, &
         'a set counter numbers the next change and issue: '//out)
+
+    ! The list in every state, as the changes page filters it.
+    call run(in//fy//' change list --state landed')
+    call check(index(out, 'NUMBER  STATUS  REVIEW') == 1 .and. index(out, '2       landed') > 0 &
+        .and. index(out, 'Other') == 0, 'fy change list --state landed: '//out)
+    call run(in//fy//' change list --state all --json')
+    call check(index(out, '"number":2,') > 0 .and. index(out, '"status":"landed"') > 0 .and. &
+        index(out, '"status":"draft"') > 0 .and. index(out, '"next":""') > 0, &
+        'every state with its word: '//out)
+    ! A change whose check fails needs its author.
+    call run(in//'git -c credential.helper= -c "credential.helper=!'//fy// &
+        ' git-credential" fetch -q yard main && git checkout -q -b broken FETCH_HEAD && '// &
+        'git rm -q README && '//git//'commit -q -m "Remove the README" && '//fy//' push')
+    call check(stat == 0 .and. index(out, 'change #8') > 0, 'a change that fails its check: '//out)
+    call run(in//fy//' change land 8')
+    call check(stat /= 0, 'its landing fails: '//out)
+    call run(in//fy//' change list --attention needs-author')
+    call check(index(out, '8       needs author') > 0 .and. index(out, 'Later') == 0, &
+        'fy change list --attention needs-author: '//out)
+    call run(in//fy//' change list --review flagged')
+    call check(stat == 0 .and. len(out) == 0, 'no change is flagged: '//out)
+    ! The changes of every repository need no checkout.
+    call run(env//'cd / && '//fy//' change list --all-repos --state all')
+    call check(index(out, 'REPO  NUMBER  STATUS') == 1 .and. index(out, 'demo  2       landed') > 0 &
+        .and. index(out, 'demo  8       needs author') > 0, 'fy change list --all-repos: '//out)
+    call store_open(data//'/fortyard.db', db, stat)
+    call db_exec(db, "UPDATE changes SET flagged = 1, flag_reason = 'numerics' WHERE number = 2;", &
+        stat)
+    call db_close(db)
+    call run(env//'cd / && '//fy//' change list --all-repos --flagged')
+    call check(index(out, 'REPO  NUMBER  STATE') == 1 .and. index(out, 'demo  2       landed') > 0 &
+        .and. index(out, 'numerics') > 0, 'the flagged changes of every repository name it: '//out)
+    call run(in//fy//' change list')
+    call check(index(out, 'NUMBER  STATE  AUTHOR  VERSIONS  BRANCH') == 1 .and. &
+        index(out, 'Remove the README') < index(out, 'Other') .and. index(out, 'Add lines') == 0, &
+        'the open changes as before, newest activity first: '//out)
 
     call proc_kill(sup, SIGTERM)
     call proc_wait(sup, stat)

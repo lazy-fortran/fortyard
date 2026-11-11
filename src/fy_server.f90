@@ -39,6 +39,7 @@ module fy_server
         change_by_branch, &
         change_by_id, &
         change_landed, &
+        change_list_json, &
         change_message, &
         change_next_number, &
         change_sync, &
@@ -1654,6 +1655,11 @@ contains
         case ('/-/login/callback')
             if (.not. method_is(req, 'GET', res)) return
             call login_finish(req, db, res)
+        case ('/api/v1/changes')
+            ! The changes of every repository, as GET /api/v1/repos/R/changes.
+            if (.not. method_is(req, 'GET', res)) return
+            if (.not. authenticated(req, db, who, res)) return
+            res%body = change_list_json(db, '', req%query, res%code)
         case ('/api/v1/session')
             if (req%method == 'POST') then
                 call open_session(req, db, res)

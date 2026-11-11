@@ -78,7 +78,7 @@ module fy_change_view
     type(md_doc_t) :: description
     character(len=:), allocatable :: repo, sub, tab, i_title, i_state, i_author, i_branch, &
         i_created, comment_input, new_title, new_body, message, list_of, item_of
-    integer :: kind = R_CHANGES, number = 0, version = 0, from = 0
+    integer :: kind = R_CHANGE, number = 0, version = 0, from = 0
     logical :: show_all = .false., loaded = .false., item_loaded = .false., missing = .false.
     logical :: diff_cut = .false., has_text = .false.
     !! An issue was opened, closed or reopened: the action asked for, and done.
@@ -175,7 +175,7 @@ contains
 
     function noun() result(s)
         character(len=:), allocatable :: s
-        if (kind == R_CHANGES .or. kind == R_CHANGE) then
+        if (kind == R_CHANGE) then
             s = 'changes'
         else
             s = 'issues'
@@ -227,9 +227,7 @@ contains
     function change_view_title() result(s)
         character(len=:), allocatable :: s
         if (.not. allocated(repo)) repo = ''
-        if (kind == R_CHANGES) then
-            s = 'Changes · '//repo
-        else if (kind == R_ISSUES) then
+        if (kind == R_ISSUES) then
             s = 'Issues · '//repo
         else if (tab == 'new') then
             s = 'New issue · '//repo
@@ -464,7 +462,7 @@ contains
             return
         end if
         select case (kind)
-        case (R_CHANGES, R_ISSUES)
+        case (R_ISSUES)
             call list_view(narrow)
         case default
             if (tab == 'new') then
@@ -482,11 +480,7 @@ contains
 
         base_path = '/'//repo//'/-/'//noun()
         call row_begin(10.0, id="listhead")
-        if (kind == R_CHANGES) then
-            call text("Changes", size=TITLE, style=UI_HEADING, id="title")
-        else
-            call text("Issues", size=TITLE, style=UI_HEADING, id="title")
-        end if
+        call text("Issues", size=TITLE, style=UI_HEADING, id="title")
         if (show_all) then
             if (link("open", "Open only", at(base_path), size=BODY)) call go(base_path)
         else
@@ -503,12 +497,7 @@ contains
             return
         end if
         if (size(rows) == 0) then
-            if (kind == R_CHANGES) then
-                call text("No open changes. Pushing a branch opens one: fy push.", size=BODY, &
-                    tone=UI_TONE_MUTED)
-            else
-                call text("No open issues.", size=BODY, tone=UI_TONE_MUTED)
-            end if
+            call text("No open issues.", size=BODY, tone=UI_TONE_MUTED)
             return
         end if
         call column_begin(0.0, id="card-items")
@@ -522,13 +511,8 @@ contains
                     call go(page_of(r%number))
                 call text("#"//ui_str(r%number), size=SMALL, style=UI_CODE, tone=UI_TONE_MUTED)
                 call row_end()
-                if (kind == R_CHANGES) then
-                    meta = r%branch//' · '//r%author//' · '//ui_str(r%versions)//' version'
-                    if (r%versions /= 1) meta = meta//'s'
-                else
-                    meta = r%author//' · '//ui_str(r%comments)//' comment'
-                    if (r%comments /= 1) meta = meta//'s'
-                end if
+                meta = r%author//' · '//ui_str(r%comments)//' comment'
+                if (r%comments /= 1) meta = meta//'s'
                 call text(meta//' · updated '//ago(r%updated), size=SMALL, tone=UI_TONE_MUTED)
                 call column_end()
             end associate

@@ -832,6 +832,7 @@ contains
             stat = SQLITE_OK
         end if
         call stmt_finalize(st)
+        if (stat == SQLITE_OK) call change_moved(db, id)
     end subroutine store_landing_add
 
     subroutine store_landing_next(db, lander, l, found)
@@ -928,7 +929,24 @@ contains
         call stmt_bind_text(st, 4, log, stat)
         stat = stmt_step(st)
         call stmt_finalize(st)
+        call change_moved(db, id)
     end subroutine store_landing_finish
+
+    subroutine change_moved(db, landing)
+        !! An entry that is queued or has ended is activity of its change: the
+        !! lists by activity show it first.
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: landing
+        type(stmt_t) :: st
+        integer :: stat
+
+        call db_prepare(db, 'UPDATE changes SET updated_at = '//NOW// &
+            ' WHERE id = (SELECT change FROM landings WHERE id = ?1);', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, landing, stat)
+        stat = stmt_step(st)
+        call stmt_finalize(st)
+    end subroutine change_moved
 
     subroutine store_landing_list(db, repo, ls, stat)
         !! The newest 50 landings of `repo`, newest first.

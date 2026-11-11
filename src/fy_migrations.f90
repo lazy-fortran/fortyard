@@ -99,6 +99,11 @@ contains
             "CREATE INDEX checks_running ON checks (runner) WHERE state = 'running';"// &
             'CREATE INDEX checks_served ON checks (repo, id) WHERE runner IS NOT NULL;')
 
+        ! The list of changes reads the entries of each of its rows; without
+        ! this it walks every landing with its log for each of them.
+        call migration_add(list, 'landings-by-change', &
+            'CREATE INDEX landings_by_change ON landings (change, kind, id, state);')
+
     end subroutine migrations_registry
 
 end module fy_migrations

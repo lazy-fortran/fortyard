@@ -15,6 +15,8 @@ module fy_change
         audit_append
     use fy_events, only: &
         events_notify
+    use fy_http, only: &
+        http_query_param
     use fy_proc, only: &
         proc_run
     use fy_sqlite, only: &
@@ -41,6 +43,7 @@ module fy_change
         change_get, &
         change_landed, &
         change_last_version, &
+        change_list_json, &
         change_message, &
         change_next_number, &
         change_review_next, &
@@ -70,6 +73,18 @@ module fy_change
     !! The head of the newest version of a row of changes.
     character(len=*), parameter :: NEWEST = '(SELECT v.head FROM change_versions v'// &
         ' WHERE v.change = changes.id ORDER BY v.version DESC LIMIT 1)'
+    !! The entries of a row of changes: their number, and the state and the
+    !! job of the newest one.
+    character(len=*), parameter :: ENTRY_COUNT = '(SELECT count(*) FROM landings l'// &
+        " WHERE l.change = changes.id AND l.kind = 'landing')"
+    character(len=*), parameter :: ENTRY_STATE = "coalesce((SELECT l.state FROM landings l"// &
+        " WHERE l.change = changes.id AND l.kind = 'landing' ORDER BY l.id DESC LIMIT 1), '')"
+    character(len=*), parameter :: ENTRY_ID = 'coalesce((SELECT max(l.id) FROM landings l'// &
+        " WHERE l.change = changes.id AND l.kind = 'landing'), 0)"
+    !! A review that read a version older than the newest one (doc/inspection.md,
+    !! "States and words"); one with no head recorded is not known to be stale.
+    character(len=*), parameter :: STALE_REVIEW = "(coalesce(reviewed_head, '') <> '' AND"// &
+        " reviewed_head <> coalesce("//NEWEST//", ''))"
 
 contains
 
@@ -416,7 +431,8 @@ contains
         integer :: stat
 
         call db_prepare(db, 'UPDATE changes SET review_state = ?2, flagged = ?3, flag_reason = ?4,'// &
-            " reviewed_head = coalesce(nullif(?5, ''), "//NEWEST//') WHERE id = ?1;', st, stat)
+            " reviewed_head = coalesce(nullif(?5, ''), "//NEWEST//'), updated_at = '//NOW// &
+            ' WHERE id = ?1;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, id, stat)
         call stmt_bind_text(st, 2, state, stat)
@@ -521,7 +537,7 @@ contains
                 call refuse(405, 'GET only')
                 return
             end if
-            answer = list_json(db, repo, query_value(query, 'state'))
+            answer = change_list_json(db, repo, query, code)
             return
         end if
         if (rest(1:1) /= '/') then
@@ -692,46 +708,170 @@ contains
 
     end subroutine change_api
 
-    function list_json(db, repo, state) result(json)
+    function change_list_json(db, repo, query, code) result(json)
+        !! The changes of `repo`, or of every repository when it is empty,
+        !! newest activity first, as the query asks (doc/inspection.md,
+        !! "Changes"): state (open without it, landed, closed, all), review
+        !! (flagged, unreviewed), attention (needs-author), q (text in the
+        !! title, branch, author or session), limit (100, up to 200) and before (the
+        !! "next" of the page before; empty after the oldest change).
         type(db_t), intent(in) :: db
-        character(len=*), intent(in) :: repo, state
+        character(len=*), intent(in) :: repo, query
+        integer, intent(out) :: code
         character(len=:), allocatable :: json
         type(stmt_t) :: st
         type(change_t) :: c
-        integer :: stat, n
+        character(len=:), allocatable :: sql, state, review, attention, q, before, text, at, &
+            newest, next
+        integer(int64) :: before_id, entry
+        integer :: stat, n, limit, ios, entries
+        logical :: stale
+
+        code = 200
+        state = http_query_param(query, 'state')
+        review = http_query_param(query, 'review')
+        attention = http_query_param(query, 'attention')
+        q = http_query_param(query, 'q')
+        before = http_query_param(query, 'before')
+        if (len(state) == 0) state = 'open'
+        limit = 100
+        ios = 0
+        text = http_query_param(query, 'limit')
+        if (len(text) > 0) then
+            ios = 1
+            if (len(text) < 9 .and. verify(text, '0123456789') == 0) read (text, *, iostat=ios) limit
+            if (limit < 1 .or. limit > 200) ios = 1
+        end if
+        before_id = 0
+        at = ''
+        if (len(before) > 0 .and. ios == 0) then
+            ! A key is the 14 digits of a time of activity and the row's id.
+            ios = 1
+            if (len(before) > 15 .and. len(before) < 34) then
+                if (verify(before(1:14), '0123456789') == 0 .and. before(15:15) == '-' .and. &
+                    verify(before(16:), '0123456789') == 0) read (before(16:), *, iostat=ios) before_id
+            end if
+            if (ios == 0) at = before(1:4)//'-'//before(5:6)//'-'//before(7:8)//'T'// &
+                before(9:10)//':'//before(11:12)//':'//before(13:14)//'Z'
+        end if
+        if (ios /= 0) then
+            code = 400
+            json = '{"error":"limit is 1 to 200 and before is the next of an earlier answer"}'
+            return
+        end if
+
+        sql = 'SELECT '//COLUMNS//', '//ENTRY_COUNT//', '//ENTRY_STATE//', '//ENTRY_ID//', '//STALE_REVIEW// &
+            " FROM changes WHERE (?1 = '' OR repo = ?1)"
+        select case (state)
+        case ('all')
+        case ('flagged')
+            ! The spelling before `review=flagged`, kept for its callers.
+            sql = sql//' AND flagged <> 0'
+        case default
+            sql = sql//' AND state = ?2'
+        end select
+        select case (review)
+        case ('')
+        case ('flagged')
+            sql = sql//' AND flagged <> 0'
+        case ('unreviewed')
+            ! A stale review left the newest version unreviewed.
+            sql = sql//" AND (coalesce(review_state, '') NOT IN ('ai-reviewed', 'human-reviewed')"// &
+                ' OR '//STALE_REVIEW//')'
+        case default
+            sql = sql//' AND 0'
+        end select
+        select case (attention)
+        case ('')
+        case ('needs-author')
+            sql = sql//" AND state = 'open' AND "//ENTRY_STATE//" = 'failed'"
+        case default
+            ! Also "reverted": no revert is recorded yet.
+            sql = sql//' AND 0'
+        end select
+        if (len(q) > 0) sql = sql//' AND (instr(lower(title), lower(?3)) > 0 OR'// &
+            ' instr(lower(branch), lower(?3)) > 0 OR instr(lower(author), lower(?3)) > 0 OR'// &
+            ' EXISTS (SELECT 1 FROM change_versions v WHERE v.change = changes.id'// &
+            ' AND instr(lower(v.session), lower(?3)) > 0))'
+        if (len(at) > 0) sql = sql//' AND (updated_at < ?4 OR (updated_at = ?4 AND id < ?5))'
+        sql = sql//' ORDER BY updated_at DESC, id DESC LIMIT ?6;'
 
         json = '{"changes":['
-        if (state == 'all') then
-            call db_prepare(db, 'SELECT '//COLUMNS//' FROM changes WHERE repo = ?1 AND ?2 = ?2'// &
-                ' ORDER BY number DESC LIMIT 100;', st, stat)
-        else if (state == 'flagged') then
-            ! Changes waiting for a person's review.
-            call db_prepare(db, 'SELECT '//COLUMNS//' FROM changes WHERE repo = ?1 AND ?2 = ?2'// &
-                ' AND flagged <> 0 ORDER BY number DESC LIMIT 100;', st, stat)
-        else
-            call db_prepare(db, 'SELECT '//COLUMNS//' FROM changes WHERE repo = ?1 AND state = ?2'// &
-                ' ORDER BY number DESC LIMIT 100;', st, stat)
-        end if
+        next = ''
+        call db_prepare(db, sql, st, stat)
         if (stat /= SQLITE_OK) then
-            json = json//']}'
+            json = json//'],"next":""}'
             return
         end if
         call stmt_bind_text(st, 1, repo, stat)
-        if (len(state) == 0) then
-            call stmt_bind_text(st, 2, 'open', stat)
-        else
-            call stmt_bind_text(st, 2, state, stat)
-        end if
+        call stmt_bind_text(st, 2, state, stat)
+        call stmt_bind_text(st, 3, q, stat)
+        call stmt_bind_text(st, 4, at, stat)
+        call stmt_bind_int(st, 5, before_id, stat)
+        ! One more than asked for tells whether older ones follow.
+        call stmt_bind_int(st, 6, int(limit + 1, int64), stat)
         n = 0
         do while (stmt_step(st) == SQLITE_ROW)
+            if (n == limit) then
+                next = list_key(c)
+                exit
+            end if
             call read_row(st, c)
+            entries = int(stmt_int(st, 18))
+            newest = stmt_text(st, 19)
+            entry = stmt_int(st, 20)
+            stale = stmt_int(st, 21) /= 0 .and. (c%review == 'ai-reviewed' .or. &
+                c%review == 'human-reviewed')
             if (n > 0) json = json//','
-            json = json//summary_json(c)
+            text = summary_json(c)
+            json = json//text(1:len(text) - 1)//',"repo":"'//json_escape_string(c%repo)// &
+                '","status":"'//status_word(c%state, newest)//'","entries":'//itoa(entries)// &
+                ',"entry":'
+            if (entry > 0) then
+                json = json//itoa(int(entry))
+            else
+                json = json//'null'
+            end if
+            ! Why an entry failed is not recorded yet.
+            json = json//',"reason":null,"review_stale":'//trim(merge('true ', 'false', stale))//'}'
             n = n + 1
         end do
         call stmt_finalize(st)
-        json = json//']}'
-    end function list_json
+        json = json//'],"next":"'//next//'"}'
+    end function change_list_json
+
+    function status_word(state, entry_state) result(word)
+        !! What a change is shown as (doc/inspection.md, "States and words"):
+        !! an open one by its newest entry, `draft` without a live one.
+        character(len=*), intent(in) :: state, entry_state
+        character(len=:), allocatable :: word
+
+        word = state
+        if (state /= 'open') return
+        select case (entry_state)
+        case ('queued', 'running')
+            word = entry_state
+        case ('failed')
+            word = 'needs author'
+        case default
+            word = 'draft'
+        end select
+    end function status_word
+
+    function list_key(c) result(key)
+        !! The place of `c` in the list by activity, for `before`.
+        type(change_t), intent(in) :: c
+        character(len=:), allocatable :: key
+        character(len=24) :: num
+        integer :: k
+
+        key = ''
+        do k = 1, len(c%updated)
+            if (index('0123456789', c%updated(k:k)) > 0) key = key//c%updated(k:k)
+        end do
+        write (num, '(i0)') c%id
+        key = key//'-'//trim(num)
+    end function list_key
 
     function summary_json(c) result(json)
         type(change_t), intent(in) :: c

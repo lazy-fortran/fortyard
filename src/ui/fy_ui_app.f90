@@ -30,6 +30,13 @@ module fy_ui_app
         change_view_reset, &
         change_view_show, &
         change_view_title
+    use fy_changes_view, only: &
+        changes_view_compose, &
+        changes_view_missing, &
+        changes_view_receive, &
+        changes_view_repo, &
+        changes_view_show, &
+        changes_view_title
     use fy_fetch, only: &
         fetch_ready, &
         fetch_start, &
@@ -186,8 +193,10 @@ contains
         select case (page)
         case (R_BLOB, R_COMMIT, R_COMMITS, R_TREE)
             call repo_view_show(r)
-        case (R_CHANGE, R_CHANGES, R_ISSUE, R_ISSUES)
+        case (R_CHANGE, R_ISSUE, R_ISSUES)
             call change_view_show(r)
+        case (R_CHANGES)
+            call changes_view_show(r)
         case (R_JOBS)
             call jobs_view_show(r%repo)
         case (R_REPOS)
@@ -222,8 +231,10 @@ contains
             return
         end if
         select case (page)
-        case (R_CHANGE, R_CHANGES, R_ISSUE, R_ISSUES)
+        case (R_CHANGE, R_ISSUE, R_ISSUES)
             s = change_view_title()//' · fortyard'
+        case (R_CHANGES)
+            s = changes_view_title()//' · fortyard'
         case (R_JOBS)
             s = jobs_view_title()//' · fortyard'
         case (R_MISSING)
@@ -244,8 +255,10 @@ contains
         select case (page)
         case (R_BLOB, R_COMMIT, R_COMMITS, R_TREE)
             app_missing = repo_view_missing()
-        case (R_CHANGE, R_CHANGES, R_ISSUE, R_ISSUES)
+        case (R_CHANGE, R_ISSUE, R_ISSUES)
             app_missing = change_view_missing()
+        case (R_CHANGES)
+            app_missing = changes_view_missing()
         case (R_MISSING)
             app_missing = .true.
         case default
@@ -283,10 +296,12 @@ contains
         else
             call repo_row()
             select case (page)
-            case (R_CHANGE, R_CHANGES, R_ISSUE, R_ISSUES)
+            case (R_CHANGE, R_ISSUE, R_ISSUES)
                 ! The land scope lands without admin.
                 call change_view_compose(index(' '//scopes//' ', ' admin ') > 0 .or. &
                     index(' '//scopes//' ', ' land ') > 0, page_w < 600.0)
+            case (R_CHANGES)
+                call changes_view_compose()
             case (R_JOBS)
                 call jobs_view_compose(page_w < 600.0)
             case (R_MISSING)
@@ -408,8 +423,10 @@ contains
         !! The repository of the page shown.
         character(len=:), allocatable :: s
         select case (page)
-        case (R_CHANGE, R_CHANGES, R_ISSUE, R_ISSUES)
+        case (R_CHANGE, R_ISSUE, R_ISSUES)
             s = change_view_repo()
+        case (R_CHANGES)
+            s = changes_view_repo()
         case default
             s = repo_view_repo()
         end select
@@ -723,6 +740,7 @@ contains
         end if
         call change_view_receive()
         if (change_view_counts_changed()) call repo_view_repos()
+        call changes_view_receive()
         call jobs_view_receive()
         call repo_view_receive()
         if (fetch_ready(tokens_req)) then
