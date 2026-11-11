@@ -1,7 +1,8 @@
 # fortyard plan
 
 Delivery order for [DESIGN.md](DESIGN.md),
-[Testing at scale](doc/testing-at-scale.md) and [Workflow](doc/workflow.md). A milestone is done when its
+[Testing at scale](doc/testing-at-scale.md), [Workflow](doc/workflow.md) and
+[Parallel development](doc/parallel-development.md). A milestone is done when its
 behaviour is covered by tests that run with `fo test` and it runs on the
 development instance.
 
@@ -9,7 +10,8 @@ development instance.
 
 What is started or decided and not finished, each with its issue:
 
-- #60 Enable the review agent in production (server configuration).
+- #60 Enable the review agent in production (server configuration); needed
+  before the reviewer workers of MP8 are of use there.
 - #61 Shared build cache: finish and land fo's client.
 - #62 Eventual correctness per test case.
 - The LFortran fork's upstream pull requests: issue #27 of the repository
@@ -172,9 +174,149 @@ In order:
       restore test from that backup.
 - [ ] Format and repository-hygiene checks in every landing.
 - [ ] Landing checks in a runner container of their own, with their own limits
-      (the sandbox agents use later); `fy test BRANCH` on the same runner.
+      (the sandbox agents use later). `fy test BRANCH` is MP12.
 - [ ] fo published as a Debian release in the instance's store, so the toolchain
       image builds in seconds.
+
+### MP Parallel development
+
+Five to twenty agents and people work on one repository at the same time and
+land without anyone merging or testing again by hand
+([Parallel development](doc/parallel-development.md)). Items are in delivery
+order; items with the same letter can be built at the same time, and a letter
+starts when the letters before it have landed.
+
+- [ ] MP1 (A) Named migrations: a registry of migrations by name
+      (`src/fy_migrations.f90`) and the set of applied names with their
+      content hashes in the database. Versions 1 to 13 stay, with the version
+      row frozen at 13, so the previous release still starts. A duplicate name
+      or a changed body of an applied migration refuses to migrate.
+- [ ] MP2 (B) One name per line, sorted, in the lists every feature extends:
+      the `public` and `use ..., only:` lists of the store, change and server
+      modules, the usage text and the MCP actions. Lands with nothing else in
+      flight; two branches that each add a store procedure then merge in these
+      lists without a conflict.
+- [ ] MP3 (C) Scopes `write` and `land`: a token with `write` pushes, comments
+      and claims, one with `land` queues landings, neither needs `admin`
+      (`fy token create NAME --scopes ...`). Versions and landings record the
+      token's name, which lists show as the session.
+- [ ] MP4 (C) Checks name a commit: a check carries commit, tree and a nonce
+      for its claim; the runner checks out that commit, reports the tree and
+      repeats its report until the server has it; a report with another nonce
+      or tree is refused. A lost runner, a failed fetch or a missing runner is
+      an error that queues the check again and never fails a landing.
+- [ ] MP5 (C) Squash in the bare repository with `git merge-tree` and
+      `git commit-tree`, without a clone: same commits as before, a conflict
+      lists its paths, an empty squash is refused, size and format are checked
+      on the member's own files, a merge of `main` into a branch lands
+      squashed with the others. `fy serve` refuses to start with a git older
+      than 2.40.
+- [ ] MP6 (C) Queue numbers: `fy board --stats` and `GET .../board?stats=1`
+      give time from `fy land` to `main`, landings per hour, failures by
+      reason and checks per landing from the rows that exist, as the baseline
+      for everything below.
+- [ ] MP7 (C) Claims: `fy issue claim N` and `fy issue release N`; one holder,
+      the second claim is refused with the holder's name; a claim expires 24
+      hours after the holder's last push that names the issue and ends when
+      such a change lands; issue lists show the holder.
+- [ ] MP8 (C) Reviewer workers: `FY_REVIEW_WORKERS` processes take landed
+      changes, each change exactly once; six changes landed together are
+      reviewed by two workers without a double review.
+- [ ] MP9 (D) Landings pin a version: `fy land` opens the change if there is
+      none, pins the pushed commit and returns the existing landing when the
+      change already has a live one. A push to a queued change cancels its
+      landing and says so, as does `fy land --cancel N`. `main` moves in one
+      `git update-ref` transaction
+      that names its old value; a branch is deleted only if it still points
+      to the pinned commit, and commits pushed later open a follow-up change.
+- [ ] MP10 (D) `keep-both`: for paths listed in `.fortyard/merge` on `main`,
+      a conflict in which both sides only inserted lines at the same place is
+      merged with both insertions, the earlier landing's first; anything else
+      stays a conflict. The landing and the change show what was merged.
+      fortyard lists `PLAN.md` and `src/fy_migrations.f90`.
+- [ ] MP11 (D) Overlap on demand: `fy push`, `fy change view` and
+      `fy overlap [N]` say whether the change merges with `main` and name the
+      open changes it conflicts with (number, session, state, paths);
+      `fy overlap --paths P...` lists the open changes that touch given
+      paths.
+- [ ] MP12 (D) `fy test [BRANCH|N]`: a runner checks the version squashed
+      onto the current `main` without landing it; runners take landing checks
+      first, then tests, then verifications; the result is listed with the
+      change.
+- [ ] MP13 (E) Durable candidates: a candidate is a row with its members, an
+      immutable ref, its tree and its check, and the one lander works from
+      these rows without sleeping inside a check. A server restart during a
+      check, as every deploy causes, goes on with the same check; a restart
+      between the move of `main` and its record leaves the landings landed. A
+      candidate whose tree already has a passed check (after `fy test` with
+      `main` unmoved) lands without a second run. Up to 16 landings share a
+      candidate.
+- [ ] MP14 (F) Conflicts as outcomes: a landing that conflicts only with one
+      ahead of it waits for the next candidate and lands if that one is
+      rejected; one that conflicts with `main` fails with the reason
+      `conflict` and a rebase task (commit to merge with, paths, the other
+      changes). `fy land`, `fy test` and `fy job --wait` end with status 0, 1,
+      3 or 4 (still pending after `--timeout`), `--json` prints the task, and
+      the MCP action `wait` does the same. After three failed landings of one
+      change the next needs the admin scope. A landing queued with `--urgent`
+      (admin) goes before those not yet in a candidate.
+- [ ] MP15 (G) `fy sync [--onto M] [--continue] [--land]`: merges `main` (or
+      the newest version of change M) into the branch with rerere on, stops
+      at conflicts with status 3 and the paths, and after `--continue` pushes
+      and, with `--land`, queues again.
+- [ ] MP16 (G) Halves in parallel: the halves of a failed candidate are
+      checked at the same time when two runners are free; a half that passes
+      on an unmoved `main` lands at once, the other is built again on it.
+- [ ] MP17 (G) Queue settings in the repository policy of S1:
+      `queue.batch`, `land.tier` (`affected`, `full`, `none`), `claim.hours`.
+      Defaults keep the behaviour.
+- [ ] MP18 (G) Stacks: a version records the version of another change it is
+      built on; diff, review and squash use it as base; a child lands after
+      its parent as its own commit, also when the parent was amended or has
+      landed squashed; `fy land --stack` queues the session's own unlanded
+      ancestors; a child of a rejected, cancelled or closed parent waits.
+- [ ] MP19 (G) The board: `fy board`, `GET .../board` and the MCP action
+      `board` list working sessions (draft changes with claimed issue, last
+      push and predicted conflicts), the queue (landings with state and
+      reason, candidates with their check), landings that need their author,
+      and recent landings with the first release that contains them.
+- [ ] MP20 (H) The board as a page of the web application, live through the
+      event stream.
+- [ ] MP21 (H) Speculation, off by default (`queue.speculate`): further
+      candidates are built on the tip of the one being checked and checked on
+      other runners; one lands only after those before it, and a failure
+      supersedes those behind it. Built when MP6 shows a wait for a runner
+      above the check time with two runners in place.
+- [ ] MP22 (I) The rehearsal below as a test (`test/test_swarm.f90`).
+
+**Done when** a rehearsal passes on a local instance (`scripts/dev-up.sh`
+with two runners and a check of fixed duration): sixteen scripted sessions,
+each with its own token and worktree of one small repository, start together
+and each lands one change with `fy` alone. Four changes edit different hunks
+of one file, four append an entry to a registry of named migrations that is
+declared `keep-both`, two edit the same lines, two form a stack, one fails
+the check by itself, two pass alone and fail together, and one touches
+nothing the others touch; the server is restarted once during a check. The
+rehearsal passes when
+
+- every change is on `main` as one commit with its `(#N)`, the stack in
+  order, except the change that fails by itself and the later one of the
+  failing pair, which end with status 1 and their logs;
+- the later one of the two changes on the same lines got status 3 once and
+  landed after `fy sync` by its own session;
+- no check ran twice because of the restart, and no landing is left queued,
+  waiting or running;
+- no command used the admin scope after the start, and nothing was done
+  outside the sessions' own commands;
+- the verification of the final `main` passes;
+- the last landing is on `main` within ten check times of the start (a
+  bound to confirm from the first run).
+
+The same rehearsal then runs once with coding agents: seven agents each
+implement one prepared issue on a scratch copy of fortyard, all of them in
+`src/fy_server.f90`, `src/fy_store.f90` and `app/fy.f90`, and every change is
+landed or shown on the board as waiting for the person, without the person
+merging, rebasing or testing anything.
 
 ### M4b First background agent
 
@@ -223,8 +365,8 @@ elsewhere.
   data, release gates); NEO-2's golden comparisons as CTest tests with policy
   entries and fully keyed results.
 - M7 Coverage per commit and on changed lines.
-- M8 Full changes: stacks, versions with interdiff, attachments, review
-  ledger, batched merge queue, failover; fx and fo become primary.
+- M8 Full changes: versions with interdiff, attachments, review
+  ledger, failover; fx and fo become primary (stacks and the queue are MP).
 - M9 Agents: issue gardening and exploration; implementation once a second
   model is available; instructions and settings per group and repository;
   benchmark and outcome evaluation.
@@ -245,7 +387,8 @@ the others are new.
       affected cases within a budget, none), review before or after landing,
       bisection and repair on or off, batch size, limit on unreviewed
       changes. Defaults keep today's behaviour.
-- [ ] S2 `fy runner` with leases, heartbeats and per-case limits (M3). Done:
+- [ ] S2 `fy runner` with heartbeats and per-case limits (M3); the lease of a
+      check is MP4. Done:
       remote runners on build hosts (HTTPS through curl, a mirror and a kept
       work tree with its build directory per repository, restart on a new
       server release; `scripts/install-runner.sh`). Production's landing

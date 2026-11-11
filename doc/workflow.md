@@ -3,7 +3,9 @@
 How work moves through fortyard: how changes land, how they are reviewed, what
 the background agents do, how everything stays auditable, and how fortyard
 works together with GitHub. [DESIGN.md](../DESIGN.md) gives the architecture,
-[Testing at scale](testing-at-scale.md) the test pool this document relies on.
+[Testing at scale](testing-at-scale.md) the test pool this document relies on,
+and [Parallel development](parallel-development.md) how many agents and people
+work on one repository at the same time.
 
 ## Principles
 
@@ -43,12 +45,16 @@ and review. Every push of a change creates a new **version** of it.
 
 - **Opening.** Pushing a branch other than a protected one
   opens or updates a change as a draft; branches under `wip/` never open one.
-  Marking a change ready (`fy change ready`, or the button) puts it into the
-  merge queue.
+  `fy land` (or the button) pins the pushed version and puts it into the
+  merge queue. A later push takes the change out of the queue again until
+  `fy land` is repeated, so only a version its author asked to land lands.
 - **Versions.** Every push creates a new version of the same change, matched by
   its `Change-Id` trailer, which `fy` adds through a commit hook. A commit without
   one is matched by its branch name. The page shows the difference between any two versions, and line
-  comments carry over where the line still exists.
+  comments carry over where the line still exists. A version whose history
+  contains a version of another change builds on that change and forms a
+  stack with it; nothing is declared
+  (see [Parallel development](parallel-development.md#stacks)).
 - **Page.** As on GitHub and GitLab: title and a required Markdown description
   (drafted by the review agent from the issue and the diff, edited by the
   author); tabs *Conversation*, *Files changed*, *Versions* and *Checks*;
@@ -63,7 +69,9 @@ and review. Every push of a change creates a new **version** of it.
   upstream's numbers, so there `fy repo numbers NAME N` sets the next number
   and the sequence counts on from it.
 - **Landing.** A change lands as one squashed commit; a stack lands as one
-  commit per change. Each commit's subject ends in its own `(#123)`; the message
+  commit per change, parents first. The server merges the version onto the
+  newest `main` itself; its author acts only when that merge conflicts, and
+  does not test again by hand. Each commit's subject ends in its own `(#123)`; the message
   carries its description and the trailers `Change: <URL>` and
   `Change-Id: <ID>` of that change. A branch that is `main` plus one merge
   commit lands as that merge, so a merged history such as an upstream's stays
@@ -78,11 +86,16 @@ and review. Every push of a change creates a new **version** of it.
 
 ## The merge queue
 
-The queue exists in fortyard-primary repositories. Ready changes line up and
-are tested on top of the current `main`, several at a time: each is squashed onto
-the candidate, and `main` is fast-forwarded to it. A failing batch is split, and a
-failure is blamed on a change only when it reproduces with that change alone;
-the others land in order. The gates are:
+The queue exists in fortyard-primary repositories. Queued versions are
+squashed in order onto one candidate on top of the current `main`, a runner
+checks the candidate once, and `main` is fast-forwarded to it. A version that
+conflicts with one ahead of it waits for the next candidate; one that
+conflicts with `main` goes back to its author with the conflicting paths. A
+failing candidate is split, and a failure is blamed on a change only when it
+reproduces with that change alone on a state that passed; the others land in
+order. Candidates, the server's merge, stacks, restarts and what an author
+does after a conflict are described in
+[Parallel development](parallel-development.md#the-queue). The gates are:
 
 - build and the affected tests within a time budget;
 - hard checks: no secrets, size limits on receive, no deleted or loosened tests
@@ -117,8 +130,14 @@ approval of a person with the maintain role before landing. Each repository
 lists the paths concerned as patterns in its settings, with defaults for:
 
 - secrets and credentials;
-- CI, deploy and runner configuration, and anything that runs with credentials;
-- file formats and database migrations that write persistent data;
+- CI, deploy and runner configuration, and anything that runs with
+  credentials; the rules by which the server merges landings
+  (`.fortyard/merge`, see
+  [Parallel development](parallel-development.md#server-merge-and-resolution-classes));
+- file formats, and database migrations that change or remove persistent
+  data. A migration that only adds tables, indexes or columns lands like any
+  other change: the previous release still runs on the new schema, so a
+  revert undoes its effect;
 - releases and tags;
 - permissions and authentication;
 - the agents' own instructions, settings and sandbox.

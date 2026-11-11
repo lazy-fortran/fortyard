@@ -244,14 +244,17 @@ is configured (see
 
 ### Merge queue
 
-Merges into protected branches go through a queue. The queue builds the
-candidate result of the target branch plus the queued stacks, runs the
-pre-merge tier on it (affected cases within the budget), and fast-forwards the
-branch only if it passes. Rules are set
+Merges into protected branches go through a queue. The queue builds a
+candidate, the target branch plus the queued changes and stacks, each squashed
+onto it by the server, runs the pre-merge tier on it (affected cases within
+the budget), and fast-forwards the branch only if it passes. Rules are set
 per repository: required checks, and approvals only for the areas reviewed
-before merge (see [Workflow](doc/workflow.md#the-merge-queue)). The queue applies only to fortyard-primary repositories;
-in overlay mode the merge happens upstream and fortyard provides a required
-status.
+before merge (see [Workflow](doc/workflow.md#the-merge-queue)). How the queue
+and the tools around it serve many agents that land at the same time
+(conflicts, stacks, tests of a branch, claims, the board) is described in
+[Parallel development](doc/parallel-development.md). The queue applies only to
+fortyard-primary repositories; in overlay mode the merge happens upstream and
+fortyard provides a required status.
 
 ### fo and fy
 
