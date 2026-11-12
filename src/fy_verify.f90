@@ -571,7 +571,8 @@ contains
     end function settle
 
     subroutine checks_of(db, ref, ids, classes)
-        !! The runner checks queued for `ref`, one per class, oldest first.
+        !! The runner checks queued for `ref`, one per class, oldest first;
+        !! a twin is read with the check it raced (store_check_get).
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: ref
         integer(int64), allocatable, intent(out) :: ids(:)
@@ -580,7 +581,8 @@ contains
         integer :: stat
 
         allocate (ids(0), classes(0))
-        call db_prepare(db, 'SELECT id, class FROM checks WHERE ref = ?1 ORDER BY id;', st, stat)
+        call db_prepare(db, 'SELECT id, class FROM checks WHERE ref = ?1 AND'// &
+            ' coalesce(twin, id) >= id ORDER BY id;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, ref, stat)
         do while (stmt_step(st) == SQLITE_ROW)

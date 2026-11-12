@@ -1474,13 +1474,15 @@ contains
     subroutine store_check_cancel(db, id)
         !! Withdraws check `id` of a candidate that lost a member: no runner
         !! takes it any more, and the runner that holds it has its result refused.
+        !! Its twin, when raced, goes with it.
         type(db_t), intent(in) :: db
         integer(int64), intent(in) :: id
         type(stmt_t) :: st
         integer :: stat
 
         call db_prepare(db, "UPDATE checks SET state = 'cancelled', finished_at = "//NOW// &
-            " WHERE id = ?1 AND state IN ('queued', 'running');", st, stat)
+            ' WHERE (id = ?1 OR id = (SELECT twin FROM checks WHERE id = ?1)) AND state IN'// &
+            " ('queued', 'running');", st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, id, stat)
         stat = stmt_step(st)
@@ -1506,8 +1508,10 @@ contains
         !! dispatch_candidates names for its time limit `max_minutes`, while
         !! fewer than `max_running` checks run on that class; 0 or absent: the
         !! defaults of the class; each is taken
-        !! only while it is still queued. Every claim records when the runner
-        !! last asked (runners), for wait(C).
+        !! only while it is still queued. A raced candidate is not taken:
+        !! the backend gets its twin (store_check_twin) and `id` is the
+        !! twin's. Every claim records when the runner last asked (runners),
+        !! for wait(C).
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: runner
         character(len=*), intent(in), optional :: class
@@ -1519,6 +1523,7 @@ contains
         integer, intent(in), optional :: max_minutes, max_running
         character(len=:), allocatable :: cls
         integer(int64), allocatable :: ids(:)
+        logical, allocatable :: race(:)
         type(stmt_t) :: st
         integer :: stat, minutes, most, k
 
@@ -1552,9 +1557,15 @@ contains
             call stmt_finalize(st)
         end if
         if (dispatch_backend(cls)) then
-            call dispatch_candidates(db, cls, minutes, ids)
+            call dispatch_candidates(db, cls, minutes, ids, race)
             do k = 1, size(ids)
-                call store_check_take(db, runner, cls, ids(k), most, found, id, repo, ref, kind, limit)
+                if (race(k)) then
+                    call store_check_twin(db, runner, cls, ids(k), most, found, id, repo, ref, &
+                        kind, limit)
+                else
+                    call store_check_take(db, runner, cls, ids(k), most, found, id, repo, ref, &
+                        kind, limit)
+                end if
                 if (found) return
             end do
             return
@@ -1618,12 +1629,10 @@ contains
         repo = ''
         ref = ''
         if (present(limit)) limit = 0
-        call db_prepare(db, TAKE//"?3 AND state = 'queued' AND (SELECT count(*) FROM checks r"// &
-            " WHERE r.state = 'running' AND r.ran_class = ?2) < ?4 AND (?2 NOT LIKE 'github-%'"// &
-            " OR (SELECT count(*) FROM checks r WHERE r.state = 'running' AND r.ran_class LIKE"// &
-            " 'github-%') < (SELECT max(max_running) FROM runners WHERE class LIKE 'github-%'"// &
-            ' AND (seen_at >= '//DISPATCH_SEEN//' OR name = ?1))) RETURNING id, repo, ref, kind,'// &
-            ' time_limit;', st, stat)
+        ! The twin's row exists before the check names it (store_check_twin).
+        call db_prepare(db, TAKE//"?3 AND state = 'queued' AND NOT EXISTS (SELECT 1 FROM"// &
+            " checks t WHERE t.twin = checks.id AND t.state IN ('queued', 'running')) AND "// &
+            backend_room()//' RETURNING id, repo, ref, kind, time_limit;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, runner, stat)
         call stmt_bind_text(st, 2, class, stat)
@@ -1640,8 +1649,79 @@ contains
         call stmt_finalize(st)
     end subroutine store_check_take
 
+    subroutine store_check_twin(db, runner, class, check, most, found, id, repo, ref, kind, limit)
+        !! Races the queued check `check` (doc/backends.md "Racing"): gives
+        !! `runner` of the backend class `class` a twin of it, a second check
+        !! of the same ref and home class that runs on `class`, linked to it
+        !! through `twin` both ways, while `check` stays queued for its home
+        !! class. Only while `check` is queued and has no twin, under the
+        !! limits of store_check_take; one statement, so of two claims only
+        !! one makes a twin; store_check_take does not take `check` once its
+        !! twin runs, before `check` names it. `id` is the twin's.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: runner, class
+        integer(int64), intent(in) :: check
+        integer, intent(in) :: most
+        logical, intent(out) :: found
+        integer(int64), intent(out) :: id
+        character(len=:), allocatable, intent(out) :: repo, ref
+        character(len=:), allocatable, intent(out), optional :: kind
+        integer, intent(out), optional :: limit
+        type(stmt_t) :: st
+        integer :: stat
+
+        found = .false.
+        id = 0
+        repo = ''
+        ref = ''
+        if (present(limit)) limit = 0
+        call db_prepare(db, 'INSERT INTO checks (repo, ref, created_at, kind, class, state,'// &
+            ' runner, ran_class, claimed_at, started_at, time_limit, twin) SELECT c.repo, c.ref, '// &
+            NOW//", c.kind, c.class, 'running', ?1, ?2, "//NOW//', '//NOW//", CASE WHEN c.kind ="// &
+            " 'verify' THEN 21600 ELSE coalesce((SELECT 60*policy_check_timeout FROM repos WHERE"// &
+            ' name = c.repo), 3600) END, c.id FROM checks c WHERE c.id = ?3 AND c.state ='// &
+            " 'queued' AND c.twin IS NULL AND NOT EXISTS (SELECT 1 FROM checks t WHERE t.twin ="// &
+            ' c.id) AND '//backend_room()//' RETURNING id, repo, ref, kind, time_limit;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, runner, stat)
+        call stmt_bind_text(st, 2, class, stat)
+        call stmt_bind_int(st, 3, check, stat)
+        call stmt_bind_int(st, 4, int(most, int64), stat)
+        if (stmt_step(st) == SQLITE_ROW) then
+            id = stmt_int(st, 0)
+            repo = stmt_text(st, 1)
+            ref = stmt_text(st, 2)
+            if (present(kind)) kind = stmt_text(st, 3)
+            if (present(limit)) limit = int(stmt_int(st, 4))
+            found = .true.
+        end if
+        call stmt_finalize(st)
+        if (.not. found) return
+        call db_prepare(db, 'UPDATE checks SET twin = ?2 WHERE id = ?1;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, check, stat)
+        call stmt_bind_int(st, 2, id, stat)
+        stat = stmt_step(st)
+        call stmt_finalize(st)
+    end subroutine store_check_twin
+
+    function backend_room() result(sql)
+        !! The condition under which runner ?1 of backend class ?2 may run one
+        !! more check: fewer than ?4 run on the class and, for a GitHub class,
+        !! fewer than the largest limit a GitHub backend process seen lately
+        !! sent run on all GitHub classes.
+        character(len=:), allocatable :: sql
+
+        sql = "(SELECT count(*) FROM checks r WHERE r.state = 'running' AND r.ran_class = ?2)"// &
+            " < ?4 AND (?2 NOT LIKE 'github-%' OR (SELECT count(*) FROM checks r WHERE r.state ="// &
+            " 'running' AND r.ran_class LIKE 'github-%') < (SELECT max(max_running) FROM runners"// &
+            " WHERE class LIKE 'github-%' AND (seen_at >= "//DISPATCH_SEEN//' OR name = ?1)))'
+    end function backend_room
+
     subroutine store_check_release(db, runner, count)
-        !! Queues the running checks of `runner` again; `count` of them.
+        !! Queues the running checks of `runner` again; `count` of them. A
+        !! twin is not queued but ends cancelled: the check it raced is
+        !! still queued for its home class, as if queued again now.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: runner
         integer, intent(out) :: count
@@ -1649,6 +1729,21 @@ contains
         integer :: stat
 
         count = 0
+        call db_prepare(db, 'UPDATE checks SET queued_at = '//NOW//" WHERE state = 'queued' AND"// &
+            " id IN (SELECT twin FROM checks WHERE state = 'running' AND runner = ?1 AND"// &
+            ' twin < id);', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, runner, stat)
+        stat = stmt_step(st)
+        call stmt_finalize(st)
+        call db_prepare(db, "UPDATE checks SET state = 'cancelled', finished_at = "//NOW// &
+            " WHERE state = 'running' AND runner = ?1 AND twin < id RETURNING id;", st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, runner, stat)
+        do while (stmt_step(st) == SQLITE_ROW)
+            count = count + 1
+        end do
+        call stmt_finalize(st)
         call db_prepare(db, "UPDATE checks SET state = 'queued', runner = NULL, claimed_at = NULL,"// &
             ' ran_class = NULL, started_at = NULL, queued_at = '//NOW//" WHERE state = 'running' AND"// &
             ' runner = ?1 RETURNING id;', st, stat)
@@ -1671,6 +1766,9 @@ contains
         !! only when the claim is older than twice its time limit (a failure
         !! is run again from an empty build directory) plus `lost_grace`
         !! seconds: its runner is lost.
+        !! A twin (store_check_twin) is not queued again but ends cancelled,
+        !! deciding nothing: the check it raced still waits for its home class,
+        !! as if queued again now.
         type(db_t), intent(in) :: db
         integer(int64), intent(in) :: id
         character(len=*), intent(in) :: log
@@ -1679,6 +1777,8 @@ contains
         logical, intent(out) :: found
         character(len=*), intent(in), optional :: runner
         integer, intent(in), optional :: lost_grace
+        !! The attempt ends here rather than going back to the queue.
+        character(len=*), parameter :: ENDS = '(twin < id OR ?2 = 1 AND timeouts >= 1)'
         character(len=:), allocatable :: only
         type(stmt_t) :: st
         integer :: stat
@@ -1692,12 +1792,12 @@ contains
             ' 2*coalesce(time_limit, 3600) + ?5'
         ! SET reads the row as it was, so `timeouts` there is the count before.
         call db_prepare(db, 'UPDATE checks SET timeouts = timeouts + ?2, log = '// &
-            LOG_FIRST//', state = CASE WHEN ?2 = 1 AND timeouts >= 1'// &
-            " THEN 'timeout' ELSE 'queued' END, runner = CASE WHEN ?2 = 1 AND timeouts >= 1 THEN"// &
-            ' runner END, claimed_at = CASE WHEN ?2 = 1 AND timeouts >= 1 THEN claimed_at END,'// &
-            ' ran_class = CASE WHEN ?2 = 1 AND timeouts >= 1 THEN ran_class END, started_at = CASE'// &
-            ' WHEN ?2 = 1 AND timeouts >= 1 THEN started_at END,'// &
-            ' finished_at = CASE WHEN ?2 = 1 AND timeouts >= 1 THEN '//NOW//' END, queued_at ='// &
+            LOG_FIRST//", state = CASE WHEN twin < id THEN 'cancelled' WHEN ?2 = 1 AND"// &
+            " timeouts >= 1 THEN 'timeout' ELSE 'queued' END, runner = CASE WHEN "//ENDS//' THEN'// &
+            ' runner END, claimed_at = CASE WHEN '//ENDS//' THEN claimed_at END,'// &
+            ' ran_class = CASE WHEN '//ENDS//' THEN ran_class END, started_at = CASE'// &
+            ' WHEN '//ENDS//' THEN started_at END,'// &
+            ' finished_at = CASE WHEN '//ENDS//' THEN '//NOW//' END, queued_at ='// &
             ' '//NOW//" WHERE id = ?1 AND state = 'running'"//only//' RETURNING state;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, id, stat)
@@ -1710,6 +1810,14 @@ contains
             found = .true.
         end if
         call stmt_finalize(st)
+        if (state /= 'cancelled') return
+        ! The raced check waits for its home class as if queued again now.
+        call db_prepare(db, 'UPDATE checks SET queued_at = '//NOW//" WHERE state = 'queued' AND"// &
+            ' id = (SELECT twin FROM checks WHERE id = ?1 AND twin < id);', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, id, stat)
+        stat = stmt_step(st)
+        call stmt_finalize(st)
     end subroutine store_check_error
 
     subroutine store_check_finish(db, id, runner, state, log, found, started_at)
@@ -1719,38 +1827,63 @@ contains
         !! `started_at` (ISO 8601) is when it actually started running, for a
         !! backend the external job's start; kept between the check's
         !! creation and now. Without it the claim's time stays.
+        !! Of a raced pair (store_check_twin) the first verdict decides: the
+        !! other check is cancelled, so its runner's next log upload and its
+        !! result are refused and a backend sees it withdrawn; a result that
+        !! comes after the other's verdict finds nothing.
         type(db_t), intent(in) :: db
         integer(int64), intent(in) :: id
         character(len=*), intent(in) :: runner, state, log
         logical, intent(out) :: found
         character(len=*), intent(in), optional :: started_at
+        character(len=24) :: num
+        integer(int64) :: twin
         type(stmt_t) :: st
         integer :: stat
 
         found = .false.
+        twin = 0
         call db_prepare(db, 'UPDATE checks SET state = ?2, log = '//LOG_FIRST// &
             ', finished_at = '//NOW//', started_at = coalesce(max(created_at,'// &
             " min(strftime('%Y-%m-%dT%H:%M:%SZ', ?5), "//NOW//')), started_at)'// &
-            " WHERE id = ?1 AND state = 'running' AND runner = ?4 RETURNING id;", st, stat)
+            " WHERE id = ?1 AND state = 'running' AND runner = ?4 AND NOT EXISTS (SELECT 1 FROM"// &
+            " checks t WHERE t.id = checks.twin AND t.state IN ('passed', 'failed'))"// &
+            ' RETURNING coalesce(twin, 0);', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, id, stat)
         call stmt_bind_text(st, 2, state, stat)
         call stmt_bind_text(st, 3, log, stat)
         call stmt_bind_text(st, 4, runner, stat)
         if (present(started_at)) call stmt_bind_text(st, 5, started_at, stat)
-        found = stmt_step(st) == SQLITE_ROW
+        if (stmt_step(st) == SQLITE_ROW) then
+            found = .true.
+            twin = stmt_int(st, 0)
+        end if
+        call stmt_finalize(st)
+        if (twin == 0) return
+        write (num, '(i0)') id
+        call db_prepare(db, "UPDATE checks SET state = 'cancelled', finished_at = "//NOW// &
+            ', log = '//LOG_FIRST//" WHERE id = ?1 AND state IN ('queued', 'running');", st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, twin, stat)
+        call stmt_bind_text(st, 3, 'Withdrawn: its twin check '//trim(num)//' ran the same'// &
+            ' commit and '//state//' first, which decides.'//new_line('a'), stat)
+        stat = stmt_step(st)
         call stmt_finalize(st)
     end subroutine store_check_finish
 
-    subroutine store_check_get(db, id, state, log, age, limit)
+    subroutine store_check_get(db, id, state, log, age, limit, which)
         !! State and log of a check, and seconds since it was queued, queued
         !! again or claimed; `limit`, the time limit in seconds its last claim
-        !! was given (0: none).
+        !! was given (0: none). A raced pair reads as one check: its twin
+        !! when that has the verdict, or runs while the check itself neither
+        !! runs nor has a verdict; `which` is the check read.
         type(db_t), intent(in) :: db
         integer(int64), intent(in) :: id
         character(len=:), allocatable, intent(out) :: state, log
         integer, intent(out) :: age
         integer, intent(out), optional :: limit
+        integer(int64), intent(out), optional :: which
         type(stmt_t) :: st
         integer :: stat
 
@@ -1758,9 +1891,13 @@ contains
         log = ''
         age = 0
         if (present(limit)) limit = 0
+        if (present(which)) which = id
         call db_prepare(db, "SELECT state, coalesce(log, ''), CAST(strftime('%s', 'now') -"// &
             " strftime('%s', coalesce(claimed_at, queued_at, created_at)) AS INTEGER),"// &
-            ' coalesce(time_limit, 3600) FROM checks WHERE id = ?1;', st, stat)
+            ' coalesce(time_limit, 3600), id FROM checks WHERE id = (SELECT CASE WHEN t.state'// &
+            " IN ('passed', 'failed') OR (c.state NOT IN ('passed', 'failed', 'running') AND"// &
+            " t.state = 'running') THEN t.id ELSE c.id END FROM checks c LEFT JOIN checks t ON"// &
+            ' t.id = c.twin WHERE c.id = ?1);', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, id, stat)
         if (stmt_step(st) == SQLITE_ROW) then
@@ -1768,6 +1905,7 @@ contains
             log = stmt_text(st, 1)
             age = int(stmt_int(st, 2))
             if (present(limit)) limit = int(stmt_int(st, 3))
+            if (present(which)) which = stmt_int(st, 4)
         end if
         call stmt_finalize(st)
     end subroutine store_check_get

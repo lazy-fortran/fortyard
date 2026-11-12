@@ -128,16 +128,24 @@ enforced at claim: GitHub's Free plan allows 20 jobs at once per organisation,
 5 of them on macOS, configured on the GitHub backend process; a GitLab backend
 runs one job.
 
-**Racing.** When the two estimates differ by less than 25 % and both classes
-have capacity, the server gives the check to both: the backend's claim creates
-a second check row with the same ref, linked through `twin`. The first
+**Racing.** When the two estimates differ by less than 25 % of the larger and
+both classes have capacity (the backend is below its concurrency limit; an own
+runner of the home class is idle, or its check has run for three quarters of
+its `run(R, home)`), the server gives the check to both: the backend's claim
+creates a second check row, the twin, with the same ref, linked through `twin`
+both ways, and the check stays queued for its home class. The first
 **verdict** (pass or fail) of the pair counts and the other is cancelled: a
-backend process cancels its external run, an own runner stops the check when
-its next log upload is answered with "cancelled". A run that ends without a
+backend process cancels its external run when its poll of
+`GET /api/v1/checks/N/publish` shows the check no longer running, an own
+runner split into controller and executor stops the check when its next log
+upload is refused (409), and one without executor stops sending its log and
+runs the check to its end, whose result is refused. The lander and the
+verifier read the pair as one check. A run that ends without a
 verdict (the external job did not start, the runner was lost, GitHub cancelled
 it) is not a verdict: it is reported as `{"error":"runner"}` and the check is
-queued again, so infrastructure trouble of a backend never fails a landing.
-Racing never uses a GitLab backend.
+queued again, so infrastructure trouble of a backend never fails a landing;
+a twin is not queued again but ends cancelled, and its check waits for the
+home class as if queued again then. Racing never uses a GitLab backend.
 
 **Visible.** `GET /api/v1/backends` and `fy backends` list each class with its
 runners or backend processes, running and queued checks, concurrency limit,

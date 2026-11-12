@@ -2106,13 +2106,14 @@ contains
         !! not reported for twice the time limit of its claim (a failure is
         !! run again from an empty build directory) plus 5 minutes is taken
         !! from that runner, lost, and queued again; a check that reached its
-        !! time limit twice fails with the reason timeout.
+        !! time limit twice fails with the reason timeout. A raced check and
+        !! its twin read as one check (store_check_get).
         character(len=*), intent(in) :: repo, ref
         logical, intent(out) :: passed
         character(len=:), allocatable, intent(out) :: log
         character(len=:), allocatable :: state
         character(len=16) :: minutes
-        integer(int64) :: id
+        integer(int64) :: id, which
         integer :: stat, age, fd, limit
         logical :: changed, found
 
@@ -2142,7 +2143,7 @@ contains
                 state = 'cancelled'
                 exit
             end if
-            call store_check_get(lander_db, id, state, log, age, limit)
+            call store_check_get(lander_db, id, state, log, age, limit, which)
             if (state == 'passed' .or. state == 'failed') exit
             write (minutes, '(i0)') limit/60
             if (state == 'timeout') then
@@ -2156,8 +2157,8 @@ contains
                 exit
             end if
             if (state == 'running' .and. limit > 0 .and. age > 2*limit + LOST_GRACE) then
-                call store_check_error(lander_db, id, 'Runner error: the runner did not report'// &
-                    ' within twice the time limit ('//trim(minutes)//' minutes) plus 5 minutes'// &
+                call store_check_error(lander_db, which, 'Runner error: the runner did not'// &
+                    ' report within twice the time limit ('//trim(minutes)//' minutes) plus 5 minutes'// &
                     ' and is taken as lost; the check is queued again.', .false., state, found, &
                     lost_grace=LOST_GRACE)
                 if (found) then
@@ -2396,7 +2397,8 @@ contains
             !! how the check stands: {"repository":"OWNER/NAME","state":...},
             !! so a backend knows the upstream's name and sees a cancel.
             !! Only a primary repository's checks are published: a mirror's
-            !! upstream is its source, which fortyard fetches from.
+            !! upstream is its source, which fortyard fetches from. GET of a
+            !! check that is not published anywhere answers 409 with its "state".
             character(len=:), allocatable :: digits, holder, branch, commit, out, upstream, ask
             type(repo_info_t), allocatable :: repos(:)
             integer :: i, stat
@@ -2433,6 +2435,9 @@ contains
             end do
             if (len(upstream) == 0) then
                 call fail(res, 409, 'only a primary repository with an upstream is published')
+                ! A backend that publishes nothing (GitLab's) still sees a cancel.
+                if (req%method == 'GET') res%body = res%body(1:len(res%body) - 1)// &
+                    ',"state":"'//state//'"}'
                 return
             end if
             if (req%method == 'GET') then

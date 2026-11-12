@@ -204,12 +204,14 @@ contains
         !! One claimed check, from the push of its commit to the report; `pause`
         !! is true when GitLab or its runner was the trouble (a job that did
         !! not start in time, a failed push, a job that ended without a
-        !! verdict), so that the backend does not claim again at once.
+        !! verdict), so that the backend does not claim again at once. A check
+        !! withdrawn on the server while its job waits or runs is cancelled
+        !! there and not reported.
         type(gitlab_backend_t), intent(in) :: b
         character(len=*), intent(in) :: claim
         logical, intent(out) :: pause
         character(len=:), allocatable :: repo, ref, kind, id, out, body, pipeline, jobs, status, &
-            started, reason, job_id, trace, outcome, cache_file, cache_sum, note
+            started, reason, job_id, trace, outcome, cache_file, cache_sum, note, state
         character(len=16) :: num
         type(cell_t), allocatable :: rows(:, :)
         integer :: code, stat, timeout, limit, pid
@@ -287,6 +289,23 @@ contains
         do
             call proc_sleep_ms(1000*b%poll)
             call system_clock(now)
+            ! A check withdrawn on the server (cancelled, or decided by its
+            ! twin) is not reported: its pipeline is cancelled.
+            call client_request(b%server, 'GET', '/api/v1/checks/'//id//'/publish', b%token, '', &
+                code, out, stat)
+            if (stat == 0) then
+                call json_extract_string(out, 'state', state, found)
+                if (code == 403 .or. code == 404 .or. ((code == 200 .or. code == 409) .and. &
+                    found .and. state /= 'running')) then
+                    call api(b, 'POST', '/pipelines/'//pipeline//'/cancel', '', code, out, stat)
+                    write (error_unit, '(a)') 'fy backend gitlab: check '//id// &
+                        ' was withdrawn; its pipeline is cancelled'
+                    flush (error_unit)
+                    call clean_up(b, id, pipeline)
+                    pause = .false.
+                    return
+                end if
+            end if
             call api(b, 'GET', '/pipelines/'//pipeline//'/jobs', '', code, jobs, stat)
             if (stat == 0 .and. code == 200) then
                 rows = json_rows(jobs, [character(len=16) :: 'id', 'status', 'started_at', &

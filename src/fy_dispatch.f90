@@ -29,6 +29,7 @@ module fy_dispatch
         dispatch_backend, &
         dispatch_candidates, &
         dispatch_home, &
+        dispatch_home_free, &
         dispatch_json, &
         dispatch_max_minutes, &
         dispatch_max_running, &
@@ -239,29 +240,41 @@ contains
         w = w/runners
     end function dispatch_wait
 
-    subroutine dispatch_candidates(db, class, max_minutes, ids)
+    subroutine dispatch_candidates(db, class, max_minutes, ids, race)
         !! The queued checks a backend process of `class` may take, in the
         !! claim order: those of its own class, and those of the home class it
         !! stands in for where 1.5 * run(R, class) fits `max_minutes` and
         !! eta(R, class) <= eta(R, home). Only of public repositories whose policy
-        !! `backends` names the backend.
+        !! `backends` names the backend, and none whose twin still runs.
+        !! `race(k)`: the backend is given a twin of check `ids(k)` and the
+        !! home class keeps the check (doc/backends.md "Racing"), because the
+        !! two estimates differ by less than 25 % of the larger, the home
+        !! class has capacity (dispatch_home_free), the check has no twin yet
+        !! and the backend is not GitLab's. Without `race` nothing is raced.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: class
         integer, intent(in) :: max_minutes
         integer(int64), allocatable, intent(out) :: ids(:)
+        logical, allocatable, intent(out), optional :: race(:)
         character(len=:), allocatable :: home, family, repo, of
-        real(real64) :: wait_b, run_b
+        real(real64) :: wait_b, run_b, eta_b, eta_h
+        logical :: twinned, free, asked, raced
         type(stmt_t) :: st
         integer :: stat
 
         allocate (ids(0))
+        if (present(race)) allocate (race(0))
         if (.not. dispatch_backend(class)) return
         home = dispatch_home(class)
         family = class(1:6)
         wait_b = -1
-        call db_prepare(db, 'SELECT c.id, c.repo, c.class FROM checks c JOIN repos p ON'// &
-            " p.name = c.repo WHERE c.state = 'queued' AND (c.class = ?1 OR c.class = ?2) AND"// &
-            " p.public = 1 AND instr(',' || p.policy_backends || ',', ',' || ?3 || ',') > 0"// &
+        free = .false.
+        asked = .false.
+        call db_prepare(db, 'SELECT c.id, c.repo, c.class, c.twin IS NOT NULL FROM checks c'// &
+            " JOIN repos p ON p.name = c.repo WHERE c.state = 'queued' AND (c.class = ?1 OR"// &
+            " c.class = ?2) AND p.public = 1 AND instr(',' || p.policy_backends || ',', ',' ||"// &
+            " ?3 || ',') > 0 AND NOT EXISTS (SELECT 1 FROM checks t WHERE t.id = c.twin AND"// &
+            " t.state IN ('queued', 'running'))"// &
             " ORDER BY c.kind = 'verify', (SELECT count(*) FROM checks r WHERE r.state ="// &
             " 'running' AND r.repo = c.repo AND coalesce(r.ran_class, r.class) = c.class), c.id"// &
             " LIMIT ?4;", st, stat)
@@ -273,15 +286,28 @@ contains
         do while (stmt_step(st) == SQLITE_ROW)
             repo = stmt_text(st, 1)
             of = stmt_text(st, 2)
+            twinned = stmt_int(st, 3) /= 0
+            raced = .false.
             ! A check of the backend's own class was asked for by the policy; the
             ! job's time limit bounds it. Standing in, it must fit that limit.
             if (of /= class) then
                 run_b = dispatch_run(db, repo, class)
                 if (1.5_real64*run_b > 60.0_real64*max_minutes) cycle
                 if (wait_b < 0) wait_b = dispatch_wait(db, class, 0_int64)
-                if (.not. wait_b + run_b <= eta_home(stmt_int(st, 0))) cycle
+                eta_b = wait_b + run_b
+                eta_h = eta_home(stmt_int(st, 0))
+                if (present(race) .and. family /= 'gitlab' .and. .not. twinned .and. &
+                    eta_h < DISPATCH_NEVER) then
+                    if (abs(eta_b - eta_h) < 0.25_real64*max(eta_b, eta_h)) then
+                        if (.not. asked) free = dispatch_home_free(db, home)
+                        asked = .true.
+                        raced = free
+                    end if
+                end if
+                if (.not. raced .and. .not. eta_b <= eta_h) cycle
             end if
             ids = [ids, stmt_int(st, 0)]
+            if (present(race)) race = [race, raced]
         end do
         call stmt_finalize(st)
 
@@ -296,6 +322,36 @@ contains
         end function eta_home
 
     end subroutine dispatch_candidates
+
+    function dispatch_home_free(db, home) result(free)
+        !! Whether an own runner of class `home` has capacity for one more
+        !! check: one seen lately is idle, or the check it runs has run for
+        !! at least three quarters of its run(R, home), so it is about to be.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: home
+        logical :: free
+        type(stmt_t) :: st
+        integer :: stat
+
+        free = .false.
+        call db_prepare(db, "SELECT coalesce(b.repo, ''), b.id IS NULL, coalesce(CAST(strftime("// &
+            "'%s', 'now') - strftime('%s', coalesce(b.started_at, b.claimed_at)) AS INTEGER), 0)"// &
+            " FROM runners r LEFT JOIN checks b ON b.state = 'running' AND b.runner = r.name"// &
+            ' WHERE r.class = ?1 AND (r.seen_at >= '//DISPATCH_SEEN//' OR b.id IS NOT NULL);', &
+            st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, home, stat)
+        do while (stmt_step(st) == SQLITE_ROW)
+            if (stmt_int(st, 1) /= 0) then
+                free = .true.
+            else
+                free = real(stmt_int(st, 2), real64) >= &
+                    0.75_real64*dispatch_run(db, stmt_text(st, 0), home)
+            end if
+            if (free) exit
+        end do
+        call stmt_finalize(st)
+    end function dispatch_home_free
 
     function dispatch_json(db) result(json)
         !! GET /api/v1/backends: "classes", one per runner class with its

@@ -14,7 +14,9 @@ program test_backend_gitlab
     !! backend's newest three, and a failure with a restored cache is rerun
     !! without it. Git's erased credentials do not stop the next push. A job
     !! that does not start within the start wait is cancelled, the check goes
-    !! back to the queue, and the backend pauses before it takes it again.
+    !! back to the queue, and the backend pauses before it takes it again. A
+    !! check withdrawn on the server while its job runs has its pipeline
+    !! cancelled.
     !! The pipeline's script ends a check at its limit as a timeout, but not
     !! one that exits 124 or is killed early, and an fo that cannot be
     !! installed is no verdict. The setup puts the shipped pipeline on the
@@ -282,6 +284,25 @@ program test_backend_gitlab
     call check(cancelled_at > 0 .and. next_at - cancelled_at >= 3000, &
         'the backend pauses for its back-off before it starts a pipeline again: '//text)
     call wait_no_branches('no branch is left')
+
+    ! A check withdrawn on the server while its job runs (cancelled, or
+    ! decided by its twin): the backend cancels the pipeline and cleans up.
+    call execute_command_line('touch '//top//'/slow', exitstat=stat)
+    call land('fourth', 'printf "#!/bin/sh\nwhile [ -e '//trim(cwd)//'/'//top// &
+        '/slow ]; do sleep 0.2; done\n" > .fortyard/verify', 'Wait')
+    do i = 1, 600
+        inquire (file=jobs_dir//'/job-104/env', exist=exists)
+        if (exists) exit
+        call proc_sleep_ms(100)
+    end do
+    call check(exists, 'the job of the fourth verification runs')
+    call store_open(data//'/fortyard.db', db, stat)
+    call db_exec(db, "UPDATE checks SET state = 'cancelled' WHERE state = 'running';", stat)
+    call db_close(db)
+    call wait_log('POST '//prefix//'/pipelines/104/cancel ')
+    call wait_log('DELETE '//prefix//'/pipelines/104 ')
+    call wait_no_branches('the branch of a withdrawn check is deleted')
+    call execute_command_line('rm -f '//top//'/slow', exitstat=stat)
 
     call proc_kill(back, SIGTERM)
     call proc_wait(back, stat)
