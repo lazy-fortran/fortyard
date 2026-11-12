@@ -10,7 +10,8 @@ program fy
     use fy_backend_github, only: &
         github_configure, &
         github_main, &
-        github_setup
+        github_setup, &
+        github_token_file
     use fy_backend_gitlab, only: &
         gitlab_backend_main, &
         gitlab_backend_t, &
@@ -193,12 +194,14 @@ contains
             '                      run time per repository with the checks it rests on', &
             '  executor DIR        run the checks a runner hands over in DIR, without its', &
             '                        token (a container of its own next to the runner)', &
-            '  backend github --server URL --token-file F --app-id ID --app-key FILE', &
-            '        --owner ORG [--classes github-linux,...] [--max-running 20] [--max-macos 5]', &
+            '  backend github --server URL --token-file F --owner ORG', &
+            '        (--github-token-file F2 | --app-id ID --app-key FILE)', &
+            '        [--classes github-linux,...] [--max-running 20] [--max-macos 5]', &
             '        [--max-minutes 360] [--api https://api.github.com] [--poll SECONDS]', &
             '        [--start-timeout SECONDS]', &
             '                      run checks of the GitHub classes on GitHub Actions in', &
-            '                      ORG''s public repositories (runner scope, GitHub App key)', &
+            '                      ORG''s public repositories (runner token; F2: a fine-grained', &
+            '                      token with Actions read and write, read for each request)', &
             '  backend github setup GITHUB-NAME --app-id ID --app-key FILE --owner ORG', &
             '        [--github-token-file F]', &
             '                      check and prepare ORG/GITHUB-NAME for the GitHub backend', &
@@ -642,10 +645,12 @@ contains
         call github_configure(option('--app-id', ''), option('--app-key', ''), &
             option('--owner', ''), option('--api', 'https://api.github.com'), gh_token, &
             backend_number('--poll', 5), backend_number('--start-timeout', 600))
+        if (len(text) > 0) call github_token_file(text)
         if (len(option('--owner', '')) == 0 .or. (len(gh_token) == 0 .and. &
             (len(option('--app-id', '')) == 0 .or. len(option('--app-key', '')) == 0))) then
-            write (error_unit, '(a)') 'fy backend github: needs --owner and --app-id with '// &
-                '--app-key (or, for setup, --github-token-file)'
+            write (error_unit, '(a)') 'fy backend github: needs --owner and either'// &
+                ' --github-token-file (a fine-grained token with Actions read and write)'// &
+                ' or --app-id with --app-key'
             call quit(2)
         end if
         if (positional(2) == 'setup') then

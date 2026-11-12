@@ -1,2 +1,7 @@
 # The GitHub backend reads and deletes runs through the API.
 api.github.com
+# Job logs: the API redirects their download to these storage hosts.
+actions.githubusercontent.com
+blob.core.windows.net
+# The fortyard server, reached by its public address like a remote runner.
+code.tugraz.at

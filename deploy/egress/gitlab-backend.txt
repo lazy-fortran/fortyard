@@ -1,3 +1,5 @@
 # The GitLab backend pushes, starts and reads pipelines; the container
 # registry is a subdomain.
 gitlab.tugraz.at
+# The fortyard server, reached by its public address like a remote runner.
+code.tugraz.at

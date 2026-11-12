@@ -15,7 +15,8 @@ program test_backend_github
     !! do not run, and touches nothing else. Setup refuses a repository with secrets and
     !! prepares a clean one. The workflow built into fy is the shipped file.
     use, intrinsic :: iso_fortran_env, only: int64
-    use fy_backend_github, only: github_configure, github_main, github_setup, github_workflow
+    use fy_backend_github, only: github_configure, github_main, github_setup, github_token_file, &
+        github_workflow
     use fy_http, only: http_request_t, http_read_request, http_send_response, http_query_param
     use fy_posix, only: &
         sock_bound_port, &
@@ -43,7 +44,7 @@ program test_backend_github
     character(len=16) :: num
     character(len=4096) :: cwd
     integer(int64) :: id
-    integer :: lfd, flfd, port, fport, stat, sup, fake, back, i, age
+    integer :: lfd, flfd, port, fport, stat, sup, fake, back, i, age, mark
     logical :: exists
     ! The fake GitHub's state.
     type(http_request_t) :: req
@@ -223,6 +224,31 @@ program test_backend_github
     call check(len(line_of('git --git-dir='//up//' for-each-ref refs/heads/fortyard')) == 0, &
         'no check branch is left upstream')
 
+    ! With a fine-grained token in a file instead of the App: the same check
+    ! passes, and no App token is asked for or refused.
+    call proc_kill(back, SIGTERM)
+    call proc_wait(back, stat)
+    back = 0
+    mark = len(slurp(api_log))
+    call execute_command_line('printf "ghs_test\n" > '//dir//'/gh.token')
+    call store_open(data//'/fortyard.db', db, stat)
+    call store_check_add(db, 'fx', 'refs/heads/pass', id, stat, class='github-linux')
+    call db_close(db)
+    back = proc_fork()
+    if (back == 0) then
+        write (num, '(i0)') fport
+        call github_configure('', '', 'acme', 'http://127.0.0.1:'//trim(num), '', 1, 3)
+        call github_token_file(dir//'/gh.token')
+        call github_main('http://'//base, runner, 'github-linux', 20, 5, 360)
+        call proc_exit(0)
+    end if
+    call wait_check(int(id), 'passed', '')
+    log = slurp(api_log)
+    log = log(mark + 1:)
+    call check(index(log, '/actions/runs') > 0 .and. index(log, 'access_tokens') == 0 .and. &
+        index(log, '/orgs/acme/installation') == 0 .and. index(log, '401 ') == 0, &
+        'a token file stands in for the App: '//log)
+
     call stop_all()
     call execute_command_line('rm -rf '//dir)
     print '(a)', 'backend github: all checks passed'
@@ -286,7 +312,8 @@ contains
             headers = ''
             path = req%path
             auth = req%authorization
-            if (index(path, '/app/') == 1 .or. index(path, '/orgs/') == 1) then
+            ! The App's own routes need its signed JWT; the rest a token.
+            if (index(path, '/app/') == 1 .or. path == '/orgs/acme/installation') then
                 if (.not. app_signed(auth)) code = 401
             else if (index(path, '/raw/') /= 1) then
                 if (auth /= 'Bearer ghs_test') code = 401
@@ -322,6 +349,9 @@ contains
             return
         case ('/installation/repositories')
             body = '{"total_count":1,"repositories":[{"name":"demo"}]}'
+            return
+        case ('/orgs/acme/repos')
+            body = '[{"name":"demo"}]'
             return
         case ('/repos/acme/demo', '/repos/acme/leaky')
             body = '{"name":"x","private":false}'

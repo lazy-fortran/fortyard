@@ -5,6 +5,7 @@
 #   FY_TARGET  the instance, e.g. https://code.tugraz.at/yard
 #   FY_RUNNER  runner directory with `token` (runner scope)
 #   FY_PROXY   proxy to the server, for fy and these requests (optional)
+#   FY_BACKEND runs `fy backend $FY_BACKEND` instead of the runner (optional)
 set -eu
 : "${FY_TARGET:?}" "${FY_RUNNER:?}"
 home=$FY_RUNNER
@@ -48,7 +49,12 @@ while :; do
                 rm -rf "$dir" "$dir.tar"
             fi
         fi
-        if [ -x "$dir/fy" ]; then
+        if [ -x "$dir/fy" ] && [ -n "${FY_BACKEND:-}" ]; then
+            # A backend process (FY_BACKEND: "github ..." or "gitlab ..."):
+            # its words are the arguments after fy backend.
+            # shellcheck disable=SC2086
+            "$dir/fy" backend $FY_BACKEND --server "$FY_TARGET" --token-file "$home/token" || true
+        elif [ -x "$dir/fy" ]; then
             "$dir/fy" runner --server "$FY_TARGET" --token-file "$home/token" \
                 --data "$home/data" ${FY_EXECUTOR:+--executor "$FY_EXECUTOR"} || true
         fi

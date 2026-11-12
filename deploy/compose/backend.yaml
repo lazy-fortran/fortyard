@@ -1,0 +1,71 @@
+# A backend process on a build host (scripts/install-backend.sh fills in the
+# @...@ values): `fy backend @BACKEND@` of the release the server runs,
+# through scripts/remote-runner.sh, with the runner token in @HOME@/token and
+# its external credential in @HOME@. It runs no checked code. It is on an
+# internal network without DNS and reaches the server and its external
+# service only through its proxy, whose list is the role's
+# (deploy/egress/@ROLE@.txt); the proxy's log lies in @EGRESS@.
+services:
+  fortyard-backend:
+    image: "@IMAGE@"
+    container_name: "@NAME@"
+    restart: unless-stopped
+    init: true
+    user: "@UID@:@GID@"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    dns: [127.0.0.1]
+    tmpfs: ["/tmp:size=256m"]
+    environment:
+      FY_TARGET: "@TARGET@"
+      FY_RUNNER: "@HOME@"
+      FY_BACKEND: "@BACKEND@"
+      HOME: /tmp
+      TMPDIR: "@HOME@/tmp"
+      FY_PROXY: http://@NAME@-proxy:3128
+      http_proxy: http://@NAME@-proxy:3128
+      https_proxy: http://@NAME@-proxy:3128
+      HTTP_PROXY: http://@NAME@-proxy:3128
+      HTTPS_PROXY: http://@NAME@-proxy:3128
+      no_proxy: 127.0.0.1,localhost
+      NO_PROXY: 127.0.0.1,localhost
+    volumes:
+      - "@HOME@:@HOME@"
+    entrypoint: ["@HOME@/bin/remote-runner.sh"]
+    mem_limit: 1g
+    cpus: 1
+    pids_limit: 256
+    networks: [backend]
+    depends_on: [fortyard-proxy]
+  fortyard-proxy:
+    image: "@EGRESS_IMAGE@"
+    container_name: "@NAME@-proxy"
+    restart: unless-stopped
+    init: true
+    user: "@UID@:@GID@"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:size=64m"]
+    mem_limit: 256m
+    cpus: 1
+    pids_limit: 128
+    environment:
+      FY_EGRESS_ROLE: "@ROLE@"
+      FY_EGRESS_LOG: /log
+    volumes:
+      - "@EGRESS@:/log"
+    networks: [backend, egress]
+    # Every request is logged on standard output; Docker keeps 30 MB of it.
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+# FY_SUBNET (install-backend.sh) names the networks' subnets where Docker's
+# own address pools are used up; without it the lines with @NET@ go.
+networks:
+  backend:
+    internal: true
+    ipam: {config: [{subnet: "@NET@.0/28"}]}
+  egress:
+    ipam: {config: [{subnet: "@NET@.16/28"}]}

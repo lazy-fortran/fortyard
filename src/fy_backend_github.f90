@@ -38,6 +38,7 @@ module fy_backend_github
         github_configure, &
         github_main, &
         github_setup, &
+        github_token_file, &
         github_workflow
 
     character(len=*), parameter :: WORKFLOW_PATH = '.github/workflows/fortyard.yml'
@@ -45,7 +46,7 @@ module fy_backend_github
     character(len=*), parameter :: CHECKOUT = 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
     character(len=*), parameter :: CACHE = 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9'
 
-    character(len=:), allocatable :: api, owner, app_id, key_file, fixed_token
+    character(len=:), allocatable :: api, owner, app_id, key_file, fixed_token, token_path
     character(len=:), allocatable :: installation, sweep_server, sweep_token
     integer :: poll_ms = 5000, start_seconds = 600
 
@@ -163,6 +164,22 @@ contains
         id = installation
     end function installation_id
 
+    subroutine github_token_file(path)
+        !! A file with a fine-grained token (Actions read and write), read again
+        !! for every request, so a renewed token needs no restart. Used instead
+        !! of the App's installation tokens.
+        character(len=*), intent(in) :: path
+
+        token_path = path
+    end subroutine github_token_file
+
+    logical function fixed()
+        !! A fixed token (file or setup's token) stands in for the App.
+        fixed = .false.
+        if (allocated(token_path)) fixed = len(token_path) > 0
+        if (allocated(fixed_token)) fixed = fixed .or. len(fixed_token) > 0
+    end function fixed
+
     function repo_token(repo) result(token)
         !! An installation token for the one repository `repo`, or with an
         !! empty `repo` one that only reads metadata (to list the installed
@@ -173,6 +190,12 @@ contains
         integer :: code
 
         token = ''
+        if (allocated(token_path)) then
+            if (len(token_path) > 0) then
+                token = first_line_of(token_path)
+                return
+            end if
+        end if
         if (allocated(fixed_token)) then
             if (len(fixed_token) > 0) then
                 token = fixed_token
@@ -485,14 +508,25 @@ contains
 
         token = repo_token('')
         if (len(token) == 0) return
-        call gh('GET', '/installation/repositories?per_page=100', token, '', code, listing)
-        if (code /= 200) return
         allocate (repos(0))
-        do k = 1, 100
-            if (len(json_raw(listing, 'repositories['//itoa(k)//'].name')) == 0) exit
-            repos = [repos, [character(len=128) :: json_raw(listing, 'repositories['// &
-                itoa(k)//'].name')]]
-        end do
+        if (fixed()) then
+            ! A fine-grained token lists the owner's public repositories.
+            call gh('GET', '/orgs/'//owner//'/repos?type=public&per_page=100', token, '', code, &
+                listing)
+            if (code /= 200) return
+            do k = 1, 100
+                if (len(json_raw(listing, '['//itoa(k)//'].name')) == 0) exit
+                repos = [repos, [character(len=128) :: json_raw(listing, '['//itoa(k)//'].name')]]
+            end do
+        else
+            call gh('GET', '/installation/repositories?per_page=100', token, '', code, listing)
+            if (code /= 200) return
+            do k = 1, 100
+                if (len(json_raw(listing, 'repositories['//itoa(k)//'].name')) == 0) exit
+                repos = [repos, [character(len=128) :: json_raw(listing, 'repositories['// &
+                    itoa(k)//'].name')]]
+            end do
+        end if
         cutoff = backend_time(-3600)
         if (len(cutoff) /= 20) return
         do k = 1, size(repos)
@@ -655,6 +689,21 @@ contains
         end subroutine say
 
     end subroutine github_setup
+
+    function first_line_of(path) result(line)
+        !! The first line of the file at `path` without blanks; '' when unreadable.
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: line
+        character(len=4096) :: buf
+        integer :: u, ios
+
+        line = ''
+        open (newunit=u, file=path, action='read', status='old', iostat=ios)
+        if (ios /= 0) return
+        read (u, '(a)', iostat=ios) buf
+        close (u)
+        if (ios == 0) line = trim(adjustl(buf))
+    end function first_line_of
 
     function encoded(text) result(s)
         !! `text` for a URL's path or query: only a-z, A-Z, 0-9 and -._~ as
