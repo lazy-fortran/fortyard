@@ -41,8 +41,10 @@ long a job may wait for the runner before it is cancelled, and `--backoff`
 runner. `--data` holds the mirrors of the repositories, the git credentials
 file and the record of fo's cache archives.
 
-Jobs run in `gcc:14` with fo built from its release tag (`FO_VERSION` in
-`fortyard.yml`). fo's cache is kept per repository in the project's generic
+Jobs run in `texlive/texlive:latest-minimal`, the only images the
+university's group runners allow, and install gfortran and the build tools
+with apt; fo is built from its main, which fortyard keeps building with its
+dependencies' mains. fo's cache is kept per repository in the project's generic
 package registry (package `fo-cache`, version REPO, one file per passing
 pipeline). Every job holds a token that can write that registry, so the
 backend uploads the archives itself from the passing job's artifact, records

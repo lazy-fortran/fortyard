@@ -23,12 +23,13 @@ workflow:
 variables:
   GIT_DEPTH: "1"
   GIT_STRATEGY: clone
-  FO_VERSION: v0.3.2
   FPM_VERSION: "0.13.0"
   FPM_SHA256: 2e50a8649ac4136b9cf6b63c5d1b01adf26c02eedc18f32e16261c0ce655d46d
 
 check:
-  image: gcc:14
+  # The group runners of the university's GitLab allow only these images; the
+  # job installs the compilers it needs (the image runs as root).
+  image: texlive/texlive:latest-minimal
   # The job ends itself at FY_TIMEOUT; this bounds a job that does not.
   timeout: 6h
   interruptible: true
@@ -49,7 +50,12 @@ check:
       mkdir -p "$w"
       # Trouble before the check runs is no verdict on it.
       infra() { echo "fortyard: $1"; echo runner > "$out/outcome"; exit 1; }
-      toolchain=$({ echo "$CI_JOB_IMAGE fo $FO_VERSION fpm $FPM_VERSION"; gfortran --version 2>&1 | head -n 1; } | sha256sum | cut -c1-16)
+      if ! command -v gfortran >/dev/null 2>&1; then
+        { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            --no-install-recommends gfortran g++ make cmake ninja-build git curl ca-certificates \
+            liblapack-dev libblas-dev >/dev/null; } || infra "the compilers could not be installed"
+      fi
+      toolchain=$({ echo "$CI_JOB_IMAGE fo main fpm $FPM_VERSION"; gfortran --version 2>&1 | head -n 1; } | sha256sum | cut -c1-16)
       restored=0
       if [ -n "$FY_CACHE_FILE" ]; then
         if curl -fsS -H "JOB-TOKEN: $CI_JOB_TOKEN" -o "$w/cache.tar.gz" \
@@ -73,14 +79,15 @@ check:
       fi
       mkdir -p "$FO_CACHE_DIR" "$CCACHE_DIR" || infra "no room for fo's cache"
       if [ ! -x "$tools/bin/fo" ] && ! command -v fo >/dev/null 2>&1; then
-        # fo from its release tag, built with fpm's release binary of the pinned checksum.
+        # fo from its main, which fortyard keeps building with its dependencies'
+        # mains, built with fpm's release binary of the pinned checksum.
         mkdir -p "$tools/bin"
         { curl -fsSL -o "$tools/bin/fpm" \
             "https://github.com/fortran-lang/fpm/releases/download/v$FPM_VERSION/fpm-$FPM_VERSION-linux-x86_64-gcc-12" &&
           echo "$FPM_SHA256  $tools/bin/fpm" | sha256sum -c --status && chmod 755 "$tools/bin/fpm" &&
-          git clone --quiet --depth 1 --branch "$FO_VERSION" https://github.com/lazy-fortran/fo.git "$w/fo-src" &&
+          git clone --quiet --depth 1 https://github.com/lazy-fortran/fo.git "$w/fo-src" &&
           (cd "$w/fo-src" && "$tools/bin/fpm" install --profile release --prefix "$tools"); } ||
-          { rm -rf "$tools" "$w/fo-src"; infra "fo $FO_VERSION could not be installed"; }
+          { rm -rf "$tools" "$w/fo-src"; infra "fo could not be installed"; }
         rm -rf "$w/fo-src"
       fi
       export PATH="$tools/bin:$PATH"
