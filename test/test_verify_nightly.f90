@@ -60,7 +60,12 @@ program test_verify_nightly
     mac = 0
     call proc_setenv('GIT_CONFIG_GLOBAL', '/dev/null')
     call proc_setenv('GIT_CONFIG_NOSYSTEM', '1')
-    call execute_command_line('rm -rf '//data//' '//work//' && mkdir -p '//data, exitstat=stat)
+    call execute_command_line('rm -rf '//data//' '//work//' && mkdir -p '//data//'/tmp', &
+        exitstat=stat)
+    ! The server's landing work trees are named by landing number, which other
+    ! tests' servers share.
+    call getcwd(cwd)
+    call proc_setenv('TMPDIR', trim(cwd)//'/'//data//'/tmp')
     call store_open(data//'/fortyard.db', db, stat)
     call store_bootstrap(db, admin, stat)
     call store_token_create(db, 1_int64, 'runner-1', 'runner', runner, stat)
@@ -77,11 +82,6 @@ program test_verify_nightly
 
     ! Noon: outside the window.
     call serve('2026-11-12T12:00')
-    do i = 1, 3000
-        reply = get('/api/v1/repos/demo/policy')
-        if (index(reply, '"verify_on"') > 0) exit
-        call proc_sleep_ms(100)
-    end do
     reply = put('/api/v1/repos/demo/policy', '{"verify_on":"linux,macos-arm64@nightly"}')
     call check(index(reply, '"verify_on":"linux,macos-arm64@nightly"') > 0, &
         'the policy accepts and shows a nightly class: '//reply)
@@ -211,7 +211,14 @@ program test_verify_nightly
         'the issue is closed when the class passes again: '//reply)
 
     ! An open report of a class that verify_on no longer names at night is
-    ! closed, as nothing would verify that class again.
+    ! closed, as nothing would verify that class again. The report is recorded
+    ! only once a verification settled under the new policy: before, the
+    ! verifier still sees main passing on macos-arm64 and closes the report as
+    ! passing again.
+    reply = put('/api/v1/repos/demo/policy', '{"verify_on":"linux"}')
+    i = count(REGULAR)
+    reply = post('/api/v1/repos/demo/verify', '{}')
+    call wait_count(REGULAR, i + 1)
     reply = post('/api/v1/repos/demo/issues', '{"title":"Reported at night","body":""}')
     k = index(reply, '"issue":') + 8
     issue = ''
@@ -222,7 +229,6 @@ program test_verify_nightly
     call check(len(issue) > 0, 'an issue is opened: '//reply)
     call store_sql("INSERT INTO verify_reports (repo, culprit, issue, created_at) VALUES"// &
         " ('demo', 'unknown@macos-arm64', "//issue//", 'x')")
-    reply = put('/api/v1/repos/demo/policy', '{"verify_on":"linux"}')
     reply = post('/api/v1/repos/demo/verify', '{}')
     do i = 1, 3000
         reply = get('/api/v1/repos/demo/issues/'//issue)
@@ -251,6 +257,7 @@ contains
         !! left with the old clock could still start a job.
         character(len=*), intent(in) :: now
         character(len=16) :: pid
+        integer :: j
         if (sup > 0) then
             write (pid, '(i0)') sup
             call execute_command_line('pgrep -P '//trim(pid)//' > '//data//'/children.txt', &
@@ -269,6 +276,13 @@ contains
             call server_supervise(lfd, data//'/fortyard.db', 1, 2)
             call proc_exit(0)
         end if
+        ! A request sent before the new server answers can be lost to the
+        ! client's timeout, so the test goes on only once it answers.
+        do j = 1, 3000
+            if (index(get('/api/v1/repos/demo/policy'), '"verify_on"') > 0) return
+            call proc_sleep_ms(100)
+        end do
+        call check(.false., 'the server at '//now//' answers')
     end subroutine serve
 
     subroutine land(branch, edit, subject)

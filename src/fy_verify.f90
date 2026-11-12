@@ -151,6 +151,9 @@ contains
             if (checks(k) == 0) call exec(db, "UPDATE landings SET state = 'cancelled',"// &
                 ' finished_at = '//NOW//' WHERE id = ?1 AND ?2 = ?2;', jobs(k), '')
         end do
+        ! A verifier stopped after queuing a check but before telling the
+        ! runners would leave it waiting until they look again on their own.
+        if (any(checks > 0)) call events_notify('checks')
     end subroutine resume
 
     integer(int64) function verify_request(db, repo, git_dir) result(id)

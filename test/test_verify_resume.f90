@@ -2,7 +2,9 @@ program test_verify_resume
     !! A server that restarts (a new release) while main is being verified
     !! follows the verification's runner check to its end instead of dropping
     !! it: a running verification whose check passed is recorded as passed, one
-    !! without a check is cancelled.
+    !! without a check is cancelled. The runners are told of the checks of
+    !! the verifications it follows, as the stopped verifier may have queued
+    !! one without telling them.
     use, intrinsic :: iso_fortran_env, only: int64
     use fy_posix, only: &
         sock_bound_port, &
@@ -12,6 +14,7 @@ program test_verify_resume
         sock_set_timeouts, &
         tcp_connect, &
         tcp_listen
+    use fy_events, only: events_wait, events_watch_close, events_watch_open
     use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, SIGTERM
     use fy_server, only: server_supervise, server_set_data_dir, server_set_checks
     use fy_sqlite, only: db_t, db_close, db_exec
@@ -22,7 +25,7 @@ program test_verify_resume
     character(len=2), parameter :: CRLF = achar(13)//achar(10)
     type(db_t) :: db
     character(len=:), allocatable :: admin, reply
-    integer :: lfd, port, stat, sup, i
+    integer :: lfd, port, stat, sup, i, watch
 
     sup = 0
     call execute_command_line('rm -rf '//data//' && mkdir -p '//data, exitstat=stat)
@@ -34,14 +37,20 @@ program test_verify_resume
     call db_exec(db, "INSERT INTO landings (id, repo, branch, account, created_at, kind,"// &
         " commit_id, state, started_at) VALUES (1, 'demo', 'main', 'fortyard', '2026-01-01T00:00:00Z',"// &
         " 'verify', 'abc', 'running', '2026-01-01T00:00:00Z'), (2, 'demo', 'main', 'fortyard',"// &
-        " '2026-01-01T00:00:00Z', 'verify', 'def', 'running', '2026-01-01T00:00:00Z');"// &
+        " '2026-01-01T00:00:00Z', 'verify', 'def', 'running', '2026-01-01T00:00:00Z'),"// &
+        " (3, 'demo', 'main', 'fortyard', '2026-01-01T00:00:00Z', 'verify', 'ghi',"// &
+        " 'running', '2026-01-01T00:00:00Z');"// &
         "INSERT INTO checks (repo, ref, state, log, created_at, kind) VALUES ('demo',"// &
         " 'refs/fortyard/verify/1', 'passed', 'full suite passed', '2026-01-01T00:00:00Z',"// &
-        " 'verify');", stat)
+        " 'verify'), ('demo', 'refs/fortyard/verify/3', 'queued', NULL,"// &
+        " '2026-01-01T00:00:00Z', 'verify');", stat)
     call check(stat == 0, 'the state of a restart is prepared')
     call db_close(db)
     call server_set_data_dir(data)
     call server_set_checks('runner')
+    call execute_command_line('mkdir -p '//data//'/events', exitstat=stat)
+    watch = events_watch_open()
+    call check(watch >= 0, 'the events are watched')
     call tcp_listen('127.0.0.1', 0, lfd, stat)
     port = sock_bound_port(lfd)
     sup = proc_fork()
@@ -60,6 +69,9 @@ program test_verify_resume
     reply = get('/api/v1/jobs/1')
     call check(index(reply, '"state":"passed"') > 0 .and. index(reply, 'full suite passed') > 0, &
         'a verification whose check passed is recorded as passed: '//reply)
+    call check(events_wait(watch, 'checks', 60000), 'the runners are told of the queued check'// &
+        ' of a verification that goes on')
+    call events_watch_close(watch)
     call proc_kill(sup, SIGTERM)
     call proc_wait(sup, stat)
     print '(a)', 'verify resume: all checks passed'

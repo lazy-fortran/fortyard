@@ -74,7 +74,7 @@ contains
         character(len=*), intent(in), optional :: class, executor
         character(len=:), allocatable :: body, release, cls
         integer :: code, stat, fd, n
-        logical :: changed, remote
+        logical :: changed, remote, unsure
 
         cls = 'linux'
         if (present(class)) cls = class
@@ -106,12 +106,12 @@ contains
             write (error_unit, '(a)') 'fy runner: cannot watch '//data_dir//'/events'
             return
         end if
+        unsure = .false.
         do
             if (len(follow) > 0) then
                 if (proc_readlink(follow) /= release) return
             end if
-            call client_request(server, 'POST', '/api/v1/checks/claim', token, &
-                '{"class":"'//cls//'"}', code, body, stat)
+            call take_check(server, token, cls, code, body, stat, unsure)
             if (stat == 0 .and. code == 200) then
                 call run_one(server, token, data_dir, body)
                 call egress_put('')
@@ -135,6 +135,7 @@ contains
         character(len=:), allocatable :: body, out, commit, host
         integer :: code, stat, u, ios, s, e
         integer(int64) :: now, rate, last_cleanup
+        logical :: unsure
 
         call proc_run([character(len=1024) :: 'mkdir', '-p', data_dir//'/mirrors'], out, &
             stat, 4096)
@@ -154,6 +155,7 @@ contains
             out, stat, 4096)
         call release_checks(server, token)
         last_cleanup = -1
+        unsure = .false.
         do
             call system_clock(now, rate)
             if (last_cleanup < 0 .or. now - last_cleanup > 3600*rate) then
@@ -174,8 +176,7 @@ contains
                     return
                 end if
             end if
-            call client_request(server, 'POST', '/api/v1/checks/claim', token, &
-                '{"class":"'//class//'"}', code, body, stat)
+            call take_check(server, token, class, code, body, stat, unsure)
             if (stat == 0 .and. code == 200) then
                 call run_one(server, token, data_dir, body, remote=.true.)
                 call egress_put('')
@@ -185,16 +186,44 @@ contains
         end do
     end subroutine remote_main
 
-    subroutine release_checks(server, token)
+    subroutine release_checks(server, token, ok)
         !! A starting runner hands back the checks it held when it stopped
         !! (killed or updated), so they run again instead of waiting for a
-        !! result that never comes. Each runner has a token of its own.
+        !! result that never comes. Each runner has a token of its own. `ok`
+        !! when the server answered.
         character(len=*), intent(in) :: server, token
+        logical, intent(out), optional :: ok
         character(len=:), allocatable :: body
         integer :: code, stat
         call client_request(server, 'POST', '/api/v1/checks/release', token, '{}', code, body, &
             stat)
+        if (present(ok)) ok = stat == 0 .and. code == 200
     end subroutine release_checks
+
+    subroutine take_check(server, token, class, code, body, stat, unsure)
+        !! Asks for a check of `class`. A claim left without an answer
+        !! (`unsure`) may have been given all the same, by a server stopped
+        !! before it answered; it is handed back before the next claim, or it
+        !! would wait as running until taken as lost. While the server does
+        !! not take it back, `stat` is that failure and nothing is claimed.
+        character(len=*), intent(in) :: server, token, class
+        integer, intent(out) :: code, stat
+        character(len=:), allocatable, intent(out) :: body
+        logical, intent(inout) :: unsure
+        logical :: ok
+
+        code = 0
+        body = ''
+        stat = 1
+        if (unsure) then
+            call release_checks(server, token, ok)
+            if (.not. ok) return
+            unsure = .false.
+        end if
+        call client_request(server, 'POST', '/api/v1/checks/claim', token, &
+            '{"class":"'//class//'"}', code, body, stat)
+        unsure = stat /= 0
+    end subroutine take_check
 
     subroutine run_one(server, token, data_dir, claim, remote)
         character(len=*), intent(in) :: server, token, data_dir, claim
