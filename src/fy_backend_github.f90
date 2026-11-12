@@ -757,8 +757,8 @@ contains
         character(len=1), parameter :: NL = achar(10)
 
         text = ""
-        text = text//'# fortyard checks on GitHub''s hosted runners. fortyard pushe'// &
-            's a check''s commit'//NL
+        text = text//'# fortyard checks on GitHub''s hosted runners. fortyard push'// &
+            'es a check''s commit'//NL
         text = text//'# as branch fortyard/check/<id>, with -macos or -windows for'// &
             ' those machines and'//NL
         text = text//'# -verify for a verification of main, reads the result back '// &
@@ -773,13 +773,11 @@ contains
         text = text//'permissions: {}'//NL
         text = text//'jobs:'//NL
         text = text//'  check:'//NL
-        text = text//'    runs-on: ${{ contains(github.ref_name, ''-macos'') && ''mac'// &
-            'os-latest'' || (contains(github.ref_name, ''-windows'') && ''win'// &
-            'dows-latest'' || ''ubuntu-latest'') }}'//NL
+        text = text//'    runs-on: ${{ contains(github.ref_name, ''-macos'') && '''// &
+            'macos-latest'' || (contains(github.ref_name, ''-windows'') &'// &
+            '& ''windows-latest'' || ''ubuntu-latest'') }}'//NL
         text = text//'    timeout-minutes: 360'//NL
         text = text//'    env:'//NL
-        text = text//'      FO_VERSION: v0.3.2'//NL
-        text = text//'      FO_COMMIT: 6277003c2b63dfd18fbce4bdb4cc952272c212e6'//NL
         text = text//'      FPM_VERSION: 0.13.0'//NL
         text = text//'      GIT_TERMINAL_PROMPT: 0'//NL
         text = text//'    defaults:'//NL
@@ -793,8 +791,15 @@ contains
         text = text//'          persist-credentials: false'//NL
         text = text//'      - name: Places'//NL
         text = text//'        run: |'//NL
-        text = text//'          echo "FY_TOOLS=$RUNNER_TOOL_CACHE/fortyard-fo-$FO_'// &
-            'VERSION" >> "$GITHUB_ENV"'//NL
+        text = text//'          # fo''s main, which fortyard keeps building with i'// &
+            'ts dependencies'''//NL
+        text = text//'          # mains; a release falls behind them.'//NL
+        text = text//'          fo=$(git ls-remote https://github.com/lazy-fortran'// &
+            '/fo.git refs/heads/main | cut -f1)'//NL
+        text = text//'          test -n "$fo"'//NL
+        text = text//'          echo "FO_COMMIT=$fo" >> "$GITHUB_ENV"'//NL
+        text = text//'          echo "FY_TOOLS=$RUNNER_TOOL_CACHE/fortyard-fo-$fo"'// &
+            ' >> "$GITHUB_ENV"'//NL
         text = text//'          echo "FO_CACHE_DIR=$RUNNER_TEMP/fo-cache" >> "$GIT'// &
             'HUB_ENV"'//NL
         text = text//'          echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_'// &
@@ -822,20 +827,19 @@ contains
         text = text//'            ${{ env.CCACHE_DIR }}'//NL
         text = text//'            build/dependencies'//NL
         text = text//'          key: fortyard-build-${{ github.repository }}-${{ e'// &
-            'nv.FORTYARD_RUNNER_CLASS }}-fo-${{ env.FO_VERSION }}-${{ has'// &
-            'hFiles(''fpm.toml'') }}-${{ github.sha }}'//NL
+            'nv.FORTYARD_RUNNER_CLASS }}-fo-${{ env.FO_COMMIT }}-${{ hash'// &
+            'Files(''fpm.toml'') }}-${{ github.sha }}'//NL
         text = text//'          restore-keys: |'//NL
         text = text//'            fortyard-build-${{ github.repository }}-${{ env.'// &
-            'FORTYARD_RUNNER_CLASS }}-fo-${{ env.FO_VERSION }}-${{ hashFi'// &
-            'les(''fpm.toml'') }}-'//NL
+            'FORTYARD_RUNNER_CLASS }}-fo-${{ env.FO_COMMIT }}-${{ hashFil'// &
+            'es(''fpm.toml'') }}-'//NL
         text = text//'            fortyard-build-${{ github.repository }}-${{ env.'// &
-            'FORTYARD_RUNNER_CLASS }}-fo-${{ env.FO_VERSION }}-'//NL
+            'FORTYARD_RUNNER_CLASS }}-fo-${{ env.FO_COMMIT }}-'//NL
         text = text//'      - name: fo'//NL
         text = text//'        run: |'//NL
-        text = text//'          # fo from its release tag, built once per machine '// &
-            'kind and version'//NL
-        text = text//'          # with fpm''s release binary of the pinned checksum'// &
-            '.'//NL
+        text = text//'          # fo at FO_COMMIT, built once per machine kind and'// &
+            ' commit with fpm''s'//NL
+        text = text//'          # release binary of the pinned checksum.'//NL
         text = text//'          if [ ! -x "$FY_TOOLS/bin/fo" ] && [ ! -x "$FY_TOOL'// &
             'S/bin/fo.exe" ]; then'//NL
         text = text//'            case "$RUNNER_OS-$RUNNER_ARCH" in'//NL
@@ -864,13 +868,13 @@ contains
             'n export FPM_FC="gfortran-$v"; break; fi'//NL
         text = text//'              done'//NL
         text = text//'            fi'//NL
-        text = text//'            git clone --quiet --depth 1 --branch "$FO_VERSIO'// &
-            'N" \'//NL
-        text = text//'              https://github.com/lazy-fortran/fo.git "$RUNNE'// &
-            'R_TEMP/fo-src"'//NL
-        text = text//'            # A tag can move; the commit cannot.'//NL
-        text = text//'            test "$(git -C "$RUNNER_TEMP/fo-src" rev-parse H'// &
-            'EAD)" = "$FO_COMMIT"'//NL
+        text = text//'            git init --quiet "$RUNNER_TEMP/fo-src"'//NL
+        text = text//'            git -C "$RUNNER_TEMP/fo-src" fetch --quiet --dep'// &
+            'th 1 \'//NL
+        text = text//'              https://github.com/lazy-fortran/fo.git "$FO_CO'// &
+            'MMIT"'//NL
+        text = text//'            git -C "$RUNNER_TEMP/fo-src" checkout --quiet FE'// &
+            'TCH_HEAD'//NL
         text = text//'            (cd "$RUNNER_TEMP/fo-src" && "$FY_TOOLS/bin/fpm"'// &
             ' install --profile release --prefix "$FY_TOOLS")'//NL
         text = text//'          fi'//NL
