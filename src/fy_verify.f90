@@ -10,6 +10,16 @@ module fy_verify
     !! comment on the change that landed it. The issue is closed when main
     !! passes again. Verifications are jobs of kind "verify"; runners take them
     !! after landing checks.
+    !!
+    !! A class of verify_on that ends in @nightly (doc/backends.md "Nightly
+    !! classes") has jobs of its own, which record the class: the first pass of
+    !! a night's window (01:00 to 06:00 server time) records main, which is
+    !! verified on that class alone when it has no result there yet, and a main
+    !! that moves later that night waits for the next night; a failure is
+    !! bisected within that window or the next ones, and reported and closed by
+    !! issues of that class. Its open issues are closed once verify_on no
+    !! longer names it @nightly. The other classes are verified together after
+    !! every move of main, as before.
     use, intrinsic :: iso_fortran_env, only: &
         error_unit, &
         int64
@@ -66,13 +76,17 @@ module fy_verify
     integer, parameter :: DEPTH = 200
     integer, parameter :: LOG_TAIL = 6000
     character(len=*), parameter :: ACCOUNT = 'fortyard'
+    !! The reports of track ?3: CULPRIT@CLASS for a nightly class, else CULPRIT.
+    character(len=*), parameter :: OF_TRACK = "(CASE WHEN ?3 = '' THEN instr(culprit, '@') = 0"// &
+        " ELSE substr(culprit, -1 - length(?3)) = '@' || ?3 END)"
 
 contains
 
     subroutine verifier_main(db_path, repos_dir)
-        !! The verifier process: one verification at a time in each repository,
-        !! the repositories side by side; it sleeps until a job changes, and
-        !! looks again each minute while checks run.
+        !! The verifier process: one verification at a time in each repository
+        !! and nightly class, the repositories side by side; it sleeps until a
+        !! job changes, and looks again each minute while checks run, else
+        !! after ten minutes, which bounds how late a night window is seen.
         character(len=*), intent(in) :: db_path, repos_dir
         type(db_t) :: db
         type(repo_info_t), allocatable :: repos(:)
@@ -166,68 +180,235 @@ contains
     end function verify_request
 
     logical function step(db, repo, git_dir, base, waits) result(ran)
-        !! Settles the running verification of `repo` once its checks ended,
-        !! else starts the one it needs next, if any; `waits` while one runs.
+        !! For each track of `repo` (each nightly class, then the classes
+        !! without schedule): settles its running verification once its checks
+        !! ended, else starts the one it needs next, if any; `waits` while one
+        !! runs. Nightly tracks come first, so a pass that settles the other
+        !! track has looked at them with the same main.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: repo, git_dir, base
         logical, intent(out) :: waits
-        character(len=:), allocatable :: head, target, out, commit
+        character(len=:), allocatable :: head, target, out, commit, regular, night, from
+        character(len=32), allocatable :: tracks(:)
         integer(int64) :: request, running
-        integer :: status
+        integer :: status, t
+        type(policy_t) :: p
+        logical :: checked, able
 
         ran = .false.
         waits = .false.
-        call running_job(db, repo, running, commit)
-        if (running > 0) then
-            ran = settle(db, repo, git_dir, commit, running)
-            waits = .not. ran
-            return
-        end if
-        head = rev(git_dir, 'refs/heads/main')
-        if (len(head) == 0) return
-        call git(git_dir, [character(len=256) :: 'cat-file', '-e', 'refs/heads/main:.fortyard/verify'], &
-            out, status)
-        if (status /= 0) call git(git_dir, [character(len=256) :: 'cat-file', '-e', &
-            'refs/heads/main:fpm.toml'], out, status)
-        if (status /= 0) return
-        request = queued_request(db, repo)
-        if (request > 0) then
-            target = head
-        else
-            target = next_target(db, repo, git_dir, head, base)
-        end if
-        if (len(target) == 0) return
-        call run(db, repo, git_dir, target, request)
-        ran = .true.
-        waits = .true.
+        checked = .false.
+        able = .false.
+        call policy_get(db, repo, p)
+        call tracks_of(db, repo, p%verify_on, tracks, regular)
+        call close_dropped(db, repo, tracks)
+        do t = 1, size(tracks)
+            call running_job(db, repo, trim(tracks(t)), running, commit)
+            if (running > 0) then
+                if (settle(db, repo, git_dir, commit, running)) then
+                    ran = .true.
+                else
+                    waits = .true.
+                end if
+                cycle
+            end if
+            night = ''
+            request = 0
+            if (len_trim(tracks(t)) > 0) then
+                night = night_of(clock())
+                if (len(night) == 0) cycle
+            else
+                request = queued_request(db, repo)
+                if (len(regular) == 0) then
+                    ! Every class has a schedule: a request has nothing to run on.
+                    if (request > 0) call exec(db, "UPDATE landings SET state = 'cancelled',"// &
+                        ' finished_at = '//NOW//", log = ?2 WHERE id = ?1;", request, &
+                        'Every runner class of verify_on is verified at night only.')
+                    cycle
+                end if
+            end if
+            if (.not. checked) then
+                checked = .true.
+                head = rev(git_dir, 'refs/heads/main')
+                if (len(head) > 0) then
+                    call git(git_dir, [character(len=256) :: 'cat-file', '-e', &
+                        'refs/heads/main:.fortyard/verify'], out, status)
+                    if (status /= 0) call git(git_dir, [character(len=256) :: 'cat-file', &
+                        '-e', 'refs/heads/main:fpm.toml'], out, status)
+                    able = status == 0
+                end if
+            end if
+            if (.not. able) cycle
+            if (request > 0) then
+                target = head
+            else if (len(night) > 0) then
+                ! Main is looked at once a night: the track goes on from the main
+                ! of the night's first pass even when main moved since.
+                from = night_head(db, repo, trim(tracks(t)), night, head)
+                target = next_target(db, repo, git_dir, from, base, trim(tracks(t)))
+            else
+                target = next_target(db, repo, git_dir, head, base, '')
+            end if
+            if (len(target) == 0) cycle
+            if (len_trim(tracks(t)) > 0) then
+                call run(db, repo, git_dir, target, request, trim(tracks(t)), trim(tracks(t)))
+            else
+                call run(db, repo, git_dir, target, request, '', regular)
+            end if
+            ran = .true.
+            waits = .true.
+        end do
     end function step
 
-    function next_target(db, repo, git_dir, head, base) result(target)
-        !! The commit to verify next: main's head when it has no result; a
-        !! commit between the last pass and the first failure while that range
-        !! holds more than one commit; else nothing, after reporting the
+    subroutine tracks_of(db, repo, verify_on, tracks, regular)
+        !! The nightly classes of `verify_on`, and those of a running job that
+        !! the policy no longer names, then '' for the classes without schedule,
+        !! which `regular` lists with commas ('' when there are none).
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: repo, verify_on
+        character(len=32), allocatable, intent(out) :: tracks(:)
+        character(len=:), allocatable, intent(out) :: regular
+        character(len=:), allocatable :: on, one
+        type(stmt_t) :: st
+        integer :: k, stat
+
+        allocate (tracks(0))
+        regular = ''
+        on = verify_on//','
+        do while (len(on) > 1)
+            k = index(on, ',')
+            one = on(1:k - 1)
+            on = on(k + 1:)
+            if (len(one) == 0) cycle
+            if (len(one) > 8) then
+                if (one(len(one) - 7:) == '@nightly') then
+                    tracks = [tracks, [character(len=32) :: one(1:len(one) - 8)]]
+                    cycle
+                end if
+            end if
+            if (len(regular) > 0) regular = regular//','
+            regular = regular//one
+        end do
+        call db_prepare(db, "SELECT DISTINCT verify_class FROM landings WHERE kind = 'verify'"// &
+            " AND repo = ?1 AND state = 'running' AND verify_class <> '';", st, stat)
+        if (stat == SQLITE_OK) then
+            call stmt_bind_text(st, 1, repo, stat)
+            do while (stmt_step(st) == SQLITE_ROW)
+                one = stmt_text(st, 0)
+                if (.not. any(tracks == one)) tracks = [tracks, [character(len=32) :: one]]
+            end do
+            call stmt_finalize(st)
+        end if
+        tracks = [tracks, [character(len=32) :: '']]
+    end subroutine tracks_of
+
+    function night_head(db, repo, track, night, head) result(commit)
+        !! The main `track` saw in the first pass of `night`, recorded as
+        !! main's `head` by that pass.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: repo, track, night, head
+        character(len=:), allocatable :: commit
+        type(stmt_t) :: st
+        integer :: stat
+
+        commit = head
+        call db_prepare(db, 'INSERT INTO verify_nights (repo, class, night, main)'// &
+            ' VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO UPDATE SET main = main RETURNING main;', &
+            st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, repo, stat)
+        call stmt_bind_text(st, 2, track, stat)
+        call stmt_bind_text(st, 3, night, stat)
+        call stmt_bind_text(st, 4, head, stat)
+        if (stmt_step(st) == SQLITE_ROW) commit = stmt_text(st, 0)
+        call stmt_finalize(st)
+    end function night_head
+
+    subroutine close_dropped(db, repo, tracks)
+        !! Closes the open reports of a nightly class that is no longer one of
+        !! `tracks`, as nothing would verify it again.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: repo
+        character(len=32), intent(in) :: tracks(:)
+        character(len=32), allocatable :: gone(:)
+        character(len=:), allocatable :: one
+        type(stmt_t) :: st
+        integer :: stat, k
+
+        allocate (gone(0))
+        call db_prepare(db, "SELECT DISTINCT substr(culprit, instr(culprit, '@') + 1)"// &
+            " FROM verify_reports WHERE repo = ?1 AND state = 'open'"// &
+            " AND instr(culprit, '@') > 0;", st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, repo, stat)
+        do while (stmt_step(st) == SQLITE_ROW)
+            one = stmt_text(st, 0)
+            if (.not. any(tracks == one)) gone = [gone, [character(len=32) :: one]]
+        end do
+        call stmt_finalize(st)
+        do k = 1, size(gone)
+            call close_reports(db, repo, '', trim(gone(k)), 'The runner class '//trim(gone(k))// &
+                ' is no longer verified at night (verify_on), so this report is closed'// &
+                ' without a verdict.')
+        end do
+    end subroutine close_dropped
+
+    function clock() result(t)
+        !! The server time as YYYY-MM-DDTHH:MM. FY_VERIFY_NOW, in that form,
+        !! sets it for tests.
+        character(len=:), allocatable :: t
+        character(len=64) :: v
+        character(len=8) :: d
+        character(len=10) :: tm
+        integer :: n, stat
+
+        call get_environment_variable('FY_VERIFY_NOW', v, n, stat)
+        if (stat == 0 .and. n >= 16) then
+            t = v(1:16)
+            return
+        end if
+        call date_and_time(date=d, time=tm)
+        t = d(1:4)//'-'//d(5:6)//'-'//d(7:8)//'T'//tm(1:2)//':'//tm(3:4)
+    end function clock
+
+    pure function night_of(t) result(night)
+        !! The date of `t` (YYYY-MM-DDTHH:MM) when it lies in that night's
+        !! window, 01:00 to 06:00, else ''.
+        character(len=*), intent(in) :: t
+        character(len=:), allocatable :: night
+
+        night = ''
+        if (len(t) < 13) return
+        if (t(12:13) >= '01' .and. t(12:13) < '06' .and. verify(t(12:13), '0123456789') == 0) &
+            night = t(1:10)
+    end function night_of
+
+    function next_target(db, repo, git_dir, head, base, track) result(target)
+        !! The commit to verify next in `track`: `head` when it has no result;
+        !! a commit between the last pass and the first failure while that
+        !! range holds more than one commit; else nothing, after reporting the
         !! culprit or closing the reports when main passes.
         type(db_t), intent(in) :: db
-        character(len=*), intent(in) :: repo, git_dir, head, base
+        character(len=*), intent(in) :: repo, git_dir, head, base, track
         character(len=:), allocatable :: target, chain, state
         character(len=40), allocatable :: commits(:)
         integer :: status, n, a, lo, hi, i
         type(policy_t) :: policy
 
         target = ''
-        state = result_of(db, repo, head)
+        state = result_of(db, repo, head, track)
         if (len(state) == 0) then
             target = head
             return
         end if
         if (state == 'passed') then
-            call close_reports(db, repo, head)
+            call close_reports(db, repo, head, track)
             return
         end if
         call policy_get(db, repo, policy)
         if (.not. policy%bisect) then
             ! Reported once, without further runs and without a culprit.
-            call report(db, repo, git_dir, 'unknown', '', base, bisect=.false.)
+            call report(db, repo, git_dir, 'unknown', '', base, track, bisect=.false.)
             return
         end if
         call git(git_dir, [character(len=256) :: 'rev-list', '--first-parent', '--max-count=200', &
@@ -237,44 +418,44 @@ contains
         ! commits(1) is head; the newest one that passed is the known good end.
         a = 0
         do i = 2, n
-            if (result_of(db, repo, commits(i)) == 'passed') then
+            if (result_of(db, repo, commits(i), track) == 'passed') then
                 a = i
                 exit
             end if
         end do
         if (a == 0) then
-            call report(db, repo, git_dir, 'unknown', '', base)
+            call report(db, repo, git_dir, 'unknown', '', base, track)
             return
         end if
         ! From oldest to newest between them: commits(a - 1) ... commits(1).
         hi = 0
         do i = a - 1, 1, -1
-            if (result_of(db, repo, commits(i)) == 'failed') then
+            if (result_of(db, repo, commits(i), track) == 'failed') then
                 hi = i
                 exit
             end if
         end do
         lo = a
         do i = a - 1, hi + 1, -1
-            if (result_of(db, repo, commits(i)) == 'passed') lo = i
+            if (result_of(db, repo, commits(i), track) == 'passed') lo = i
         end do
         if (lo == hi + 1) then
-            call report(db, repo, git_dir, trim(commits(hi)), trim(commits(lo)), base)
+            call report(db, repo, git_dir, trim(commits(hi)), trim(commits(lo)), base, track)
             return
         end if
         target = trim(commits((lo + hi + 1) / 2))
     end function next_target
 
-    subroutine run(db, repo, git_dir, commit, request)
-        !! Verifies `commit` on a runner, as job `request` or a new one.
+    subroutine run(db, repo, git_dir, commit, request, track, classes)
+        !! Verifies `commit` on a runner of each of `classes`, as job `request`
+        !! or a new one of `track` (a nightly class, or '').
         type(db_t), intent(in) :: db
-        character(len=*), intent(in) :: repo, git_dir, commit
+        character(len=*), intent(in) :: repo, git_dir, commit, track, classes
         integer(int64), intent(in) :: request
         type(stmt_t) :: st
         integer(int64) :: id, check
         character(len=:), allocatable :: ref, out, on
         character(len=24) :: num
-        type(policy_t) :: p
         integer :: stat, status, k
 
         id = request
@@ -283,12 +464,14 @@ contains
                 ', commit_id = ?2 WHERE id = ?1;', id, commit)
         else
             call db_prepare(db, "INSERT INTO landings (repo, branch, account, created_at, kind,"// &
-                " commit_id, state, started_at) VALUES (?1, 'main', ?2, "//NOW//", 'verify', ?3,"// &
-                " 'running', "//NOW//") RETURNING id;", st, stat)
+                " commit_id, state, started_at, verify_class) VALUES (?1, 'main', ?2,"// &
+                " "//NOW//", 'verify', ?3, 'running', "//NOW//", ?4)"// &
+                ' RETURNING id;', st, stat)
             if (stat /= SQLITE_OK) return
             call stmt_bind_text(st, 1, repo, stat)
             call stmt_bind_text(st, 2, ACCOUNT, stat)
             call stmt_bind_text(st, 3, commit, stat)
+            call stmt_bind_text(st, 4, track, stat)
             if (stmt_step(st) == SQLITE_ROW) id = stmt_int(st, 0)
             call stmt_finalize(st)
         end if
@@ -297,9 +480,7 @@ contains
         write (num, '(i0)') id
         ref = 'refs/fortyard/verify/'//trim(num)
         call git(git_dir, [character(len=256) :: 'update-ref', ref, commit], out, status)
-        ! One check on each runner class of the policy (verify_on).
-        call policy_get(db, repo, p)
-        on = p%verify_on//','
+        on = classes//','
         do while (len(on) > 1)
             k = index(on, ',')
             call store_check_add(db, repo, ref, check, stat, kind='verify', class=on(1:k - 1))
@@ -409,31 +590,38 @@ contains
         call stmt_finalize(st)
     end subroutine checks_of
 
-    subroutine report(db, repo, git_dir, culprit, good, base, bisect)
-        !! Reports the first failing commit once: an issue, and a comment on
-        !! the change that landed it. `culprit` 'unknown': main fails and no
-        !! earlier verification passed, or the policy of the repository asks
-        !! for no bisection (`bisect` false).
+    subroutine report(db, repo, git_dir, culprit, good, base, track, bisect)
+        !! Reports the first failing commit of `track` once: an issue, and a
+        !! comment on the change that landed it. `culprit` 'unknown': main fails
+        !! and no earlier verification passed, or the policy of the repository
+        !! asks for no bisection (`bisect` false). A nightly class keys its
+        !! reports as CULPRIT@CLASS, so each class reports a commit once.
         type(db_t), intent(in) :: db
-        character(len=*), intent(in) :: repo, git_dir, culprit, good, base
+        character(len=*), intent(in) :: repo, git_dir, culprit, good, base, track
         logical, intent(in), optional :: bisect
-        character(len=:), allocatable :: subject, title, body, log, link
+        character(len=:), allocatable :: subject, title, body, log, link, key, on
         type(change_t) :: c
         type(stmt_t) :: st
         integer :: number, change, status, stat
         logical :: found
 
-        if (reported(db, repo, culprit)) return
+        key = culprit
+        on = ''
+        if (len(track) > 0) then
+            key = culprit//'@'//track
+            on = ' on '//track
+        end if
+        if (reported(db, repo, key)) return
         if (culprit == 'unknown') then
-            title = 'The verification of main fails'
-            body = 'The verification of main (.fortyard/verify, or every test run again) fails, '// &
-                'and no earlier verification of main passed, so no change can be blamed. See '// &
-                'the recent verify jobs of '//repo//'.'
+            title = 'The verification of main'//on//' fails'
+            body = 'The verification of main'//on//' (.fortyard/verify, or every test run '// &
+                'again) fails, and no earlier verification of main passed, so no change can '// &
+                'be blamed. See the recent verify jobs of '//repo//'.'
             if (present(bisect)) then
-                if (.not. bisect) body = 'The verification of main (.fortyard/verify, or every '// &
-                    'test run again) fails. The policy of the repository sets bisect=off, so '// &
-                    'the commits since the last passing verification are not bisected and no '// &
-                    'change is blamed. See the recent verify jobs of '//repo//'.'
+                if (.not. bisect) body = 'The verification of main'//on//' (.fortyard/verify, '// &
+                    'or every test run again) fails. The policy of the repository sets '// &
+                    'bisect=off, so the commits since the last passing verification are not '// &
+                    'bisected and no change is blamed. See the recent verify jobs of '//repo//'.'
             end if
             change = 0
         else
@@ -441,25 +629,30 @@ contains
                 status)
             subject = trim_nl(subject)
             change = number_in(subject)
-            log = log_of(db, repo, culprit)
-            title = 'Verification fails since '//culprit(1:10)//' '//subject
+            log = log_of(db, repo, culprit, track)
+            title = 'Verification'//on//' fails since '//culprit(1:10)//' '//subject
             if (len(title) > 200) title = title(1:200)
-            body = 'The verification of main passes at '//good(1:10)//' and fails at '// &
+            body = 'The verification of main'//on//' passes at '//good(1:10)//' and fails at '// &
                 culprit(1:10)//', the next commit on main:'//new_line('a')//new_line('a')// &
                 '    '//subject//new_line('a')//new_line('a')
             if (change > 0) body = body//'It landed change #'//itoa(change)//'. '
             body = body//'The commits of main between the last passing and the first failing '// &
-                'verification were bisected.'//new_line('a')//new_line('a')// &
+                'verification were bisected.'
+            if (len(track) > 0) body = body//' The runner class '//track//' is verified at '// &
+                'night only (verify_on '//track//'@nightly).'
+            body = body//new_line('a')//new_line('a')// &
                 'End of the failing log:'//new_line('a')//new_line('a')//'```'//new_line('a')// &
                 tail(log, LOG_TAIL)//new_line('a')//'```'
         end if
+        if (len(track) > 0 .and. culprit == 'unknown') body = body//' The runner class '// &
+            track//' is verified at night only (verify_on '//track//'@nightly).'
         number = issue_open(db, repo, git_dir, title, body, ACCOUNT)
         if (number == 0) return
         call db_prepare(db, 'INSERT INTO verify_reports (repo, culprit, issue, created_at)'// &
             ' VALUES (?1, ?2, ?3, '//NOW//');', st, stat)
         if (stat == SQLITE_OK) then
             call stmt_bind_text(st, 1, repo, stat)
-            call stmt_bind_text(st, 2, culprit, stat)
+            call stmt_bind_text(st, 2, key, stat)
             call stmt_bind_int(st, 3, int(number, int64), stat)
             stat = stmt_step(st)
             call stmt_finalize(st)
@@ -468,45 +661,56 @@ contains
             call change_get(db, repo, change, c, found)
             link = 'issue #'//itoa(number)
             if (len(base) > 0) link = link//' ('//base//'/'//repo//'/-/issues/'//itoa(number)//')'
-            if (found) call change_comment(db, c%id, ACCOUNT, 'The verification of main fails '// &
-                'since this change landed: '//link//'.')
+            if (found) call change_comment(db, c%id, ACCOUNT, 'The verification of main'//on// &
+                ' fails since this change landed: '//link//'.')
         end if
-        write (error_unit, '(a)') 'fy: verification of '//repo//' reported as issue #'//itoa(number)
+        write (error_unit, '(a)') 'fy: verification of '//repo//on//' reported as issue #'// &
+            itoa(number)
         flush (error_unit)
     end subroutine report
 
-    subroutine close_reports(db, repo, head)
-        !! Main passes: the open regression reports are closed.
+    subroutine close_reports(db, repo, head, track, why)
+        !! Main passes in `track` at `head`: its open regression reports are
+        !! closed, with the comment `why` instead when given.
         type(db_t), intent(in) :: db
-        character(len=*), intent(in) :: repo, head
+        character(len=*), intent(in) :: repo, head, track
+        character(len=*), intent(in), optional :: why
         type(stmt_t) :: st
         integer, allocatable :: issues(:)
+        character(len=:), allocatable :: on
         integer :: stat, k
 
+        on = ''
+        if (len(track) > 0) on = ' on '//track
         allocate (issues(0))
-        call db_prepare(db, "SELECT issue FROM verify_reports WHERE repo = ?1 AND state = 'open';", &
-            st, stat)
+        call db_prepare(db, "SELECT issue FROM verify_reports WHERE repo = ?1 AND state = 'open'"// &
+            ' AND '//OF_TRACK//';', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, repo, stat)
+        call stmt_bind_text(st, 3, track, stat)
         do while (stmt_step(st) == SQLITE_ROW)
             issues = [issues, int(stmt_int(st, 0))]
         end do
         call stmt_finalize(st)
         do k = 1, size(issues)
-            call issue_comment(db, repo, issues(k), ACCOUNT, 'The verification of main passes '// &
-                'again at '//head(1:10)//'.')
+            if (present(why)) then
+                call issue_comment(db, repo, issues(k), ACCOUNT, why)
+            else
+                call issue_comment(db, repo, issues(k), ACCOUNT, 'The verification of main'// &
+                    on//' passes again at '//head(1:10)//'.')
+            end if
             call issue_set_state(db, repo, issues(k), 'closed')
         end do
         ! A failure without a culprit may be reported again later.
-        call exec(db, "DELETE FROM verify_reports WHERE repo = ?2 AND culprit = 'unknown'"// &
-            ' AND ?1 = ?1;', 0_int64, repo)
+        call exec(db, "DELETE FROM verify_reports WHERE repo = ?2 AND culprit IN ('unknown',"// &
+            " 'unknown@' || ?3) AND "//OF_TRACK//' AND ?1 = ?1;', 0_int64, repo, track)
         call exec(db, "UPDATE verify_reports SET state = 'closed' WHERE repo = ?2 AND"// &
-            " state = 'open' AND ?1 = ?1;", 0_int64, repo)
+            " state = 'open' AND "//OF_TRACK//' AND ?1 = ?1;', 0_int64, repo, track)
     end subroutine close_reports
 
-    logical function reported(db, repo, culprit)
+    logical function reported(db, repo, key)
         type(db_t), intent(in) :: db
-        character(len=*), intent(in) :: repo, culprit
+        character(len=*), intent(in) :: repo, key
         type(stmt_t) :: st
         integer :: stat
         reported = .false.
@@ -514,41 +718,45 @@ contains
             stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, repo, stat)
-        call stmt_bind_text(st, 2, culprit, stat)
+        call stmt_bind_text(st, 2, key, stat)
         reported = stmt_step(st) == SQLITE_ROW
         call stmt_finalize(st)
     end function reported
 
-    function result_of(db, repo, commit) result(state)
-        !! "passed" or "failed" from the latest verification of `commit`, or ''.
+    function result_of(db, repo, commit, track) result(state)
+        !! "passed" or "failed" from the latest verification of `commit` in
+        !! `track`, or ''.
         type(db_t), intent(in) :: db
-        character(len=*), intent(in) :: repo, commit
+        character(len=*), intent(in) :: repo, commit, track
         character(len=:), allocatable :: state
         type(stmt_t) :: st
         integer :: stat
         state = ''
         call db_prepare(db, "SELECT state FROM landings WHERE kind = 'verify' AND repo = ?1"// &
-            " AND commit_id = ?2 AND state IN ('passed', 'failed') ORDER BY id DESC LIMIT 1;", &
-            st, stat)
+            " AND commit_id = ?2 AND verify_class = ?3 AND state IN ('passed', 'failed')"// &
+            ' ORDER BY id DESC LIMIT 1;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, repo, stat)
         call stmt_bind_text(st, 2, commit, stat)
+        call stmt_bind_text(st, 3, track, stat)
         if (stmt_step(st) == SQLITE_ROW) state = stmt_text(st, 0)
         call stmt_finalize(st)
     end function result_of
 
-    function log_of(db, repo, commit) result(log)
+    function log_of(db, repo, commit, track) result(log)
         type(db_t), intent(in) :: db
-        character(len=*), intent(in) :: repo, commit
+        character(len=*), intent(in) :: repo, commit, track
         character(len=:), allocatable :: log
         type(stmt_t) :: st
         integer :: stat
         log = ''
         call db_prepare(db, "SELECT coalesce(log, '') FROM landings WHERE kind = 'verify' AND"// &
-            " repo = ?1 AND commit_id = ?2 AND state = 'failed' ORDER BY id DESC LIMIT 1;", st, stat)
+            " repo = ?1 AND commit_id = ?2 AND verify_class = ?3 AND state = 'failed'"// &
+            ' ORDER BY id DESC LIMIT 1;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, repo, stat)
         call stmt_bind_text(st, 2, commit, stat)
+        call stmt_bind_text(st, 3, track, stat)
         if (stmt_step(st) == SQLITE_ROW) log = stmt_text(st, 0)
         call stmt_finalize(st)
     end function log_of
@@ -567,10 +775,11 @@ contains
         call stmt_finalize(st)
     end function queued_request
 
-    subroutine running_job(db, repo, id, commit)
-        !! The running verification of `repo` and its commit; id 0 if none.
+    subroutine running_job(db, repo, track, id, commit)
+        !! The running verification of `repo` in `track` and its commit; id 0
+        !! if none.
         type(db_t), intent(in) :: db
-        character(len=*), intent(in) :: repo
+        character(len=*), intent(in) :: repo, track
         integer(int64), intent(out) :: id
         character(len=:), allocatable, intent(out) :: commit
         type(stmt_t) :: st
@@ -578,9 +787,11 @@ contains
         id = 0
         commit = ''
         call db_prepare(db, "SELECT id, coalesce(commit_id, '') FROM landings WHERE kind = 'verify'"// &
-            " AND repo = ?1 AND state = 'running' ORDER BY id LIMIT 1;", st, stat)
+            " AND repo = ?1 AND state = 'running' AND verify_class = ?2 ORDER BY id LIMIT 1;", st, &
+            stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, repo, stat)
+        call stmt_bind_text(st, 2, track, stat)
         if (stmt_step(st) == SQLITE_ROW) then
             id = stmt_int(st, 0)
             commit = stmt_text(st, 1)

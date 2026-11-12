@@ -161,6 +161,7 @@ contains
             '                        with the reason timeout (default 60; 0: no limit)', &
             '                      verify_on=CLASS[,CLASS...]  runner classes each', &
             '                        verification of main runs on (default linux)', &
+            '                        CLASS@nightly: verified on its own once a night', &
             '                      backends=github,gitlab  external backends its checks', &
             '                        may run on (public repositories only; empty: none)', &
             '                      egress=DOMAIN[,DOMAIN...]  hosts its checks reach', &

@@ -158,6 +158,15 @@ contains
             'CREATE TABLE runners (name TEXT PRIMARY KEY, class TEXT NOT NULL,'// &
             ' seen_at TEXT NOT NULL, max_minutes INTEGER, max_running INTEGER);'// &
             'CREATE INDEX checks_by_ran_class ON checks (repo, coalesce(ran_class, class), state);')
+        ! Nightly classes (verify_on CLASS@nightly): a verification job of such
+        ! a class runs on that class alone ('' for the jobs that verify the
+        ! classes without schedule). verify_nights holds the main a class saw
+        ! in the first verifier pass of a night (the server-time date of its
+        ! 01:00 to 06:00 window), which is all the class verifies that night.
+        call migration_add(list, 'verify-class-and-nights', &
+            "ALTER TABLE landings ADD COLUMN verify_class TEXT NOT NULL DEFAULT '';"// &
+            'CREATE TABLE verify_nights (repo TEXT NOT NULL, class TEXT NOT NULL,'// &
+            ' night TEXT NOT NULL, main TEXT NOT NULL, PRIMARY KEY (repo, class, night));')
 
     end subroutine migrations_registry
 

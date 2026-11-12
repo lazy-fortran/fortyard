@@ -17,7 +17,9 @@ module fy_policy
     !!                     runs longer, without a verdict (CHECK_TIMEOUT_MAX)
     !!   verify_on         runner classes, comma-separated  each verification
     !!                     of main runs once on each and passes when all pass;
-    !!                     landing checks run on linux
+    !!                     landing checks run on linux. A class ending in
+    !!                     @nightly is verified on its own, once a night
+    !!                     (fy_verify)
     !!   backends          github, gitlab, comma-separated, or none  the
     !!                     external backends checks may run on; only for a
     !!                     public repository (doc/backends.md)
@@ -82,7 +84,7 @@ module fy_policy
     character(len=*), parameter, public :: POLICY_KEYS = &
         'tests=full|affected|none review=after|before bisect=on|off batch=1..64'// &
         ' unreviewed_limit=N (0: no limit) check_timeout=MINUTES (0: no limit)'// &
-        ' verify_on=CLASS[,CLASS...] backends=github,gitlab egress=DOMAIN[,DOMAIN...]'
+        ' verify_on=CLASS[@nightly][,CLASS...] backends=github,gitlab egress=DOMAIN[,DOMAIN...]'
 
     type :: policy_t
         character(len=:), allocatable :: tests, review
@@ -237,7 +239,7 @@ contains
                 p%verify_on = value
             else
                 error = 'verify_on is runner classes separated by commas, each 1 to 32 of'// &
-                    ' a-z, 0-9 and -, at most 8'
+                    ' a-z, 0-9 and -, optionally followed by @nightly, at most 8, each named once'
             end if
         case ('backends')
             if (backends_ok(value)) then
@@ -270,8 +272,10 @@ contains
         end function number
 
         logical function classes_ok(text)
+            !! Also refuses a class named twice, with or without schedule.
             character(len=*), intent(in) :: text
-            integer :: i, j, n
+            character(len=32) :: seen(8)
+            integer :: i, j, n, e
 
             classes_ok = .false.
             i = 1
@@ -283,9 +287,15 @@ contains
                 else
                     j = i + j - 1
                 end if
-                if (.not. policy_class_name(text(i:j - 1))) return
+                e = j - 1
+                if (e - i >= 8) then
+                    if (text(e - 7:e) == '@nightly') e = e - 8
+                end if
+                if (.not. policy_class_name(text(i:e))) return
+                if (n >= 8) return
+                if (any(seen(1:n) == text(i:e))) return
                 n = n + 1
-                if (n > 8) return
+                seen(n) = text(i:e)
                 if (j > len(text)) exit
                 i = j + 1
             end do
