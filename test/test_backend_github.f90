@@ -85,25 +85,16 @@ program test_backend_github
         1, 3)
 
     call github_setup('leaky', stat)
-    call check(stat /= 0, 'setup refuses a repository with secrets')
-    call check(index(slurp(api_log), 'PUT /repos/acme/leaky') == 0, &
-        'nothing of the refused repository is changed')
+    call check(stat == 0, 'setup accepts a repository whose own workflows have secrets')
     call github_setup('demo', stat)
     log = slurp(api_log)
     call check(stat == 0, 'setup accepts a clean repository')
-    call check(index(log, 'PUT /repos/acme/demo/actions/permissions/selected-actions {"github_'// &
-        'owned_allowed":false,"verified_allowed":false,"patterns_allowed":["actions/checkout@3d3c'// &
-        '42e5aac5ba805825da76410c181273ba90b1","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1'// &
-        'c52a9"]}') > 0, 'setup allows only the pinned actions')
-    call check(index(log, 'PUT /repos/acme/demo/actions/permissions/workflow {"default_workflow_'// &
-        'permissions":"read"') > 0, 'setup makes the workflow token read-only')
-    call check(index(log, 'PUT /repos/acme/demo/actions/permissions/artifact-and-log-retention'// &
-        ' {"days":1}') > 0, 'setup sets retention to 1 day')
-    call check(index(log, 'PUT /repos/acme/demo/actions/workflows/2/disable') > 0 .and. &
-        index(log, 'workflows/1/disable') == 0 .and. index(log, 'workflows/3/disable') == 0, &
-        'setup disables the other active workflow only')
-    call check(index(log, 'GET /repos/acme/demo/environments/pages/secrets') > 0, &
-        'setup looks at the secrets of each environment')
+    call check(index(log, 'PUT /repos/acme/demo/actions/permissions {"enabled":true,'// &
+        '"allowed_actions":"all"}') > 0, 'setup enables Actions')
+    call check(index(log, 'selected-actions') == 0 .and. index(log, '/disable') == 0 .and. &
+        index(log, 'retention') == 0 .and. index(log, 'PUT /repos/acme/demo/actions/'// &
+        'permissions/workflow') == 0, 'setup leaves the repository''s own workflows and '// &
+        'permissions as they are')
 
     ! The server, with the bare repository as upstream of demo.
     call store_open(data//'/fortyard.db', db, stat)
@@ -168,7 +159,7 @@ program test_backend_github
     call cancel(4)
     call wait_check(3, '', 'The job did not start within 3 s')
     call cancel(3)
-    call wait_check(5, '', '.github/workflows/x.yml would run on GitHub as well')
+    call wait_check(5, '', '.github/workflows/x.yml is new or changed in this check')
     call cancel(5)
     call wait_check(6, 'timeout', '')
     call check_log(6, 'GitHub ended the job at the time limit', &
@@ -380,10 +371,12 @@ contains
                     trim(merge('read ', 'write', wf_read))//'"}'
             end if
             return
-        case ('/repos/acme/demo/actions/permissions', '/repos/acme/demo/actions/'// &
-                'permissions/selected-actions', '/repos/acme/demo/actions/permissions/'// &
-                'artifact-and-log-retention', '/repos/acme/demo/actions/workflows/2/disable')
+        case ('/repos/acme/demo/actions/permissions', '/repos/acme/leaky/actions/permissions')
             code = 204
+            return
+        case ('/repos/acme/demo/contents/.github/workflows/old.yml')
+            ! main's own workflow, the same in every check branch.
+            body = 'on: push'//new_line('a')
             return
         case ('/repos/acme/demo/actions/workflows')
             body = '{"total_count":3,"workflows":[{"id":1,"path":".github/workflows/'// &

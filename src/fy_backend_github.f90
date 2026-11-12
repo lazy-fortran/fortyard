@@ -396,20 +396,16 @@ contains
         end function withdrawn
 
         function foreign_workflows() result(text)
-            !! Why the files of .github/workflows of the commit (`listing`)
-            !! may not be pushed: empty when each is fortyard.yml or a
-            !! workflow disabled on GitHub (fy backend github setup does so).
+            !! Why the commit may not be pushed: empty unless a file of its
+            !! .github/workflows (`listing`) other than fortyard.yml is new or
+            !! differs from main's on GitHub. Workflows of main are the
+            !! repository's own; one a change adds or changes would run its
+            !! code on GitHub outside fortyard.yml.
             character(len=:), allocatable :: text
-            character(len=:), allocatable :: rest, file, flows, state
-            integer :: c, e, j
+            character(len=:), allocatable :: rest, file, mine, theirs
+            integer :: c, e, st
 
             text = ''
-            call gh('GET', '/repos/'//full//'/actions/workflows?per_page=100', gtoken, '', c, &
-                flows)
-            if (c /= 200) then
-                text = 'the workflows of '//full//' cannot be listed (HTTP '//itoa(c)//').'
-                return
-            end if
             rest = listing
             do while (len(rest) > 0)
                 e = index(rest, new_line('a'))
@@ -417,17 +413,21 @@ contains
                 file = rest(1:e - 1)
                 rest = rest(min(e + 1, len(rest) + 1):)
                 if (len(file) == 0 .or. file == 'fortyard.yml') cycle
-                state = ''
-                do j = 1, 100
-                    if (len(json_raw(flows, 'workflows['//itoa(j)//'].id')) == 0) exit
-                    if (json_raw(flows, 'workflows['//itoa(j)//'].path') /= &
-                        '.github/workflows/'//file) cycle
-                    state = json_raw(flows, 'workflows['//itoa(j)//'].state')
-                    exit
-                end do
-                if (index(state, 'disabled') == 1) cycle
-                text = '.github/workflows/'//file//' would run on GitHub as well; only '// &
-                    'fortyard.yml and workflows disabled there may be in that directory.'
+                call backend_git_file(server, token, repo, ref, '.github/workflows/'//file, mine, st)
+                if (st /= 0) then
+                    text = '.github/workflows/'//file//' of the check cannot be read.'
+                    return
+                end if
+                call gh('GET', '/repos/'//full//'/contents/.github/workflows/'//file//'?ref=main', &
+                    gtoken, '', c, theirs, raw=.true.)
+                if (c == 200 .and. theirs == mine) cycle
+                if (c /= 200 .and. c /= 404) then
+                    text = '.github/workflows/'//file//' of main cannot be read (HTTP '//itoa(c)//').'
+                    return
+                end if
+                text = '.github/workflows/'//file//' is new or changed in this check and would '// &
+                    'run on GitHub as well; fortyard runs there only checks that leave the '// &
+                    'workflows of main as they are.'
                 return
             end do
         end function foreign_workflows
@@ -570,13 +570,13 @@ contains
     end subroutine github_sweep
 
     subroutine github_setup(repo, stat)
-        !! fy backend github setup REPO: refuses a repository that is private,
-        !! has repository, environment or organisation secrets available to
-        !! it, or whose main lacks the shipped workflow; else enables Actions
-        !! with only the pinned actions, sets the default workflow token to
-        !! read, log and artifact retention to 1 day and disables every
-        !! other workflow. Says what it found and did; stat 0 when the
-        !! repository is ready.
+        !! fy backend github setup REPO: refuses a repository that is private or
+        !! whose main lacks the shipped workflow; else enables Actions. The
+        !! repository's own workflows, actions and permissions stay as they
+        !! are: a check cannot add or change a workflow (github_take), so its
+        !! code runs only in fortyard.yml, without secrets; secrets available
+        !! to the repository's workflows are only reported. Says what it found
+        !! and did; stat 0 when the repository is ready.
         character(len=*), intent(in) :: repo
         integer, intent(out) :: stat
         character(len=:), allocatable :: token, base, body, envs, name, wid
@@ -599,19 +599,8 @@ contains
                 'repositories only')
             return
         end if
-        if (.not. none(base//'/actions/secrets', 'repository secrets')) return
-        if (.not. none(base//'/actions/organization-secrets', 'organisation secrets')) return
-        call gh('GET', base//'/environments', token, '', code, envs)
-        if (code /= 200 .and. code /= 404) then
-            call say('the environments cannot be read (HTTP '//itoa(code)//')')
-            return
-        end if
-        do k = 1, 100
-            name = json_raw(envs, 'environments['//itoa(k)//'].name')
-            if (len(name) == 0) exit
-            if (.not. none(base//'/environments/'//encoded(name)//'/secrets', &
-                'secrets of the environment '//name)) return
-        end do
+        call count_secrets(base//'/actions/secrets', 'repository secrets')
+        call count_secrets(base//'/actions/organization-secrets', 'organisation secrets')
         call gh('GET', base//'/contents/'//WORKFLOW_PATH//'?ref=main', token, '', code, body, &
             raw=.true.)
         if (code /= 200 .or. body /= github_workflow()) then
@@ -619,55 +608,23 @@ contains
                 'fortyard; land that file first')
             return
         end if
-        call say('public, no secrets, the shipped workflow on main')
-        if (.not. put(base//'/actions/permissions', '{"enabled":true,"allowed_actions":'// &
-            '"selected"}', 'Actions enabled for selected actions')) return
-        if (.not. put(base//'/actions/permissions/selected-actions', '{"github_owned_allowed":'// &
-            'false,"verified_allowed":false,"patterns_allowed":["'//CHECKOUT//'","'//CACHE// &
-            '"]}', 'only '//CHECKOUT//' and '//CACHE//' allowed')) return
-        if (.not. put(base//'/actions/permissions/workflow', '{"default_workflow_permissions":'// &
-            '"read","can_approve_pull_request_reviews":false}', 'default workflow token reads '// &
-            'only')) return
-        call gh('GET', base//'/actions/permissions/workflow', token, '', code, body)
-        if (code /= 200 .or. json_raw(body, 'default_workflow_permissions') /= 'read') then
-            call say('the default workflow token still has write permission (an organisation '// &
-                'setting?)')
-            return
-        end if
-        if (.not. put(base//'/actions/permissions/artifact-and-log-retention', '{"days":1}', &
-            'logs and artifacts kept 1 day')) return
-        call gh('GET', base//'/actions/workflows?per_page=100', token, '', code, body)
-        if (code /= 200) then
-            call say('the workflows cannot be listed (HTTP '//itoa(code)//')')
-            return
-        end if
-        do k = 1, 100
-            wid = json_raw(body, 'workflows['//itoa(k)//'].id')
-            if (len(wid) == 0) exit
-            if (json_raw(body, 'workflows['//itoa(k)//'].path') == WORKFLOW_PATH) cycle
-            if (json_raw(body, 'workflows['//itoa(k)//'].state') /= 'active') cycle
-            if (.not. put(base//'/actions/workflows/'//wid//'/disable', '', 'disabled '// &
-                json_raw(body, 'workflows['//itoa(k)//'].path'))) return
-        end do
+        call say('public, the shipped workflow on main')
+        if (.not. put(base//'/actions/permissions', '{"enabled":true,"allowed_actions":"all"}', &
+            'Actions enabled')) return
         call say(owner//'/'//repo//' is ready for the GitHub backend')
         stat = 0
 
     contains
 
-        logical function none(path, what)
-            !! Whether the listing at `path` counts no entries.
+        subroutine count_secrets(path, what)
+            !! Reports the secrets at `path`; a check's code never sees them.
             character(len=*), intent(in) :: path, what
             character(len=:), allocatable :: answer
             integer :: c
             call gh('GET', path, token, '', c, answer)
-            none = c == 200 .and. json_raw(answer, 'total_count') == '0'
-            if (c /= 200) then
-                call say('the '//what//' cannot be read (HTTP '//itoa(c)//')')
-            else if (.not. none) then
-                call say('refused: '//json_raw(answer, 'total_count')//' '//what//' are '// &
-                    'available to its workflows; a check could read them')
-            end if
-        end function none
+            if (c == 200 .and. json_raw(answer, 'total_count') /= '0') call say(json_raw(answer, &
+                'total_count')//' '//what//' are available to the repository''s own workflows')
+        end subroutine count_secrets
 
         logical function put(path, payload, what)
             character(len=*), intent(in) :: path, payload, what

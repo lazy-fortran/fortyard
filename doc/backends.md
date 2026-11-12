@@ -183,27 +183,26 @@ The backend process never holds a key that can push.
 `.github/workflows/fortyard.yml` (shipped with fortyard as
 `deploy/github/fortyard.yml`), which runs on pushes to `fortyard/check/**`:
 
-- `permissions: {}`; the actions `actions/checkout` and `actions/cache` only,
+- `permissions: {}`; the actions `actions/checkout` and `actions/cache`,
   pinned by commit;
 - shallow checkout of the one commit;
 - `actions/cache` keyed by repository, class and toolchain version for fo's
   cache, the compiler cache and fetched dependencies (GitHub bounds it: 10 GB
   per repository, entries unused for 7 days deleted);
-- `fo` from its release; then `.fortyard/check` (or `.fortyard/verify` for a
+- `fo` built from its `main`; then `.fortyard/check` (or `.fortyard/verify` for a
   verification) where the repository has one, else `fo build && fo test`.
 
-**Any workflow in the pushed commit runs**, not only this one: GitHub runs
-every workflow file of the pushed commit whose trigger matches. That is why
-the repository must offer nothing to steal: `fy backend github setup` refuses
-a repository that has repository, environment or organisation secrets
-available to it or a default workflow token with write permission, sets the
-default token to read-only, allows only the pinned actions, and checks that
-`.github/workflows/fortyard.yml` on `main` is the shipped file. The result is
-read only from the run of `.github/workflows/fortyard.yml`, and a check whose
-copy of that file differs from the shipped one is given back to its home
-class (`{"error":"runner"}`) instead of being run there. What a change may run
-on GitHub is then the same as what any fork's pull request may run in a
-public repository: code with no secrets and a read-only token.
+**What a change may run on GitHub.** GitHub runs every workflow file of the
+pushed commit whose trigger matches, not only this one. The workflows of
+`main` are the repository's own and stay as they are, releases included. A
+check whose commit adds or changes any other file of `.github/workflows`
+(compared with `main` on GitHub), or whose copy of `fortyard.yml` differs
+from the shipped one, is given back to its home class (`{"error":"runner"}`)
+instead of being run there. The change's code therefore runs on GitHub only
+in `fortyard.yml`, with no secrets and no token beyond reading the repository;
+the result is read only from that workflow's run. GitHub's own permissions are
+not narrowed further: what this design protects is the TU Graz side, which
+GitHub cannot reach.
 
 **Reading back.** A GitHub App `fortyard-checks`, created by an owner of the
 GitHub organisation and installed for the public repositories that use the
@@ -217,14 +216,13 @@ and asks the server to delete the branch (`DELETE` of the same publish route).
 
 **Nothing left behind.** A sweep in the backend process deletes runs of
 `fortyard/check/*` branches older than an hour, and the server deletes such
-branches it pushed for checks that have ended. Log and artifact retention of
-the repository is set to 1 day, the minimum; the workflow uploads no
-artifacts. GitHub discards its machines after each job.
+branches it pushed for checks that have ended. The workflow uploads no
+artifacts, and GitHub discards its machines after each job.
 
-**Setup** (`fy backend github setup REPO`, run with the App's credentials):
-the checks above, Actions enabled, only the pinned actions allowed,
-retention 1 day, and every other existing workflow disabled through the API,
-so that pushes to `main` do not start the old CI again.
+**Setup** (`fy backend github setup REPO`, run with an owner's token): checks
+that the repository is public and that `fortyard.yml` on `main` is the shipped
+file, enables Actions, and reports secrets available to the repository's own
+workflows. Its workflows, allowed actions and permissions stay as they are.
 
 GitHub's terms allow hosted runners only for "the software project associated
 with the repository where GitHub Actions are used"; a check of repository R
