@@ -18,7 +18,8 @@ program test_runner
     use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, SIGTERM, proc_setenv
     use fy_server, only: server_supervise, server_set_data_dir, server_set_checks
     use fy_runner, only: runner_main
-    use fy_sqlite, only: db_t, db_close
+    use fy_sqlite, only: db_t, db_close, db_prepare, stmt_t, stmt_step, stmt_text, stmt_finalize, &
+        SQLITE_ROW
     use fy_store, only: store_open, store_bootstrap, store_repo_add, store_token_create
     implicit none
 
@@ -103,8 +104,11 @@ program test_runner
 
     call proc_kill(run, SIGTERM)
     call proc_wait(run, stat)
+    ! A mirror the runner cannot update (here a directory that is no
+    ! repository) is the runner's trouble: the check is queued again, not failed.
     call execute_command_line('rm -rf '//remote_dir//' '//remote_dir//'-2 && mkdir -p '// &
-        remote_dir//' '//remote_dir//'-2', exitstat=stat)
+        remote_dir//'/mirrors '//remote_dir//'-2 && touch '//remote_dir//'/mirrors/demo.git', &
+        exitstat=stat)
     run = proc_fork()
     if (run == 0) then
         call runner_main('http://'//base, runner, remote_dir, '')
@@ -115,6 +119,15 @@ program test_runner
         git//'-C '//work//' commit -q -am "More" && '//git//'-C '//work//' push -q '// &
         url//' HEAD:third', exitstat=stat)
     reply = post('/api/v1/repos/demo/land', '{"branch":"third"}')
+    do i = 1, 300
+        if (index(newest_check(), 'could not update its mirror') > 0) exit
+        call proc_sleep_ms(100)
+    end do
+    reply = get('/api/v1/jobs/3')
+    call check(index(newest_check(), 'could not update its mirror') > 0 .and. &
+        index(reply, '"state":"failed"') == 0, 'a broken mirror is no verdict: '// &
+        newest_check()//' '//reply)
+    call execute_command_line('rm -f '//remote_dir//'/mirrors/demo.git', exitstat=stat)
     call wait_landing(3, 'landed')
     inquire (file=remote_dir//'/mirrors/demo.git/HEAD', exist=exists)
     call check(exists, 'the remote runner checked out from its own mirror')
@@ -164,6 +177,25 @@ program test_runner
     print '(a)', 'runner: all checks passed'
 
 contains
+
+    function newest_check() result(text)
+        !! State and log of the newest check.
+        character(len=:), allocatable :: text
+        type(db_t) :: d
+        type(stmt_t) :: st
+        integer :: s
+
+        text = ''
+        call store_open(data//'/fortyard.db', d, s)
+        if (s /= 0) return
+        call db_prepare(d, "SELECT state || ' ' || coalesce(log, '') FROM checks ORDER BY id DESC"// &
+            ' LIMIT 1;', st, s)
+        if (s == 0) then
+            if (stmt_step(st) == SQLITE_ROW) text = stmt_text(st, 0)
+            call stmt_finalize(st)
+        end if
+        call db_close(d)
+    end function newest_check
 
     subroutine wait_landing(number, state)
         integer, intent(in) :: number

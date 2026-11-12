@@ -46,7 +46,12 @@ services:
       FY_EXECUTOR: "@HOME@/work"
       HOME: /tmp
       TMPDIR: "@HOME@/tmp"
+      # git fetches the mirrors through the same proxy.
       FY_PROXY: http://@NAME@-control:3128
+      http_proxy: http://@NAME@-control:3128
+      https_proxy: http://@NAME@-control:3128
+      HTTP_PROXY: http://@NAME@-control:3128
+      HTTPS_PROXY: http://@NAME@-control:3128
       no_proxy: 127.0.0.1,localhost
       NO_PROXY: 127.0.0.1,localhost
     volumes:

@@ -241,10 +241,11 @@ contains
                     'else git -c "$h" clone --quiet --mirror "$3/$4.git" "$2"; fi 2>&1', &
                     'mirror', data_dir, src, server, repo], out, stat, 65536)
                 if (stat /= 0) then
+                    ! The runner's trouble, no verdict on the change: queued again.
                     out = 'The runner could not update its mirror of '//repo//'.'// &
                         new_line('a')//out
                     call client_request(server, 'POST', '/api/v1/checks/'//id//'/result', &
-                        token, '{"passed":false,"log":"'//json_escape_string(out)//'"}', &
+                        token, '{"error":"runner","log":"'//json_escape_string(out)//'"}', &
                         code, body, stat)
                     return
                 end if
