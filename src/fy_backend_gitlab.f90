@@ -37,8 +37,8 @@ module fy_backend_gitlab
         json_parser_init, &
         json_parser_next, &
         json_parser_t
-    use fy_build_info, only: &
-        FY_COMMIT
+    use fy_backend, only: &
+        backend_server_moved
     use fy_client, only: &
         client_request
     use fy_live, only: &
@@ -69,8 +69,10 @@ module fy_backend_gitlab
         character(len=:), allocatable :: server, token, gitlab, project, project_token
         character(len=:), allocatable :: class, data_dir, git_url
         !! Minutes a job may run, seconds a job may wait to start, seconds of
-        !! the pause after it did not, seconds between polls.
-        integer :: max_minutes = 15, start_wait = 60, backoff = 600, poll = 5
+        !! the pause after it did not, seconds between polls, seconds between
+        !! questions for the server's release.
+        integer :: max_minutes = 15, start_wait = 60, backoff = 600, poll = 5, &
+            version_seconds = 60
     end type gitlab_backend_t
 
     type :: cell_t
@@ -96,9 +98,9 @@ contains
         !! Claims and runs checks of b%class until the server runs a different
         !! release (then returns, so that the process restarts on it).
         type(gitlab_backend_t), intent(inout) :: b
-        character(len=:), allocatable :: body, commit
-        integer :: code, stat, s
-        integer(int64) :: now, rate, last_sweep
+        character(len=:), allocatable :: body
+        integer :: code, stat
+        integer(int64) :: now, rate, last_sweep, last_version
         logical :: pause
         character(len=16) :: minutes
 
@@ -112,21 +114,11 @@ contains
         call sweep(b)
         call system_clock(last_sweep, rate)
         write (minutes, '(i0)') b%max_minutes
+        last_version = -1
         do
-            call client_request(b%server, 'GET', '/api/v1/version', '', '', code, body, stat)
-            if (stat == 0 .and. code == 200) then
-                commit = ''
-                s = index(body, '"commit":"')
-                if (s > 0) then
-                    commit = body(s + 10:)
-                    commit = commit(1:index(commit, '"') - 1)
-                end if
-                if (len(commit) > 0 .and. commit /= FY_COMMIT) then
-                    write (error_unit, '(a)') 'fy backend gitlab: the server runs '//commit// &
-                        ', this backend '//FY_COMMIT//'; restarting'
-                    return
-                end if
-            end if
+            ! A check runs to its report before this is asked again.
+            if (backend_server_moved(b%server, 'fy backend gitlab', last_version, &
+                b%version_seconds)) return
             call client_request(b%server, 'POST', '/api/v1/checks/claim', b%token, &
                 '{"class":"'//b%class//'","max_minutes":'//trim(minutes)// &
                 ',"max_running":1}', code, body, stat)

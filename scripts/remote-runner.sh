@@ -1,7 +1,8 @@
 #!/bin/sh
 # A runner on another host than the server: runs the fy of exactly the
 # release the server runs, as `fy runner` in remote mode, and fetches the
-# next one when the server moves on (fy runner then returns).
+# next one when the server moves on (fy runner or fy backend then returns,
+# a backend once its running checks are reported).
 #   FY_TARGET  the instance, e.g. https://code.tugraz.at/yard
 #   FY_RUNNER  runner directory with `token` (runner scope)
 #   FY_PROXY   proxy to the server, for fy and these requests (optional)

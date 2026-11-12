@@ -4,8 +4,11 @@ module fy_backend
     !! (GitHub Actions) instead of running it. backend_main claims checks of
     !! its classes within its limits and gives each to a child process of its
     !! own, which follows the external run and reports the result; the parent
-    !! also calls a periodic sweep. Requests to external APIs go through curl,
-    !! with credentials on curl's standard input, never on a command line.
+    !! also calls a periodic sweep. When the server runs another release it
+    !! stops claiming, lets its running checks report, and returns, so that
+    !! the process restarts on that release. Requests to external APIs go
+    !! through curl, with credentials on curl's standard input, never on a
+    !! command line.
     use, intrinsic :: iso_fortran_env, only: &
         error_unit, &
         int64
@@ -29,9 +32,12 @@ module fy_backend
         json_parser_init_strict, &
         json_parser_next, &
         json_parser_t
+    use fy_build_info, only: &
+        FY_COMMIT
     use fy_client, only: &
         client_request
     use fy_proc, only: &
+        SIGTERM, &
         fd_close, &
         fd_read, &
         fd_write_all, &
@@ -40,11 +46,13 @@ module fy_backend
         proc_exit_status, &
         proc_find, &
         proc_fork, &
+        proc_kill, &
         proc_pid, &
         proc_run, &
         proc_sleep_ms, &
         proc_spawn, &
-        proc_try_wait
+        proc_try_wait, &
+        proc_wait
     implicit none
     private
 
@@ -54,6 +62,7 @@ module fy_backend
         backend_main, &
         backend_report, &
         backend_seconds, &
+        backend_server_moved, &
         backend_take_i, &
         backend_tick_i, &
         backend_time, &
@@ -80,7 +89,7 @@ module fy_backend
 contains
 
     subroutine backend_main(server, token, classes, limits, max_running, max_minutes, take, &
-            tick, idle_ms, tick_seconds)
+            tick, idle_ms, tick_seconds, version_seconds)
         !! Claims checks of `classes` ({"class","max_minutes","max_running"},
         !! with limits(k) the most running checks of classes(k)) while fewer
         !! than `max_running` run in all and fewer than limits(k) of that
@@ -88,17 +97,21 @@ contains
         !! check's time limit at most `max_minutes`. Calls `tick` at the start
         !! and every `tick_seconds`, in a child process of its own, one at a
         !! time, so a long sweep never holds up claiming. Waits `idle_ms` when
-        !! no check is given. Runs until it is stopped.
+        !! no check is given. Asks the server's release every
+        !! `version_seconds` (60 by default); once it differs, claims no more,
+        !! waits for the running checks to be reported, stops the sweep and
+        !! returns.
         character(len=*), intent(in) :: server, token, classes(:)
         integer, intent(in) :: limits(:), max_running, max_minutes, idle_ms, tick_seconds
         procedure(backend_take_i) :: take
         procedure(backend_tick_i) :: tick
+        integer, intent(in), optional :: version_seconds
         character(len=:), allocatable :: body, repo, ref, kind
         character(len=24) :: lim, mins, num
         integer, allocatable :: pids(:), owner(:)
-        integer :: code, stat, k, timeout, parent, pid, ticker
-        integer(int64) :: now, rate, last_tick
-        logical :: found, given, done
+        integer :: code, stat, k, timeout, parent, pid, ticker, every
+        integer(int64) :: now, rate, last_tick, last_version
+        logical :: found, given, done, leaving
 
         allocate (pids(0), owner(0))
         ! Checks this process held when it stopped are queued again.
@@ -106,6 +119,10 @@ contains
             stat)
         parent = proc_pid()
         last_tick = -1
+        last_version = -1
+        every = 60
+        if (present(version_seconds)) every = version_seconds
+        leaving = .false.
         ticker = 0
         write (mins, '(i0)') max_minutes
         do
@@ -113,6 +130,20 @@ contains
             if (ticker > 0) then
                 call proc_try_wait(ticker, done, stat)
                 if (done) ticker = 0
+            end if
+            if (.not. leaving) leaving = backend_server_moved(server, 'fy backend', &
+                last_version, every)
+            if (leaving) then
+                call reap()
+                if (size(pids) == 0) then
+                    if (ticker > 0) then
+                        call proc_kill(ticker, SIGTERM)
+                        call proc_wait(ticker, stat)
+                    end if
+                    return
+                end if
+                call proc_sleep_ms(idle_ms)
+                cycle
             end if
             if (ticker == 0 .and. (last_tick < 0 .or. &
                 now - last_tick >= int(tick_seconds, int64)*rate)) then
@@ -183,6 +214,36 @@ contains
         end subroutine reap
 
     end subroutine backend_main
+
+    function backend_server_moved(server, who, last, every) result(moved)
+        !! Whether the server runs another release than this process, asked
+        !! when `every` seconds have passed since `last` (backend_seconds of
+        !! the last question, -1 for none; updated). A server that does not
+        !! answer has not moved. `who` names the process in the message.
+        character(len=*), intent(in) :: server, who
+        integer(int64), intent(inout) :: last
+        integer, intent(in) :: every
+        logical :: moved
+        character(len=:), allocatable :: body, commit
+        integer :: code, stat, s
+        integer(int64) :: now
+
+        moved = .false.
+        now = backend_seconds()
+        if (last >= 0 .and. now - last < int(every, int64)) return
+        last = now
+        call client_request(server, 'GET', '/api/v1/version', '', '', code, body, stat)
+        if (stat /= 0 .or. code /= 200) return
+        s = index(body, '"commit":"')
+        if (s == 0) return
+        commit = body(s + 10:)
+        commit = commit(1:index(commit, '"') - 1)
+        if (len(commit) == 0 .or. commit == FY_COMMIT) return
+        write (error_unit, '(a)') who//': the server runs '//commit//', this backend '// &
+            FY_COMMIT//'; restarting once its checks are reported'
+        flush (error_unit)
+        moved = .true.
+    end function backend_server_moved
 
     subroutine backend_report(server, token, id, outcome, log, started_at)
         !! Reports check `id`: outcome "passed" or "failed" with `started_at`
