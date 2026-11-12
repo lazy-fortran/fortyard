@@ -16,7 +16,11 @@
 # check lie in FY_EGRESS_DIR (default DIR-egress), which the runner does not
 # mount. FY_EGRESS_LEARN=0 ends the executor's learning week (default 1:
 # unlisted public hosts pass and are logged in FY_EGRESS_DIR/executor).
+# FY_SUBNET, e.g. 198.18.2 (a /24 of its own per installation), gives the
+# networks fixed /28 subnets in it, where Docker's own address pools are used
+# up; without it Docker picks them.
 set -eu
+if [ -n "${FY_SUBNET:-}" ]; then net="s|@NET@|$FY_SUBNET|g"; else net='/@NET@/d'; fi
 dir=$1 target=$2 image=$3 cpus=$4 memory=$5 name=${6:-fortyard-runner}
 cache=${7:-$dir/cache} cache_size=${8:-20G} shares=${9:-1024}
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -36,6 +40,7 @@ sed -e "s|@UID@|$(id -u)|g" -e "s|@GID@|$(id -g)|g" -e "s|@TARGET@|$target|g" \
     -e "s|@HOME@|$dir|g" -e "s|@IMAGE@|$image|g" -e "s|@CPUS@|$cpus|g" \
     -e "s|@MEMORY@|$memory|g" -e "s|@NAME@|$name|g" -e "s|@CACHE@|$cache|g" -e "s|@CACHE_SIZE@|$cache_size|g" -e "s|@SHARES@|$shares|g" \
     -e "s|@EGRESS_IMAGE@|$egress|g" -e "s|@LEARN@|${FY_EGRESS_LEARN:-1}|g" -e "s|@EGRESS@|$egress_dir|g" \
+    -e "$net" \
     "$here/deploy/compose/runner.yaml" \
     > "$dir/compose.yaml"
 docker compose -f "$dir/compose.yaml" -p "$name" up -d --force-recreate

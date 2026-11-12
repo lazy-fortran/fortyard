@@ -149,9 +149,14 @@ services:
       FY_EGRESS_LOG: /log
     volumes:
       - "@EGRESS@/controller:/log"
+# FY_SUBNET (install-runner.sh) names the networks' subnets where Docker's
+# own address pools are used up; without it the lines with @NET@ go.
 networks:
   control:
     internal: true
+    ipam: {config: [{subnet: "@NET@.0/28"}]}
   exec:
     internal: true
+    ipam: {config: [{subnet: "@NET@.16/28"}]}
   egress:
+    ipam: {config: [{subnet: "@NET@.32/28"}]}

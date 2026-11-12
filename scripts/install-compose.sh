@@ -12,7 +12,11 @@
 #           links in commits and issues use it
 # FY_EGRESS_LEARN=0 ends the learning week of the runner's egress proxy
 #           (default 1: unlisted public hosts pass and are logged)
+# FY_SUBNET, e.g. 198.18.2 (a /24 of its own per installation), gives the
+# networks fixed /28 subnets in it, where Docker's own address pools are used
+# up; without it Docker picks them.
 set -eu
+if [ -n "${FY_SUBNET:-}" ]; then net="s|@NET@|$FY_SUBNET|g"; else net='/@NET@/d'; fi
 home=$1 first=$2 base=$3 image=$4 relay=$5 public=${6:-}
 learn=${FY_EGRESS_LEARN:-1}
 case $relay in
@@ -49,6 +53,7 @@ SSH
 sed -e "s|@IMAGE@|$image|" -e "s|@BASE@|$base|g" -e "s|@UID@|$(id -u):$(id -g)|g" \
     -e "s|@PUBLIC_URL@|$public|" -e "s|@RELAY@|$relay|g" -e "s|@EGRESS_IMAGE@|$egress|" \
     -e "s|@RELAY_IMAGE@|alpine/socat:1.8.0.3|" -e "s|@LEARN@|$learn|" \
+    -e "$net" \
     "$root/deploy/compose/compose.yaml" > "$home/compose.yaml"
 run() { docker run --rm --network none --user "$(id -u):$(id -g)" -v "$home:/fy" "$image" "$@"; }
 if [ ! -e "$home/data/fortyard.db" ]; then

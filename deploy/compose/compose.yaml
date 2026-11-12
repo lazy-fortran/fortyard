@@ -169,15 +169,22 @@ volumes:
   # shared by the two containers, which run as the same user.
   work:
     driver_opts: {type: tmpfs, device: tmpfs, o: "size=2g,mode=1777"}
+# FY_SUBNET (install-compose.sh) names the networks' subnets where Docker's
+# own address pools are used up; without it the lines with @NET@ go.
 networks:
   # Server, runner controller and relay.
   yard:
     internal: true
+    ipam: {config: [{subnet: "@NET@.0/28"}]}
   # Each role and its own proxy, so no container uses another role's list.
   server-out:
     internal: true
+    ipam: {config: [{subnet: "@NET@.16/28"}]}
   runner-out:
     internal: true
+    ipam: {config: [{subnet: "@NET@.32/28"}]}
   # The proxies' way out and the relay's published port.
   egress:
+    ipam: {config: [{subnet: "@NET@.48/28"}]}
   edge:
+    ipam: {config: [{subnet: "@NET@.64/28"}]}
