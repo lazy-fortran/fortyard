@@ -50,6 +50,9 @@ Host github.com
     HostKeyAlias github.com
     ProxyCommand nc -X connect -x fortyard-egress-server:3128 %h %p
 SSH
+# ssh refuses a configuration others may write, also through an inherited ACL.
+setfacl -b "$home/bin/ssh_config" 2>/dev/null || true
+chmod 644 "$home/bin/ssh_config"
 sed -e "s|@IMAGE@|$image|" -e "s|@BASE@|$base|g" -e "s|@UID@|$(id -u):$(id -g)|g" \
     -e "s|@PUBLIC_URL@|$public|" -e "s|@RELAY@|$relay|g" -e "s|@EGRESS_IMAGE@|$egress|" \
     -e "s|@RELAY_IMAGE@|alpine/socat:1.8.0.3|" -e "s|@LEARN@|$learn|" \
