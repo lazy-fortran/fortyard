@@ -629,8 +629,12 @@ contains
         !! the checks of its classes on GitHub Actions, or the setup of one
         !! repository for it; gitlab: cmd_backend_gitlab.
         character(len=:), allocatable :: text, token, gh_token
+        character(len=1024) :: proxy_url
         integer :: max_running, max_macos, max_minutes, poll, start, stat
 
+        ! Behind an egress proxy a backend reaches its server only through it.
+        call get_environment_variable('FY_PROXY', proxy_url, status=stat)
+        if (stat == 0 .and. len_trim(proxy_url) > 0) call client_set_proxy(trim(proxy_url))
         if (positional(1) == 'gitlab') then
             call cmd_backend_gitlab()
             return
