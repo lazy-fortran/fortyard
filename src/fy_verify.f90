@@ -70,15 +70,16 @@ module fy_verify
 contains
 
     subroutine verifier_main(db_path, repos_dir)
-        !! The verifier process: one verification at a time, of whichever
-        !! repository needs one; it sleeps until a job changes.
+        !! The verifier process: one verification at a time in each repository,
+        !! the repositories side by side; it sleeps until a job changes, and
+        !! looks again each minute while checks run.
         character(len=*), intent(in) :: db_path, repos_dir
         type(db_t) :: db
         type(repo_info_t), allocatable :: repos(:)
         character(len=1024) :: url
         character(len=:), allocatable :: base
         integer :: stat, i, n, watch
-        logical :: busy, changed
+        logical :: busy, changed, pending, waits
 
         ! Links in commits and issues are read by people, so they use the public
         ! address when the server listens on an internal one.
@@ -92,19 +93,26 @@ contains
         call resume(db, repos_dir)
         do
             busy = .false.
+            pending = .false.
             call store_repo_list(db, repos, stat)
             do i = 1, size(repos)
                 if (repos(i)%mode /= 'primary') cycle
-                if (step(db, repos(i)%name, repos_dir//'/'//trim(repos(i)%name)//'.git', base)) &
-                    busy = .true.
+                if (step(db, repos(i)%name, repos_dir//'/'//trim(repos(i)%name)//'.git', base, &
+                    waits)) busy = .true.
+                if (waits) pending = .true.
             end do
-            if (.not. busy) changed = events_wait(watch, 'jobs', 600000)
+            if (busy) cycle
+            if (pending) then
+                changed = events_wait(watch, 'checks', 60000)
+            else
+                changed = events_wait(watch, 'jobs', 600000)
+            end if
         end do
     end subroutine verifier_main
 
     subroutine resume(db, repos_dir)
         !! After a restart (a new release), verifications whose runner check
-        !! still exists are followed to their end; the others are cancelled,
+        !! still exists go on (step settles them); the others are cancelled,
         !! as they neither passed nor failed.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: repos_dir
@@ -126,13 +134,8 @@ contains
         end do
         call stmt_finalize(st)
         do k = 1, size(jobs)
-            if (checks(k) > 0) then
-                call finish(db, trim(repos(k)), repos_dir//'/'//trim(repos(k))//'.git', &
-                    trim(commits(k)), jobs(k))
-            else
-                call exec(db, "UPDATE landings SET state = 'cancelled', finished_at = "//NOW// &
-                    ' WHERE id = ?1 AND ?2 = ?2;', jobs(k), '')
-            end if
+            if (checks(k) == 0) call exec(db, "UPDATE landings SET state = 'cancelled',"// &
+                ' finished_at = '//NOW//' WHERE id = ?1 AND ?2 = ?2;', jobs(k), '')
         end do
     end subroutine resume
 
@@ -162,15 +165,24 @@ contains
         call events_notify('jobs')
     end function verify_request
 
-    logical function step(db, repo, git_dir, base) result(ran)
-        !! Runs the verification `repo` needs next, if any.
+    logical function step(db, repo, git_dir, base, waits) result(ran)
+        !! Settles the running verification of `repo` once its checks ended,
+        !! else starts the one it needs next, if any; `waits` while one runs.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: repo, git_dir, base
-        character(len=:), allocatable :: head, target, out
-        integer(int64) :: request
+        logical, intent(out) :: waits
+        character(len=:), allocatable :: head, target, out, commit
+        integer(int64) :: request, running
         integer :: status
 
         ran = .false.
+        waits = .false.
+        call running_job(db, repo, running, commit)
+        if (running > 0) then
+            ran = settle(db, repo, git_dir, commit, running)
+            waits = .not. ran
+            return
+        end if
         head = rev(git_dir, 'refs/heads/main')
         if (len(head) == 0) return
         call git(git_dir, [character(len=256) :: 'cat-file', '-e', 'refs/heads/main:.fortyard/verify'], &
@@ -187,6 +199,7 @@ contains
         if (len(target) == 0) return
         call run(db, repo, git_dir, target, request)
         ran = .true.
+        waits = .true.
     end function step
 
     function next_target(db, repo, git_dir, head, base) result(target)
@@ -295,13 +308,13 @@ contains
         call events_notify('checks')
         ! The page of the job shows the check while it waits for a runner.
         call events_notify('jobs')
-        call finish(db, repo, git_dir, commit, id)
     end subroutine run
 
-    subroutine finish(db, repo, git_dir, commit, id)
-        !! Waits for the runner checks of verification job `id`, one per runner
-        !! class, and records its outcome: passed when all passed, else the
-        !! first that did not pass, with its class named when there are several.
+    logical function settle(db, repo, git_dir, commit, id) result(done)
+        !! Records the outcome of verification job `id` once its runner checks,
+        !! one per runner class, ended: passed when all passed, else the first
+        !! that did not pass, with its class named when there are several.
+        !! Not `done` while a check still waits or runs.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: repo, git_dir, commit
         integer(int64), intent(in) :: id
@@ -309,19 +322,19 @@ contains
         integer(int64), allocatable :: checks(:)
         character(len=32), allocatable :: classes(:)
         character(len=24) :: num
-        integer :: age, fd, status, k, j
-        logical :: changed, waiting
+        integer :: age, status, k, j
+        logical :: waiting
 
         write (num, '(i0)') id
         call checks_of(db, 'refs/fortyard/verify/'//trim(num), checks, classes)
-        fd = events_watch_open()
+        done = .false.
         state = ''
         log = ''
         if (size(checks) == 0) then
             state = 'failed'
             log = 'No check was queued.'
         end if
-        do while (size(checks) > 0)
+        if (size(checks) > 0) then
             ! The result waits for every class; it is the first that did not
             ! pass, else passed.
             state = 'passed'
@@ -356,9 +369,8 @@ contains
                 if (size(checks) > 1) log = live_outcome(log, 'On the runner class '// &
                     trim(classes(j))//'.')
             end do
-            if (.not. waiting) exit
-            changed = events_wait(fd, 'checks', 60000)
-        end do
+            if (waiting) return
+        end if
         call git(git_dir, [character(len=256) :: 'update-ref', '-d', &
             'refs/fortyard/verify/'//trim(num)], out, status)
         call exec(db, 'UPDATE landings SET state = ?2, log = ?3, finished_at = '//NOW// &
@@ -374,7 +386,8 @@ contains
         write (error_unit, '(a)') 'fy: verification '//trim(num)//' of '//repo//' at '// &
             commit(1:min(12, len(commit)))//' '//state
         flush (error_unit)
-    end subroutine finish
+        done = .true.
+    end function settle
 
     subroutine checks_of(db, ref, ids, classes)
         !! The runner checks queued for `ref`, one per class, oldest first.
@@ -553,6 +566,27 @@ contains
         if (stmt_step(st) == SQLITE_ROW) id = stmt_int(st, 0)
         call stmt_finalize(st)
     end function queued_request
+
+    subroutine running_job(db, repo, id, commit)
+        !! The running verification of `repo` and its commit; id 0 if none.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: repo
+        integer(int64), intent(out) :: id
+        character(len=:), allocatable, intent(out) :: commit
+        type(stmt_t) :: st
+        integer :: stat
+        id = 0
+        commit = ''
+        call db_prepare(db, "SELECT id, coalesce(commit_id, '') FROM landings WHERE kind = 'verify'"// &
+            " AND repo = ?1 AND state = 'running' ORDER BY id LIMIT 1;", st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, repo, stat)
+        if (stmt_step(st) == SQLITE_ROW) then
+            id = stmt_int(st, 0)
+            commit = stmt_text(st, 1)
+        end if
+        call stmt_finalize(st)
+    end subroutine running_job
 
     subroutine exec(db, sql, id, a, b)
         type(db_t), intent(in) :: db
