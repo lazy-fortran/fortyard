@@ -18,6 +18,8 @@ module fy_server
     use fx_json_build, only: &
         json_escape_string
     use fx_json_parse, only: &
+        json_extract_bool, &
+        json_extract_int, &
         json_extract_string
     use fx_string, only: &
         to_lower
@@ -45,6 +47,9 @@ module fy_server
         change_branch_tips, &
         change_sync, &
         change_t
+    use fy_dispatch, only: &
+        dispatch_backend, &
+        dispatch_json
     use fy_events, only: &
         events_forget, &
         events_notify, &
@@ -191,7 +196,9 @@ module fy_server
         store_repo_list, &
         store_repo_set_mode, &
         store_repo_set_number, &
+        store_repo_set_public, &
         store_snapshot, &
+        store_time_valid, &
         store_token_create, &
         store_token_list, &
         store_token_lookup, &
@@ -969,6 +976,10 @@ contains
                 end if
             end if
             if (len(rest) > 7) then
+                if (rest(len(rest) - 6:) == '/public') then
+                    call set_public(rest(1:len(rest) - 7))
+                    return
+                end if
                 if (rest(len(rest) - 6:) == '/verify') then
                     call queue_verify(rest(1:len(rest) - 7))
                     return
@@ -1490,6 +1501,38 @@ contains
             res%body = '{"name":"'//json_escape_string(target)//'","next":'//text//'}'
         end subroutine set_number
 
+        subroutine set_public(target)
+            !! POST /api/v1/repos/NAME/public {"public":true|false} (admin): whether
+            !! the repository is public, which the backends of its policy need;
+            !! 409 for making one private whose policy names backends.
+            character(len=*), intent(in) :: target
+            logical :: public, ok, refused
+
+            if (index(' '//who%scopes//' ', ' admin ') == 0) then
+                call fail(res, 403, 'marking a repository public or private needs the admin scope')
+                return
+            end if
+            call json_extract_bool(req%body, 'public', public, ok)
+            if (.not. ok) then
+                call fail(res, 400, 'body must be {"public":true} or {"public":false}')
+                return
+            end if
+            call store_repo_set_public(db, target, public, ok, refused)
+            if (refused) then
+                call fail(res, 409, 'the policy of '//target//' names backends, which need a'// &
+                    ' public repository; set backends= first')
+                return
+            end if
+            if (.not. ok) then
+                call fail(res, 404, 'no such repository')
+                return
+            end if
+            call audit_append(db, who%account, 'repo.public', target, &
+                trim(merge('public ', 'private', public)))
+            res%body = '{"name":"'//json_escape_string(target)//'","public":'// &
+                trim(merge('true ', 'false', public))//'}'
+        end subroutine set_public
+
     end subroutine repos_route
 
     pure logical function upstream_ok(url)
@@ -1884,6 +1927,12 @@ contains
         case ('/-/login/callback')
             if (.not. method_is(req, 'GET', res)) return
             call login_finish(req, db, res)
+        case ('/api/v1/backends')
+            ! Each runner class with its runners or backend processes and the
+            ! estimates of doc/backends.md (fy_dispatch).
+            if (.not. method_is(req, 'GET', res)) return
+            if (.not. authenticated(req, db, who, res)) return
+            res%body = dispatch_json(db)
         case ('/api/v1/changes')
             ! The changes of every repository, as GET /api/v1/repos/R/changes.
             if (.not. method_is(req, 'GET', res)) return
@@ -2168,8 +2217,11 @@ contains
         !! POST /api/v1/checks/claim {"class":"..."}: the next queued check of
         !! that runner class (default linux) for the calling runner (200 with
         !! {"id","repo","ref","kind","timeout"}, timeout in seconds and 0 for
-        !! none, or 204 when there is none).
-        !! POST /api/v1/checks/N/result {"passed":true|false,"log":"..."}, or
+        !! none, or 204 when there is none). A backend process (class github-*
+        !! or gitlab-*) adds its time limit and concurrency limit,
+        !! "max_minutes" and "max_running", and is given what fy_dispatch allows.
+        !! POST /api/v1/checks/N/result {"passed":true|false,"log":"...",
+        !! "started_at":"ISO time"} (started_at optional: the claim's time), or
         !! {"error":"timeout"|"runner","log":"..."} for a check that ended
         !! without a verdict: it is queued again, at its second timeout it
         !! ends in the state timeout. Only the runner that holds the check
@@ -2181,9 +2233,10 @@ contains
         type(response_t), intent(inout) :: res
         type(token_identity_t) :: who
         character(len=:), allocatable :: repo, ref, log, kind, error, state, class
+        character(len=:), allocatable :: started
         character(len=24) :: num, limit
         integer(int64) :: id
-        integer :: ios, k, seconds
+        integer :: ios, k, seconds, minutes, most
         logical :: found, ok
 
         if (.not. authenticated(req, db, who, res)) return
@@ -2209,7 +2262,25 @@ contains
                 call fail(res, 400, 'a runner class is 1 to 32 of a-z, 0-9 and -')
                 return
             end if
-            call store_check_claim(db, who%token_name, id, repo, ref, found, kind, seconds, class)
+            ! A backend process's limits; 0: the default of its class.
+            minutes = 0
+            most = 0
+            if (dispatch_backend(class)) then
+                if (index(req%body, '"max_minutes"') > 0) then
+                    call json_extract_int(req%body, 'max_minutes', minutes, found)
+                    if (.not. found) minutes = -1
+                end if
+                if (index(req%body, '"max_running"') > 0) then
+                    call json_extract_int(req%body, 'max_running', most, found)
+                    if (.not. found) most = -1
+                end if
+            end if
+            if (minutes < 0 .or. minutes > 10080 .or. most < 0 .or. most > 1000) then
+                call fail(res, 400, 'max_minutes is 1 to 10080 and max_running 1 to 1000')
+                return
+            end if
+            call store_check_claim(db, who%token_name, id, repo, ref, found, kind, seconds, &
+                class, max_minutes=minutes, max_running=most)
             if (.not. found) then
                 res%code = 204
                 res%body = ''
@@ -2253,7 +2324,16 @@ contains
                 runner=who%token_name)
         else
             state = merge('passed', 'failed', ok)
-            call store_check_finish(db, id, who%token_name, state, log, found)
+            call json_extract_string(req%body, 'started_at', started, found)
+            if (found) then
+                if (.not. iso_time(started) .or. .not. store_time_valid(db, started)) then
+                    call fail(res, 400, 'started_at is a time as 2026-11-12T08:30:00Z')
+                    return
+                end if
+                call store_check_finish(db, id, who%token_name, state, log, found, started)
+            else
+                call store_check_finish(db, id, who%token_name, state, log, found)
+            end if
         end if
         if (.not. found) then
             call fail(res, 409, 'no running check with that number')
@@ -2263,6 +2343,29 @@ contains
         res%body = '{"recorded":true,"state":"'//state//'"}'
 
     contains
+
+        pure logical function iso_time(t)
+            !! YYYY-MM-DDTHH:MM:SS, then nothing, fractions, Z or an offset.
+            character(len=*), intent(in) :: t
+            character(len=*), parameter :: D = '0123456789'
+            integer :: i
+
+            iso_time = .false.
+            if (len(t) < 19 .or. len(t) > 35) return
+            do i = 1, 19
+                select case (i)
+                case (5, 8)
+                    if (t(i:i) /= '-') return
+                case (11)
+                    if (t(i:i) /= 'T' .and. t(i:i) /= ' ') return
+                case (14, 17)
+                    if (t(i:i) /= ':') return
+                case default
+                    if (index(D, t(i:i)) == 0) return
+                end select
+            end do
+            iso_time = verify(t(20:), D//'.:+-Z') == 0
+        end function iso_time
 
         subroutine append_log()
             !! POST /api/v1/checks/N/log?offset=O with the bytes the check wrote

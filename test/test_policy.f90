@@ -100,7 +100,7 @@ program test_policy
     call check(stat /= 0 .and. index(out, 'check_timeout is 0') > 0, &
         'a time limit over a week is refused: '//out)
     call run(in//fy//' repo policy demo verify_on=linux,macos-arm64')
-    call check(stat == 0 .and. index(out, '"verify_on":"linux,macos-arm64"}') > 0, &
+    call check(stat == 0 .and. index(out, '"verify_on":"linux,macos-arm64",') > 0, &
         'main is verified on the runner classes set: '//out)
     call run(in//fy//' repo policy demo verify_on=MacOS')
     call check(stat /= 0 .and. index(out, 'verify_on is runner classes') > 0, &
@@ -333,7 +333,7 @@ contains
         call policy_get(db, 'unit', p)
         call check(found .and. policy_json('unit', p) == '{"name":"unit","tests":"affected",'// &
             '"review":"after","bisect":"off","batch":4,"unreviewed_limit":3,"check_timeout":90,'// &
-            '"verify_on":"linux"}', &
+            '"verify_on":"linux","backends":"","egress":"","public":false}', &
             'a policy is stored: '//policy_json('unit', p))
         call policy_get(db, 'demo', p)
         call check(p%tests == 'full' .and. p%batch == 8, 'for its repository only')

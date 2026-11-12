@@ -142,6 +142,23 @@ contains
         call migration_add(list, 'landings-by-check-id', &
             'CREATE INDEX landings_by_check ON landings (check_id);')
 
+        ! Check backends (doc/backends.md "Data model" and "Dispatch"): the class
+        ! a check ran on, when it started running, its twin when raced; whether
+        ! a repository is public and the backends and extra egress hosts its
+        ! policy allows; and the runners and backend processes as they last
+        ! asked for a check, with the limits a backend process sends. The
+        ! index serves the estimates, which read a repository's checks per class.
+        call migration_add(list, 'check-backends-dispatch', &
+            'ALTER TABLE checks ADD COLUMN ran_class TEXT;'// &
+            'ALTER TABLE checks ADD COLUMN started_at TEXT;'// &
+            'ALTER TABLE checks ADD COLUMN twin INTEGER;'// &
+            'ALTER TABLE repos ADD COLUMN public INTEGER NOT NULL DEFAULT 0;'// &
+            "ALTER TABLE repos ADD COLUMN policy_backends TEXT NOT NULL DEFAULT '';"// &
+            "ALTER TABLE repos ADD COLUMN policy_egress TEXT NOT NULL DEFAULT '';"// &
+            'CREATE TABLE runners (name TEXT PRIMARY KEY, class TEXT NOT NULL,'// &
+            ' seen_at TEXT NOT NULL, max_minutes INTEGER, max_running INTEGER);'// &
+            'CREATE INDEX checks_by_ran_class ON checks (repo, coalesce(ran_class, class), state);')
+
     end subroutine migrations_registry
 
 end module fy_migrations

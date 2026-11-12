@@ -68,6 +68,8 @@ program fy
     select case (command)
     case ('audit')
         call cmd_audit()
+    case ('backends')
+        call cmd_backends()
     case ('board')
         call cmd_stats(.true.)
     case ('change')
@@ -140,6 +142,8 @@ contains
             '  repo create NAME    create an empty repository that takes pushes (admin)', &
             '  repo mode NAME MODE primary: take pushes; mirror: follow upstream (admin)', &
             '  repo numbers NAME N number the next change or issue N and count on (admin)', &
+            '  repo public NAME on|off', &
+            '                      the repository is public, which backends= needs (admin)', &
             '  repo policy NAME [KEY=VALUE ...]', &
             '                      show the policy of a repository, or set (admin):', &
             '                      tests=full|affected|none  the check before landing', &
@@ -157,6 +161,10 @@ contains
             '                        with the reason timeout (default 60; 0: no limit)', &
             '                      verify_on=CLASS[,CLASS...]  runner classes each', &
             '                        verification of main runs on (default linux)', &
+            '                      backends=github,gitlab  external backends its checks', &
+            '                        may run on (public repositories only; empty: none)', &
+            '                      egress=DOMAIN[,DOMAIN...]  hosts its checks reach', &
+            '                        beyond the executor allowlist', &
             '  repo list           list repositories', &
             '                      clone and push: git clone http://x:TOKEN@HOST/NAME.git', &
         ! runners
@@ -164,6 +172,9 @@ contains
             '                      perform landing checks for the server (scope runner);', &
             '                        --class: the runner class whose checks it takes', &
             '                        (default linux; e.g. macos-arm64)', &
+            '  backends [--json]   runner classes with their runners or backend processes,', &
+            '                      running and waiting checks, limits, median wait, and', &
+            '                      run time per repository with the checks it rests on', &
         ! landing and pushing
             '  land [BRANCH] [--repo NAME] [--no-push] [--no-wait]', &
             '                      push HEAD to BRANCH, land it on main after its check', &
@@ -954,6 +965,29 @@ contains
         write (output_unit, '(a)', advance='no') cli_stats(body)
     end subroutine cmd_stats
 
+    subroutine cmd_backends()
+        !! fy backends [--json]: each runner class and the run time estimates
+        !! per repository (GET /api/v1/backends).
+        type(config_t) :: cfg
+        character(len=:), allocatable :: body
+        integer :: code, stat
+
+        call config_load(cfg)
+        call require_login(cfg)
+        call client_request(cfg%server, 'GET', '/api/v1/backends', cfg%token, '', code, body, &
+            stat)
+        if (stat /= 0 .or. code /= 200 .or. flag('--json')) then
+            call report(code, body, stat)
+            return
+        end if
+        write (output_unit, '(a)', advance='no') cli_table(body, 'classes', &
+            [character(len=11) :: 'class', 'runners', 'running', 'queued', 'max_running', &
+            'max_minutes', 'wait'])
+        write (output_unit, '(a)') ''
+        write (output_unit, '(a)', advance='no') cli_table(body, 'estimates', &
+            [character(len=7) :: 'class', 'repo', 'run', 'checks'])
+    end subroutine cmd_backends
+
     subroutine cmd_landings()
         !! fy landings [REPO]: recent landings of a repository.
         type(config_t) :: cfg
@@ -1554,6 +1588,16 @@ contains
             call client_request(cfg%server, 'POST', '/api/v1/repos/'//arg(3)//'/numbers', &
                 cfg%token, '{"next":"'//json_escape_string(arg(4))//'"}', code, body, stat)
             call report(code, body, stat)
+        case ('public')
+            if (len(arg(3)) == 0 .or. (arg(4) /= 'on' .and. arg(4) /= 'off')) then
+                write (error_unit, '(a)') 'fy: usage: fy repo public NAME on|off'
+                call quit(2)
+            end if
+            call require_login(cfg)
+            call client_request(cfg%server, 'POST', '/api/v1/repos/'//arg(3)//'/public', &
+                cfg%token, '{"public":'//trim(merge('true ', 'false', arg(4) == 'on'))//'}', code, &
+                body, stat)
+            call report(code, body, stat)
         case ('policy')
             if (len(arg(3)) == 0) then
                 write (error_unit, '(a)') 'fy: usage: fy repo policy NAME [KEY=VALUE ...]'
@@ -1572,7 +1616,8 @@ contains
             call cmd_get('/api/v1/repos')
         case default
             write (error_unit, '(a)') 'fy: usage: fy repo add NAME URL | create NAME |'// &
-                ' mode NAME MODE | numbers NAME N | policy NAME [KEY=VALUE ...] | list'
+                ' mode NAME MODE | numbers NAME N | policy NAME [KEY=VALUE ...] | public NAME on|off'// &
+                ' | list'
             call quit(2)
         end select
     end subroutine cmd_repo

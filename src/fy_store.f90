@@ -6,6 +6,12 @@ module fy_store
         int8
     use fx_hash, only: &
         sha256_string
+    use fy_dispatch, only: &
+        DISPATCH_SEEN, &
+        dispatch_backend, &
+        dispatch_candidates, &
+        dispatch_max_minutes, &
+        dispatch_max_running
     use fy_live, only: &
         LIVE_EARLIER
     use fy_migrations, only: &
@@ -52,6 +58,7 @@ module fy_store
         store_check_holder, &
         store_check_jobs, &
         store_check_release, &
+        store_check_take, &
         store_job, &
         store_job_checks, &
         store_job_counts, &
@@ -82,8 +89,10 @@ module fy_store
         store_repo_list, &
         store_repo_set_mode, &
         store_repo_set_number, &
+        store_repo_set_public, &
         store_schema_version, &
         store_snapshot, &
+        store_time_valid, &
         store_token_create, &
         store_token_list, &
         store_token_lookup, &
@@ -172,6 +181,11 @@ module fy_store
         LIVE_EARLIER//"' || char(10) || log END"
     !! How long a check waits for the runner that checked its repository last.
     character(len=*), parameter :: AFFINITY_SECONDS = '20'
+    !! Takes check ?3 (or the subquery after it) for runner ?1 of class ?2.
+    character(len=*), parameter :: TAKE = "UPDATE checks SET state = 'running', runner = ?1,"// &
+        ' ran_class = ?2, claimed_at = '//NOW//', started_at = '//NOW//', time_limit = CASE'// &
+        " WHEN kind = 'verify' THEN 21600 ELSE coalesce((SELECT 60*policy_check_timeout FROM"// &
+        ' repos WHERE name = checks.repo), 3600) END WHERE id = '
     !! A job with the number and title of its change and its place among the
     !! entries of that change (job_read).
     character(len=*), parameter :: JOB_COLS = 'SELECT l.id, l.repo, l.branch, l.account,'// &
@@ -821,6 +835,39 @@ contains
         call stmt_finalize(st)
     end subroutine store_repo_set_mode
 
+    subroutine store_repo_set_public(db, name, public, found, refused)
+        !! Marks repository `name` public or private. A repository whose
+        !! policy names backends stays public (`refused`): they would put a
+        !! private repository's code on another system.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: name
+        logical, intent(in) :: public
+        logical, intent(out) :: found, refused
+        type(stmt_t) :: st
+        integer :: stat
+
+        found = .false.
+        refused = .false.
+        call db_prepare(db, "SELECT policy_backends <> '' FROM repos WHERE name = ?1;", st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, name, stat)
+        if (stmt_step(st) == SQLITE_ROW) then
+            found = .true.
+            refused = .not. public .and. stmt_int(st, 0) /= 0
+        end if
+        call stmt_finalize(st)
+        if (.not. found .or. refused) return
+        call db_prepare(db, 'UPDATE repos SET public = ?2 WHERE name = ?1 AND (?2 = 1 OR'// &
+            " policy_backends = '') RETURNING id;", st, stat)
+        found = .false.
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, name, stat)
+        call stmt_bind_int(st, 2, int(merge(1, 0, public), int64), stat)
+        found = stmt_step(st) == SQLITE_ROW
+        refused = .not. found
+        call stmt_finalize(st)
+    end subroutine store_repo_set_public
+
     subroutine store_repo_set_number(db, name, next, found)
         !! The repository's next change or issue takes the number `next`.
         type(db_t), intent(in) :: db
@@ -1439,7 +1486,8 @@ contains
         call stmt_finalize(st)
     end subroutine store_check_cancel
 
-    subroutine store_check_claim(db, runner, id, repo, ref, found, kind, limit, class)
+    subroutine store_check_claim(db, runner, id, repo, ref, found, kind, limit, class, &
+            max_minutes, max_running)
         !! Gives `runner` the queued check that shares the runners fairly:
         !! landing checks before verifications, then the check of the
         !! repository that holds the fewest running checks, then the oldest.
@@ -1452,12 +1500,113 @@ contains
         !! hours for a verification, else the repository's check_timeout.
         !! Only checks of the runner's `class` (default linux) are given, and
         !! affinity is to the runner that last served the repository in it.
+        !! The claim records the class the check ran on and starts its clock.
+        !! A backend class (fy_dispatch) is given one of the checks
+        !! dispatch_candidates names for its time limit `max_minutes`, while
+        !! fewer than `max_running` checks run on that class; 0 or absent: the
+        !! defaults of the class; each is taken
+        !! only while it is still queued. Every claim records when the runner
+        !! last asked (runners), for wait(C).
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: runner
         character(len=*), intent(in), optional :: class
         integer(int64), intent(out) :: id
         character(len=:), allocatable, intent(out) :: repo, ref
         logical, intent(out) :: found
+        character(len=:), allocatable, intent(out), optional :: kind
+        integer, intent(out), optional :: limit
+        integer, intent(in), optional :: max_minutes, max_running
+        character(len=:), allocatable :: cls
+        integer(int64), allocatable :: ids(:)
+        type(stmt_t) :: st
+        integer :: stat, minutes, most, k
+
+        found = .false.
+        id = 0
+        repo = ''
+        ref = ''
+        if (present(limit)) limit = 0
+        cls = 'linux'
+        if (present(class)) cls = class
+        minutes = dispatch_max_minutes(cls)
+        if (present(max_minutes)) then
+            if (max_minutes > 0) minutes = max_minutes
+        end if
+        most = dispatch_max_running(cls)
+        if (present(max_running)) then
+            if (max_running > 0) most = max_running
+        end if
+        call db_prepare(db, 'INSERT INTO runners (name, class, seen_at, max_minutes, max_running)'// &
+            ' VALUES (?1, ?2, '//NOW//', ?3, ?4) ON CONFLICT (name) DO UPDATE SET class ='// &
+            ' excluded.class, seen_at = excluded.seen_at, max_minutes = excluded.max_minutes,'// &
+            ' max_running = excluded.max_running;', st, stat)
+        if (stat == SQLITE_OK) then
+            call stmt_bind_text(st, 1, runner, stat)
+            call stmt_bind_text(st, 2, cls, stat)
+            if (dispatch_backend(cls)) then
+                call stmt_bind_int(st, 3, int(minutes, int64), stat)
+                call stmt_bind_int(st, 4, int(most, int64), stat)
+            end if
+            stat = stmt_step(st)
+            call stmt_finalize(st)
+        end if
+        if (dispatch_backend(cls)) then
+            call dispatch_candidates(db, cls, minutes, ids)
+            do k = 1, size(ids)
+                call store_check_take(db, runner, cls, ids(k), most, found, id, repo, ref, kind, limit)
+                if (found) return
+            end do
+            return
+        end if
+        call db_prepare(db, TAKE//"(SELECT c.id FROM checks c WHERE c.state = 'queued' AND"// &
+            ' c.class = ?2 AND NOT'// &
+            ' (c.created_at > strftime('//"'%Y-%m-%dT%H:%M:%SZ', 'now',"// &
+            " '-"//AFFINITY_SECONDS//" seconds') AND EXISTS (SELECT 1 FROM checks p WHERE p.id ="// &
+            ' (SELECT q.id FROM checks q WHERE q.repo = c.repo AND'// &
+            ' coalesce(q.ran_class, q.class) = c.class AND'// &
+            ' q.runner IS NOT NULL ORDER BY'// &
+            ' q.id DESC LIMIT 1) AND p.runner <> ?1 AND NOT EXISTS (SELECT 1 FROM checks b WHERE'// &
+            " b.state = 'running' AND b.runner = p.runner)))"// &
+            " ORDER BY c.kind = 'verify', (SELECT count(*) FROM checks r WHERE r.state ="// &
+            " 'running' AND r.repo = c.repo AND coalesce(r.ran_class, r.class) = c.class), c.id LIMIT 1)"// &
+            " RETURNING id,"// &
+            ' repo, ref, kind,'// &
+            ' time_limit;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call claim_row()
+
+    contains
+
+        subroutine claim_row()
+            call stmt_bind_text(st, 1, runner, stat)
+            call stmt_bind_text(st, 2, cls, stat)
+            if (stmt_step(st) == SQLITE_ROW) then
+                id = stmt_int(st, 0)
+                repo = stmt_text(st, 1)
+                ref = stmt_text(st, 2)
+                if (present(kind)) kind = stmt_text(st, 3)
+                if (present(limit)) limit = int(stmt_int(st, 4))
+                found = .true.
+            end if
+            call stmt_finalize(st)
+        end subroutine claim_row
+
+    end subroutine store_check_claim
+
+    subroutine store_check_take(db, runner, class, check, most, found, id, repo, ref, kind, limit)
+        !! Gives `runner` of the backend class `class` the check `check` while
+        !! it is still queued, fewer than `most` checks run on the class and,
+        !! for a GitHub class, fewer than the largest limit a GitHub backend
+        !! process seen lately sent run on all GitHub classes: GitHub limits
+        !! the jobs of an organisation. One statement, so of two claims that
+        !! chose the same check only one gets it.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: runner, class
+        integer(int64), intent(in) :: check
+        integer, intent(in) :: most
+        logical, intent(out) :: found
+        integer(int64), intent(out) :: id
+        character(len=:), allocatable, intent(out) :: repo, ref
         character(len=:), allocatable, intent(out), optional :: kind
         integer, intent(out), optional :: limit
         type(stmt_t) :: st
@@ -1468,28 +1617,17 @@ contains
         repo = ''
         ref = ''
         if (present(limit)) limit = 0
-        call db_prepare(db, "UPDATE checks SET state = 'running', runner = ?1, claimed_at = "// &
-            NOW//", time_limit = CASE WHEN kind = 'verify' THEN 21600 ELSE coalesce((SELECT"// &
-            ' 60*policy_check_timeout FROM repos WHERE name = checks.repo), 3600) END'// &
-            " WHERE id = (SELECT c.id FROM checks c WHERE c.state = 'queued' AND c.class = ?2"// &
-            ' AND NOT'// &
-            ' (c.created_at > strftime('//"'%Y-%m-%dT%H:%M:%SZ', 'now',"// &
-            " '-"//AFFINITY_SECONDS//" seconds') AND EXISTS (SELECT 1 FROM checks p WHERE p.id ="// &
-            ' (SELECT q.id FROM checks q WHERE q.repo = c.repo AND q.class = c.class AND'// &
-            ' q.runner IS NOT NULL ORDER BY'// &
-            ' q.id DESC LIMIT 1) AND p.runner <> ?1 AND NOT EXISTS (SELECT 1 FROM checks b WHERE'// &
-            " b.state = 'running' AND b.runner = p.runner)))"// &
-            " ORDER BY c.kind = 'verify', (SELECT count(*) FROM checks r WHERE r.state ="// &
-            " 'running' AND r.repo = c.repo AND r.class = c.class), c.id LIMIT 1) RETURNING id,"// &
-            ' repo, ref, kind,'// &
+        call db_prepare(db, TAKE//"?3 AND state = 'queued' AND (SELECT count(*) FROM checks r"// &
+            " WHERE r.state = 'running' AND r.ran_class = ?2) < ?4 AND (?2 NOT LIKE 'github-%'"// &
+            " OR (SELECT count(*) FROM checks r WHERE r.state = 'running' AND r.ran_class LIKE"// &
+            " 'github-%') < (SELECT max(max_running) FROM runners WHERE class LIKE 'github-%'"// &
+            ' AND (seen_at >= '//DISPATCH_SEEN//' OR name = ?1))) RETURNING id, repo, ref, kind,'// &
             ' time_limit;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, runner, stat)
-        if (present(class)) then
-            call stmt_bind_text(st, 2, class, stat)
-        else
-            call stmt_bind_text(st, 2, 'linux', stat)
-        end if
+        call stmt_bind_text(st, 2, class, stat)
+        call stmt_bind_int(st, 3, check, stat)
+        call stmt_bind_int(st, 4, int(most, int64), stat)
         if (stmt_step(st) == SQLITE_ROW) then
             id = stmt_int(st, 0)
             repo = stmt_text(st, 1)
@@ -1499,7 +1637,7 @@ contains
             found = .true.
         end if
         call stmt_finalize(st)
-    end subroutine store_check_claim
+    end subroutine store_check_take
 
     subroutine store_check_release(db, runner, count)
         !! Queues the running checks of `runner` again; `count` of them.
@@ -1511,8 +1649,8 @@ contains
 
         count = 0
         call db_prepare(db, "UPDATE checks SET state = 'queued', runner = NULL, claimed_at = NULL,"// &
-            ' queued_at = '//NOW//" WHERE state = 'running' AND runner = ?1 RETURNING id;", st, &
-            stat)
+            ' ran_class = NULL, started_at = NULL, queued_at = '//NOW//" WHERE state = 'running' AND"// &
+            ' runner = ?1 RETURNING id;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, runner, stat)
         do while (stmt_step(st) == SQLITE_ROW)
@@ -1556,6 +1694,8 @@ contains
             LOG_FIRST//', state = CASE WHEN ?2 = 1 AND timeouts >= 1'// &
             " THEN 'timeout' ELSE 'queued' END, runner = CASE WHEN ?2 = 1 AND timeouts >= 1 THEN"// &
             ' runner END, claimed_at = CASE WHEN ?2 = 1 AND timeouts >= 1 THEN claimed_at END,'// &
+            ' ran_class = CASE WHEN ?2 = 1 AND timeouts >= 1 THEN ran_class END, started_at = CASE'// &
+            ' WHEN ?2 = 1 AND timeouts >= 1 THEN started_at END,'// &
             ' finished_at = CASE WHEN ?2 = 1 AND timeouts >= 1 THEN '//NOW//' END, queued_at ='// &
             ' '//NOW//" WHERE id = ?1 AND state = 'running'"//only//' RETURNING state;', st, stat)
         if (stat /= SQLITE_OK) return
@@ -1571,26 +1711,32 @@ contains
         call stmt_finalize(st)
     end subroutine store_check_error
 
-    subroutine store_check_finish(db, id, runner, state, log, found)
+    subroutine store_check_finish(db, id, runner, state, log, found, started_at)
         !! Records the result of a check that `runner` holds: "passed" or
         !! "failed". A runner whose claim was taken from it as lost finds
         !! nothing. `log` goes before what earlier attempts left in its log.
+        !! `started_at` (ISO 8601) is when it actually started running, for a
+        !! backend the external job's start; kept between the check's
+        !! creation and now. Without it the claim's time stays.
         type(db_t), intent(in) :: db
         integer(int64), intent(in) :: id
         character(len=*), intent(in) :: runner, state, log
         logical, intent(out) :: found
+        character(len=*), intent(in), optional :: started_at
         type(stmt_t) :: st
         integer :: stat
 
         found = .false.
         call db_prepare(db, 'UPDATE checks SET state = ?2, log = '//LOG_FIRST// &
-            ', finished_at = '//NOW//" WHERE id = ?1 AND state = 'running' AND runner = ?4"// &
-            ' RETURNING id;', st, stat)
+            ', finished_at = '//NOW//', started_at = coalesce(max(created_at,'// &
+            " min(strftime('%Y-%m-%dT%H:%M:%SZ', ?5), "//NOW//')), started_at)'// &
+            " WHERE id = ?1 AND state = 'running' AND runner = ?4 RETURNING id;", st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, id, stat)
         call stmt_bind_text(st, 2, state, stat)
         call stmt_bind_text(st, 3, log, stat)
         call stmt_bind_text(st, 4, runner, stat)
+        if (present(started_at)) call stmt_bind_text(st, 5, started_at, stat)
         found = stmt_step(st) == SQLITE_ROW
         call stmt_finalize(st)
     end subroutine store_check_finish
@@ -1777,5 +1923,20 @@ contains
             token(3 + 2*i:3 + 2*i) = hex(mod(b, 16) + 1:mod(b, 16) + 1)
         end do
     end function random_token
+
+    logical function store_time_valid(db, text)
+        !! `text` is a time SQLite reads, so a stored one compares and counts.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: text
+        type(stmt_t) :: st
+        integer :: stat
+
+        store_time_valid = .false.
+        call db_prepare(db, "SELECT strftime('%s', ?1) IS NOT NULL;", st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, text, stat)
+        if (stmt_step(st) == SQLITE_ROW) store_time_valid = stmt_int(st, 0) == 1
+        call stmt_finalize(st)
+    end function store_time_valid
 
 end module fy_store

@@ -18,6 +18,11 @@ module fy_policy
     !!   verify_on         runner classes, comma-separated  each verification
     !!                     of main runs once on each and passes when all pass;
     !!                     landing checks run on linux
+    !!   backends          github, gitlab, comma-separated, or none  the
+    !!                     external backends checks may run on; only for a
+    !!                     public repository (doc/backends.md)
+    !!   egress            domains, comma-separated  hosts its checks reach
+    !!                     beyond the executor's allowlist
     use, intrinsic :: iso_fortran_env, only: &
         int64
     use fx_json_build, only: &
@@ -77,7 +82,7 @@ module fy_policy
     character(len=*), parameter, public :: POLICY_KEYS = &
         'tests=full|affected|none review=after|before bisect=on|off batch=1..64'// &
         ' unreviewed_limit=N (0: no limit) check_timeout=MINUTES (0: no limit)'// &
-        ' verify_on=CLASS[,CLASS...]'
+        ' verify_on=CLASS[,CLASS...] backends=github,gitlab egress=DOMAIN[,DOMAIN...]'
 
     type :: policy_t
         character(len=:), allocatable :: tests, review
@@ -86,6 +91,11 @@ module fy_policy
         integer :: unreviewed_limit = 0
         integer :: check_timeout = 60
         character(len=:), allocatable :: verify_on
+        !! External backends (github, gitlab) and extra egress domains, comma-
+        !! separated; empty for none.
+        character(len=:), allocatable :: backends, egress
+        !! repos.public, read with the policy and set by fy repo public.
+        logical :: public = .false.
     end type policy_t
 
     !! A landed change that still waits for a review: flagged for a person, or
@@ -108,9 +118,12 @@ contains
         p%tests = 'full'
         p%review = 'after'
         p%verify_on = 'linux'
+        p%backends = ''
+        p%egress = ''
         if (present(found)) found = .false.
         call db_prepare(db, 'SELECT policy_tests, policy_review, policy_bisect, policy_batch,'// &
-            ' policy_unreviewed_limit, policy_check_timeout, policy_verify_on FROM repos'// &
+            ' policy_unreviewed_limit, policy_check_timeout, policy_verify_on, policy_backends,'// &
+            ' policy_egress, public FROM repos'// &
             ' WHERE name = ?1;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, repo, stat)
@@ -122,6 +135,9 @@ contains
             p%unreviewed_limit = int(stmt_int(st, 4))
             p%check_timeout = int(stmt_int(st, 5))
             p%verify_on = stmt_text(st, 6)
+            p%backends = stmt_text(st, 7)
+            p%egress = stmt_text(st, 8)
+            p%public = stmt_int(st, 9) /= 0
             if (present(found)) found = .true.
         end if
         call stmt_finalize(st)
@@ -138,7 +154,8 @@ contains
         found = .false.
         call db_prepare(db, 'UPDATE repos SET policy_tests = ?2, policy_review = ?3,'// &
             ' policy_bisect = ?4, policy_batch = ?5, policy_unreviewed_limit = ?6,'// &
-            ' policy_check_timeout = ?7, policy_verify_on = ?8 WHERE name = ?1 RETURNING id;', &
+            ' policy_check_timeout = ?7, policy_verify_on = ?8, policy_backends = ?9,'// &
+            ' policy_egress = ?10 WHERE name = ?1 RETURNING id;', &
             st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, repo, stat)
@@ -152,6 +169,16 @@ contains
             call stmt_bind_text(st, 8, p%verify_on, stat)
         else
             call stmt_bind_text(st, 8, 'linux', stat)
+        end if
+        if (allocated(p%backends)) then
+            call stmt_bind_text(st, 9, p%backends, stat)
+        else
+            call stmt_bind_text(st, 9, '', stat)
+        end if
+        if (allocated(p%egress)) then
+            call stmt_bind_text(st, 10, p%egress, stat)
+        else
+            call stmt_bind_text(st, 10, '', stat)
         end if
         found = stmt_step(st) == SQLITE_ROW
         call stmt_finalize(st)
@@ -212,6 +239,20 @@ contains
                 error = 'verify_on is runner classes separated by commas, each 1 to 32 of'// &
                     ' a-z, 0-9 and -, at most 8'
             end if
+        case ('backends')
+            if (backends_ok(value)) then
+                p%backends = value
+            else
+                error = 'backends is github, gitlab or both, separated by a comma, or empty'
+            end if
+        case ('egress')
+            if (domains_ok(value)) then
+                p%egress = value
+            else
+                error = 'egress is domain names separated by commas, at most 32, each of'// &
+                    ' labels of a-z, 0-9 and - joined by dots; no TU Graz, internal or special-use'// &
+                    ' name and no public suffix'
+            end if
         case default
             error = 'no such setting: '//key//' ('//POLICY_KEYS//')'
         end select
@@ -250,6 +291,38 @@ contains
             end do
             classes_ok = .true.
         end function classes_ok
+
+        logical function backends_ok(text)
+            character(len=*), intent(in) :: text
+
+            backends_ok = text == '' .or. text == 'github' .or. text == 'gitlab' .or. &
+                text == 'github,gitlab' .or. text == 'gitlab,github'
+        end function backends_ok
+
+        logical function domains_ok(text)
+            character(len=*), intent(in) :: text
+            integer :: i, j, n
+
+            domains_ok = .true.
+            if (len(text) == 0) return
+            domains_ok = .false.
+            i = 1
+            n = 0
+            do
+                j = index(text(i:), ',')
+                if (j == 0) then
+                    j = len(text) + 1
+                else
+                    j = i + j - 1
+                end if
+                if (.not. policy_domain_name(text(i:j - 1))) return
+                n = n + 1
+                if (n > 32) return
+                if (j > len(text)) exit
+                i = j + 1
+            end do
+            domains_ok = .true.
+        end function domains_ok
     end subroutine policy_set
 
     pure logical function policy_class_name(name)
@@ -259,6 +332,57 @@ contains
         policy_class_name = len(name) >= 1 .and. len(name) <= 32 .and. &
             verify(name, 'abcdefghijklmnopqrstuvwxyz0123456789-') == 0
     end function policy_class_name
+
+    pure logical function policy_domain_name(name)
+        !! A host name as the egress proxy matches it: 2 to 127 labels of 1 to
+        !! 63 of a-z, 0-9 and -, neither starting nor ending with -, joined by
+        !! dots, at most 253 long; the last label is not a number, so no IP
+        !! address passes. Refused, since the proxy applies the list before it
+        !! denies the TU Graz networks: TU Graz domains, special-use and
+        !! internal names, and a public suffix of two labels such as co.uk.
+        character(len=*), intent(in) :: name
+        character(len=*), parameter :: DENIED(14) = [character(len=13) :: 'tugraz.at', &
+            'tu-graz.ac.at', 'arpa', 'corp', 'home', 'internal', 'intranet', 'invalid', &
+            'lan', 'local', 'localdomain', 'localhost', 'onion', 'test']
+        character(len=*), parameter :: SUFFIXES(9) = [character(len=3) :: 'ac', 'co', 'com', &
+            'edu', 'gov', 'gv', 'net', 'or', 'org']
+        integer :: i, j, k, labels
+
+        policy_domain_name = .false.
+        if (len(name) < 3 .or. len(name) > 253) return
+        if (verify(name, 'abcdefghijklmnopqrstuvwxyz0123456789-.') /= 0) return
+        labels = 0
+        i = 1
+        do
+            j = index(name(i:), '.')
+            if (j == 0) then
+                j = len(name) + 1
+            else
+                j = i + j - 1
+            end if
+            if (j == i .or. j - i > 63) return
+            if (name(i:i) == '-' .or. name(j - 1:j - 1) == '-') return
+            labels = labels + 1
+            if (j > len(name)) exit
+            i = j + 1
+        end do
+        if (labels < 2) return
+        if (verify(name(i:), '0123456789') == 0) return
+        do k = 1, size(DENIED)
+            if (under(trim(DENIED(k)))) return
+        end do
+        if (labels == 2 .and. any(name(1:index(name, '.') - 1) == SUFFIXES)) return
+        policy_domain_name = .true.
+
+    contains
+
+        pure logical function under(domain)
+            character(len=*), intent(in) :: domain
+
+            under = name == domain
+            if (len(name) > len(domain)) under = name(len(name) - len(domain):) == '.'//domain
+        end function under
+    end function policy_domain_name
 
     subroutine policy_from_json(p, body, error)
         !! Applies the members of the JSON object `body` that name a setting;
@@ -321,6 +445,14 @@ contains
             return
         end if
         error = ''
+        if (allocated(q%backends)) then
+            if (len(q%backends) > 0 .and. .not. q%public) then
+                error = 'backends need a public repository: a private one may use neither'// &
+                    ' github nor gitlab, which would put its code on another system'// &
+                    ' (fy repo public NAME on)'
+                return
+            end if
+        end if
         p = q
 
     contains
@@ -329,7 +461,7 @@ contains
             character(len=*), intent(in) :: name
             is_setting = name == 'tests' .or. name == 'review' .or. name == 'bisect' .or. &
                 name == 'batch' .or. name == 'unreviewed_limit' .or. name == 'check_timeout' .or. &
-                name == 'verify_on'
+                name == 'verify_on' .or. name == 'backends' .or. name == 'egress'
         end function is_setting
     end subroutine policy_from_json
 
@@ -343,7 +475,18 @@ contains
         json = '{"name":"'//json_escape_string(repo)//'","tests":"'//p%tests//'","review":"'// &
             p%review//'","bisect":"'//trim(merge('on ', 'off', p%bisect))//'","batch":'// &
             itoa(p%batch)//',"unreviewed_limit":'//itoa(p%unreviewed_limit)//',"check_timeout":'// &
-            itoa(p%check_timeout)//',"verify_on":"'//on//'"}'
+            itoa(p%check_timeout)//',"verify_on":"'//on//'","backends":"'//text(p%backends)// &
+            '","egress":"'//text(p%egress)//'","public":'//trim(merge('true ', 'false', p%public))//'}'
+
+    contains
+
+        function text(s) result(t)
+            character(len=:), allocatable, intent(in) :: s
+            character(len=:), allocatable :: t
+
+            t = ''
+            if (allocated(s)) t = s
+        end function text
     end function policy_json
 
     pure logical function policy_reviewed(c)
