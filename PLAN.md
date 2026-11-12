@@ -3,7 +3,8 @@
 Delivery order for [DESIGN.md](DESIGN.md),
 [Testing at scale](doc/testing-at-scale.md), [Workflow](doc/workflow.md),
 [Parallel development](doc/parallel-development.md) and
-[Inspection, review and monitoring](doc/inspection.md). A milestone is done when its
+[Inspection, review and monitoring](doc/inspection.md) and
+[Check backends](doc/backends.md). A milestone is done when its
 behaviour is covered by tests that run with `fo test` and it runs on the
 development instance.
 
@@ -341,6 +342,57 @@ implement one prepared issue on a scratch copy of fortyard, all of them in
 `src/fy_server.f90`, `src/fy_store.f90` and `app/fy.f90`, and every change is
 landed or shown on the board as waiting for the person, without the person
 merging, rebasing or testing anything.
+
+### MB Check backends
+
+Checks run wherever the result comes soonest: own runners, GitHub's hosted
+runners for public repositories, GitLab runners of our groups, behind a
+network allowlist, with every credential in the smallest scope and no change
+to the Computor services on the same host ([Check backends](doc/backends.md)).
+Items with the same letter can be built at the same time against the
+interfaces the document fixes (data model, routes, result body); a letter
+starts when the letters before it have landed.
+
+- [ ] MB1 (A) Allowlist and isolation: the egress proxy (`deploy/egress/`,
+      squid, lists per role, TU Graz and private networks denied on the
+      resolved address, no DNS in the containers, learning mode for public
+      hosts of the executor); internal networks for server, runners and
+      backend processes; the relay container publishing the server's port for
+      Traefik; the local runner off the server's network namespace; compose
+      files and install scripts updated. A test brings up the proxy with a
+      list and checks that an allowed host is reached and a TU Graz address, a
+      private address, a literal IP and an unlisted host are refused.
+- [ ] MB2 (A) Runner split: `fy runner` as controller and executor in two
+      containers sharing a work directory; the controller hands a check over
+      as files and reads its output and exit status the same way, and stops
+      it on cancellation. A test runs a check that looks for the runner token
+      in its environment and the files it can read, and fails if it finds it.
+- [ ] MB3 (A) Dispatch: migration with `checks.ran_class`, `started_at`,
+      `twin` and `repos.public`; `fy repo public`; the policy keys `backends=`
+      and `egress=` with their validation; the result body's optional
+      `started_at`; standing-in classes and the estimate of the document;
+      claim rule and concurrency limits; `GET /api/v1/backends` and
+      `fy backends`. Tests with recorded check rows.
+- [ ] MB4 (A) GitHub backend: `POST/DELETE /api/v1/checks/N/publish` (server
+      pushes and deletes `fortyard/check/<id>` with the deploy key);
+      `fy backend github` (App JWT with `openssl`, per-repository installation
+      tokens, run found by branch and workflow path, ETag polling, job log,
+      result with `started_at`, run deleted, sweep, refusal of a changed
+      workflow file) and `fy backend github setup REPO` with its checks; the
+      shipped workflow `deploy/github/fortyard.yml`. Tests against a local git
+      remote and a fake API.
+- [ ] MB5 (A) GitLab backend: `fy backend gitlab` (project token, push of
+      `check/<id>`, pipeline started through the API with the fixed
+      configuration file, job found and polled, log, result with `started_at`,
+      pipeline and branch deleted, sweep, start-wait back-off, job timeout),
+      toolchain images, the job cache and fo's cache in the package registry.
+      Tests against a local git remote and a fake API.
+- [ ] MB6 (B) Racing: twin checks when estimates differ by less than 25 %, the
+      first verdict counts, the other run cancelled (backend cancels its run,
+      own runner stops at its next log upload). Builds on MB3 and MB2.
+- [ ] MB7 (A) Nightly classes: `@nightly` in `verify_on`, verification jobs
+      per nightly class once a night when `main` changed, bisection at night,
+      own issues.
 
 ### MI Inspection and monitoring
 
