@@ -1,7 +1,10 @@
 # A landing-check runner on a build host (scripts/install-runner.sh fills in
-# the @...@ values). It runs `fy runner` in remote mode through
-# scripts/remote-runner.sh: checks and repositories over the API, its own
-# limits, nothing shared with the server's host.
+# the @...@ values), split in two containers. The controller runs `fy runner`
+# in remote mode through scripts/remote-runner.sh: it holds the runner token,
+# takes checks and repositories over the API and reports. The executor next to
+# it checks out and runs the checks without the token, in @HOME@/work, which
+# both share; it sees the mirrors and releases read-only and nothing else of
+# @HOME@.
 services:
   fortyard-runner:
     image: "@IMAGE@"
@@ -12,25 +15,69 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    # Tests write to /var/tmp as on any Linux host, so it is writable too.
-    tmpfs: ["/tmp:size=4g,exec", "/var/tmp:size=2g,exec"]
+    tmpfs: ["/tmp:size=256m"]
     environment:
       FY_TARGET: "@TARGET@"
       FY_RUNNER: "@HOME@"
+      FY_EXECUTOR: "@HOME@/work"
       HOME: /tmp
       TMPDIR: "@HOME@/tmp"
+    volumes:
+      - "@HOME@:@HOME@"
+    entrypoint: ["@HOME@/bin/remote-runner.sh"]
+    # Healthy once remote-runner.sh made the directories the executor mounts,
+    # so that Docker does not create them for root.
+    healthcheck:
+      test: ["CMD", "test", "-d", "@HOME@/data/mirrors", "-a", "-d", "@HOME@/work/tmp"]
+      interval: 5s
+    mem_limit: 1g
+    cpus: 1
+    pids_limit: 256
+  fortyard-executor:
+    image: "@IMAGE@"
+    container_name: "@NAME@-executor"
+    restart: unless-stopped
+    init: true
+    user: "@UID@:@GID@"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # Tests write to /var/tmp as on any Linux host, so it is writable too.
+    tmpfs: ["/tmp:size=4g,exec", "/var/tmp:size=2g,exec"]
+    environment:
+      HOME: /tmp
+      TMPDIR: "@HOME@/work/tmp"
       # Bounded caches that persist between checks (ccache and fo evict the
       # oldest entries themselves). Runners of one host share them, as both
       # take concurrent users; base_dir lets their work trees share hits.
       CCACHE_DIR: "@CACHE@/ccache"
       CCACHE_MAXSIZE: "@CACHE_SIZE@"
-      CCACHE_BASEDIR: "@HOME@/tmp/fy-work"
+      CCACHE_BASEDIR: "@HOME@/work/fy-work"
       FO_CACHE_DIR: "@CACHE@/fo"
       FO_CACHE_MAX_SIZE: "@CACHE_SIZE@"
     volumes:
-      - "@HOME@:@HOME@"
+      - "@HOME@/work:@HOME@/work"
+      - "@HOME@/data/mirrors:@HOME@/data/mirrors:ro"
+      - "@HOME@/releases:@HOME@/releases:ro"
       - "@CACHE@:@CACHE@"
-    entrypoint: ["@HOME@/bin/remote-runner.sh"]
+    # Runs fy executor of the release named in the controller's hand-over.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        w=$$1 r=$$2
+        while :; do
+          c=$$(sed -n 's/^commit=//p' "$$w/exchange/job" "$$w/exchange/taken" 2>/dev/null | head -n 1)
+          d=$$(grep -l "^commit=$$c" "$$r"/*/RELEASE 2>/dev/null | head -n 1)
+          if [ -n "$$c" ] && [ -n "$$d" ]; then "$${d%/RELEASE}/fy" executor "$$w"; fi
+          sleep 1
+        done
+      - executor
+      - "@HOME@/work"
+      - "@HOME@/releases"
+    depends_on:
+      fortyard-runner:
+        condition: service_healthy
     mem_limit: "@MEMORY@"
     cpus: "@CPUS@"
     cpu_shares: @SHARES@

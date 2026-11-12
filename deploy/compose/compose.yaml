@@ -29,27 +29,68 @@ services:
     cpus: 2
     pids_limit: 512
     networks: [proxy]
-  # Landing checks: its own limits, the project directory read-only, the
-  # server reached on its loopback (shared network namespace).
+  # Landing checks, split in two: the controller holds the runner token,
+  # claims checks and reports them; the executor next to it checks out and
+  # runs them without the token. They share the work volume. The controller
+  # sees the project directory read-only and reaches the server on its
+  # loopback (shared network namespace).
   fortyard-runner:
     <<: *fortyard
     container_name: fortyard-runner
     network_mode: "service:fortyard"
-    # Tests write to /var/tmp as on any Linux host, so it is writable too.
-    tmpfs: ["/tmp:size=2g,exec", "/var/tmp:size=2g,exec"]
+    tmpfs: ["/tmp:size=256m"]
     environment:
       FY_HOME: /fy
+      FY_EXECUTOR: /work
       TMPDIR: /tmp
     volumes:
       - .:/fy:ro
-      - cache:/cache
+      - work:/work
     entrypoint: ["/fy/bin/start.sh", "runner"]
+    mem_limit: 1g
+    cpus: 1
+    pids_limit: 256
+    depends_on: [fortyard]
+  # The executor: no token, only the repositories (read-only), the releases
+  # (read-only, to run the controller's) and the work volume. It runs the fy
+  # of the release named in the controller's hand-over.
+  fortyard-executor:
+    <<: *fortyard
+    container_name: fortyard-executor
+    # Tests write to /var/tmp as on any Linux host, so it is writable too.
+    tmpfs: ["/tmp:size=2g,exec", "/var/tmp:size=2g,exec"]
+    environment:
+      HOME: /tmp
+      TMPDIR: /tmp
+    volumes:
+      - work:/work
+      - ./data/repos:/fy/data/repos:ro
+      - ./releases:/fy/releases:ro
+      - cache:/cache
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        w=$$1 r=$$2
+        while :; do
+          c=$$(sed -n 's/^commit=//p' "$$w/exchange/job" "$$w/exchange/taken" 2>/dev/null | head -n 1)
+          d=$$(grep -l "^commit=$$c" "$$r"/*/RELEASE 2>/dev/null | head -n 1)
+          if [ -n "$$c" ] && [ -n "$$d" ]; then "$${d%/RELEASE}/fy" executor "$$w"; fi
+          sleep 1
+        done
+      - executor
+      - /work
+      - /fy/releases
     mem_limit: 6g
     cpus: 4
     pids_limit: 1024
-    depends_on: [fortyard]
+    depends_on: [fortyard-runner]
 volumes:
   cache:
+  # Work trees and hand-over files, in memory as the runner's /tmp was;
+  # shared by the two containers, which run as the same user.
+  work:
+    driver_opts: {type: tmpfs, device: tmpfs, o: "size=2g,mode=1777"}
 networks:
   proxy:
     external: true

@@ -8,7 +8,9 @@ set -eu
 : "${FY_TARGET:?}" "${FY_RUNNER:?}"
 home=$FY_RUNNER
 tok=$(cat "$home/token")
-mkdir -p "$home/releases" "$home/data"
+# FY_EXECUTOR: the directory shared with the executor container, which then
+# runs the checks; it mounts that directory and the mirrors.
+mkdir -p "$home/releases" "$home/data/mirrors" ${FY_EXECUTOR:+"$FY_EXECUTOR/tmp"}
 while :; do
     commit=$(curl -fsS -m 10 "$FY_TARGET/api/v1/version" |
         sed -n 's/.*"commit":"\([0-9a-f]*\)".*/\1/p' || true)
@@ -44,7 +46,7 @@ while :; do
         fi
         if [ -x "$dir/fy" ]; then
             "$dir/fy" runner --server "$FY_TARGET" --token-file "$home/token" \
-                --data "$home/data" || true
+                --data "$home/data" ${FY_EXECUTOR:+--executor "$FY_EXECUTOR"} || true
         fi
     fi
     sleep 10

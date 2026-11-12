@@ -37,6 +37,7 @@ module fy_land
         land_live_clean, &
         land_live_i, &
         land_push_check, &
+        land_set_abort, &
         land_set_live
 
     abstract interface
@@ -83,6 +84,13 @@ module fy_land
             integer(c_int), value :: fd
             integer(c_int) :: rc
         end function c_close
+
+        ! A regular file opened without following a link (fy_platform.c).
+        function c_open_regular(path) bind(C, name='fy_open_regular') result(fd)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int) :: fd
+        end function c_open_regular
     end interface
 
     integer(c_int), parameter :: O_WRONLY = 1
@@ -168,6 +176,8 @@ module fy_land
     !! Where the output of a check that runs here is announced while it grows;
     !! none: the check runs to its end first.
     procedure(land_live_i), pointer :: live => null()
+    !! Asked while a check runs; true stops it and every process it started.
+    procedure(proceed_i), pointer :: abort => null()
 
 contains
 
@@ -178,6 +188,14 @@ contains
         live => null()
         if (present(sink)) live => sink
     end subroutine land_set_live
+
+    subroutine land_set_abort(stop_now)
+        !! The checks that run here from now on are stopped as soon as
+        !! `stop_now` is true; without it they run to their end.
+        procedure(proceed_i), optional :: stop_now
+        abort => null()
+        if (present(stop_now)) abort => stop_now
+    end subroutine land_set_abort
 
     subroutine land_hook_install(repo, stat)
         !! A pre-receive hook in the bare repository `repo`: pushes may create and
@@ -849,7 +867,7 @@ contains
         full = trim(cwd)//'/'//path
     end function absolute
 
-    subroutine land_check(work, out, code, verify, limit, timed_out, grace)
+    subroutine land_check(work, out, code, verify, limit, timed_out, grace, output)
         !! The check of a landing commit checked out in `work`: an executable
         !! .fortyard/check, else fo build and fo test for an fpm project
         !! (applications built, so tests may run them); under a memory cap when systemd can
@@ -864,13 +882,15 @@ contains
         !! the limit and SIGKILL `grace` seconds later (default 30), so no
         !! compiler or test program it started survives; `timed_out` says
         !! that the limit ended it. A process it started that outlives it,
-        !! also in a new session, is killed when it ends.
+        !! also in a new session, is killed when it ends. With `output` the
+        !! output grows in that file, which is kept, instead of a temporary one.
         character(len=*), intent(in) :: work
         character(len=:), allocatable, intent(out) :: out
         integer, intent(out) :: code
         logical, intent(in), optional :: verify
         integer, intent(in), optional :: limit, grace
         logical, intent(out), optional :: timed_out
+        character(len=*), intent(in), optional :: output
         character(len=1024), allocatable :: cmd(:)
         character(len=256) :: runtime
         character(len=16) :: seconds, after
@@ -938,7 +958,7 @@ contains
             'systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', &
             'MemorySwapMax=0', cmd]
         call system_clock(started, rate)
-        call run_live(cmd, work, out, code)
+        call run_live(cmd, work, out, code, output)
         call system_clock(ended)
         ! 124: timeout ended it with SIGTERM; 137: with SIGKILL after the grace.
         if (present(timed_out)) timed_out = lim > 0 .and. (code == 124 .or. code == 137) .and. &
@@ -998,7 +1018,8 @@ contains
                 'if (x in s) print x }'' | xargs kill -KILL 2> /dev/null; done; rm -f "$seen"; '// &
                 'case $why in time) exit 124 ;; memory) echo "The check used more than '// &
                 '$gib GiB of memory (FY_CHECK_MEMORY) and was ended."; exit 137 ;; esac; '// &
-                'exit $s', 'check', trim(seconds), trim(after), trim(gib), cmd], work, out, code)
+                'exit $s', 'check', trim(seconds), trim(after), trim(gib), cmd], work, out, code, &
+                output)
             call system_clock(ended)
             if (present(timed_out)) timed_out = lim > 0 .and. code == 124 .and. &
                 ended - started >= int(lim, int64)*rate
@@ -1030,26 +1051,30 @@ contains
         end do
     end function words
 
-    subroutine run_live(cmd, work, out, code)
+    subroutine run_live(cmd, work, out, code, output)
         !! Runs the check `cmd` in `work` with its output in a file, which
         !! `live`, when set, is told about while it grows; `out` is the output
         !! folded as fold() says. No pipe is involved, so a process the check
         !! left behind cannot hold its end up. Bytes the sink has taken and the
         !! fold does not need are freed in the file, so a check that writes
-        !! much does not fill the disk.
+        !! much does not fill the disk. The file is `output` when given, and
+        !! then kept.
         character(len=*), intent(in) :: cmd(:), work
         character(len=:), allocatable, intent(out) :: out
         integer, intent(out) :: code
+        character(len=*), intent(in), optional :: output
         character(len=:), allocatable :: file, mark, argv(:)
         character(len=4096) :: outer
         character(len=24) :: num
         integer(int64) :: now, rate, told, have, used
         integer :: pid, n, stat
-        logical :: done
+        logical :: done, stopped
+        integer(c_int) :: held, rc
 
         call system_clock(now, rate)
         write (num, '(i0,a,i0)') proc_pid(), '-', now
         file = tmp_dir()//'/fy-check-'//trim(num)//'.log'
+        if (present(output)) file = output
         ! A process the check started in a session of its own escapes the
         ! group's signals; it is found by this mark in its environment and
         ! killed once the check ended. A check inside a check keeps the outer
@@ -1066,14 +1091,34 @@ contains
         argv(3:) = cmd
         call proc_start(argv, file, pid, dir=work)
         if (pid < 0) then
-            call remove(file)
+            if (.not. present(output)) call remove(file)
             return
         end if
+        ! A given file may be in a directory the check can write: from here on
+        ! it is read through the descriptor of the file the check writes to,
+        ! never through a link the check put in its place.
+        held = -1
+        if (present(output)) then
+            held = c_open_regular(output//c_null_char)
+            if (held >= 0) then
+                write (num, '(i0)') held
+                file = '/proc/self/fd/'//trim(num)
+            else
+                file = '/dev/null'
+            end if
+        end if
         told = now
+        stopped = .false.
         do
             call proc_try_wait(pid, done, code)
             if (done) exit
             call proc_sleep_ms(100)
+            if (.not. stopped .and. associated(abort)) then
+                if (abort()) then
+                    call sweep(mark)
+                    stopped = .true.
+                end if
+            end if
             call system_clock(now)
             if ((now - told) * 1000 >= LIVE_EVERY_MS * rate .and. associated(live)) then
                 inquire (file=file, size=have)
@@ -1086,7 +1131,8 @@ contains
         call sweep(mark)
         if (associated(live)) call live(file, used)
         out = fold(file)
-        call remove(file)
+        if (.not. present(output)) call remove(file)
+        if (held >= 0) rc = c_close(held)
     end subroutine run_live
 
     subroutine sweep(mark)

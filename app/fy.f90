@@ -22,6 +22,8 @@ program fy
         config_load, &
         config_save, &
         config_t
+    use fy_executor, only: &
+        executor_main
     use fy_land, only: &
         land_git_check, &
         land_push_check
@@ -74,6 +76,8 @@ program fy
         call cmd_stats(.true.)
     case ('change')
         call cmd_change()
+    case ('executor')
+        call cmd_executor()
     case ('git-credential')
         call cmd_git_credential()
     case ('issue')
@@ -173,9 +177,12 @@ contains
             '                      perform landing checks for the server (scope runner);', &
             '                        --class: the runner class whose checks it takes', &
             '                        (default linux; e.g. macos-arm64)', &
+            '                        --executor DIR: fy executor runs the checks, sharing DIR', &
             '  backends [--json]   runner classes with their runners or backend processes,', &
             '                      running and waiting checks, limits, median wait, and', &
             '                      run time per repository with the checks it rests on', &
+            '  executor DIR        run the checks a runner hands over in DIR, without its', &
+            '                        token (a container of its own next to the runner)', &
         ! landing and pushing
             '  land [BRANCH] [--repo NAME] [--no-push] [--no-wait]', &
             '                      push HEAD to BRANCH, land it on main after its check', &
@@ -504,8 +511,18 @@ contains
         end if
         if (len(token) == 0) error stop 'fy runner: --token-file must hold a runner token'
         call runner_main(server, token, option('--data', './fortyard-data'), &
-            option('--follow', ''), option('--class', 'linux'))
+            option('--follow', ''), option('--class', 'linux'), option('--executor', ''))
     end subroutine cmd_runner
+
+    subroutine cmd_executor()
+        !! fy executor DIR: runs the checks a controller (fy runner --executor
+        !! DIR) hands over in DIR, without the runner's token.
+        if (len(positional(1)) == 0) then
+            write (error_unit, '(a)') 'fy: usage: fy executor DIR'
+            call quit(2)
+        end if
+        call executor_main(positional(1))
+    end subroutine cmd_executor
 
     subroutine cmd_land()
         !! fy land [BRANCH] [--repo NAME] [--no-push] [--no-wait]: pushes HEAD of

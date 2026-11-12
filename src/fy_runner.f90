@@ -7,6 +7,8 @@ module fy_runner
     !! repository fetched over the API's git endpoint, asks for work every few
     !! seconds, and stops when the server runs a different release, so that it
     !! restarts on the same one. Either way it talks to the server over its API.
+    !! With --executor it is the controller of a split runner (fy_executor):
+    !! another process, without the token, checks out and runs the checks.
     use, intrinsic :: iso_fortran_env, only: &
         error_unit, &
         int64
@@ -22,6 +24,8 @@ module fy_runner
         events_set_dir, &
         events_wait, &
         events_watch_open
+    use fy_executor, only: &
+        executor_run
     use fy_land, only: &
         land_check, &
         land_live_clean, &
@@ -49,21 +53,31 @@ module fy_runner
     character(len=:), allocatable :: live_server, live_token, live_id, live_between
     integer(int64) :: live_sent = 0, live_base = 0, live_have = 0
     logical :: streaming = .false.
+    !! The server no longer counts the check that runs as this runner's.
+    logical :: withdrawn = .false.
+    !! The directory shared with the executor that runs the checks (fy
+    !! executor); empty: they run in this process.
+    character(len=:), allocatable :: exec_dir
+    character(len=:), allocatable :: runner_class
 
 contains
 
-    subroutine runner_main(server, token, data_dir, follow, class)
+    subroutine runner_main(server, token, data_dir, follow, class, executor)
         !! Takes checks of the runner class `class` until the release that
         !! `follow` points to changes (then returns, so that the runner
-        !! restarts on the new release).
+        !! restarts on the new release). With `executor`, a directory shared
+        !! with fy executor, that process runs the checks.
         character(len=*), intent(in) :: server, token, data_dir, follow
-        character(len=*), intent(in), optional :: class
+        character(len=*), intent(in), optional :: class, executor
         character(len=:), allocatable :: body, release, cls
         integer :: code, stat, fd
         logical :: changed, remote
 
         cls = 'linux'
         if (present(class)) cls = class
+        runner_class = cls
+        exec_dir = ''
+        if (present(executor)) exec_dir = executor
         ! A check may ask which class of runner it runs on.
         call proc_setenv('FORTYARD_RUNNER_CLASS', cls)
         ! Output files of checks a stopped runner left behind.
@@ -174,14 +188,14 @@ contains
     subroutine run_one(server, token, data_dir, claim, remote)
         character(len=*), intent(in) :: server, token, data_dir, claim
         logical, intent(in), optional :: remote
-        character(len=:), allocatable :: repo, ref, out, body, work, id, kept, kind
+        character(len=:), allocatable :: repo, ref, out, body, work, id, kept, kind, state
         character(len=16) :: minutes
         character(len=256) :: tmp
         ! Fixed length: gfortran overflows typed array constructors around
         ! deferred-length strings.
         character(len=1024) :: w, src, r
         integer :: code, stat, n, s, e, limit
-        logical :: found, timed_out
+        logical :: found, timed_out, build
 
         call json_extract_string(claim, 'repo', repo, found)
         call json_extract_string(claim, 'ref', ref, found)
@@ -211,6 +225,7 @@ contains
         ! One work tree per repository, kept between checks with its build
         ! directory, so a check builds incrementally instead of from scratch.
         work = trim(tmp)//'/fy-work/'//repo
+        if (len(exec_dir) > 0) work = exec_dir//'/fy-work/'//repo
         w = work
         src = data_dir//'/repos/'//repo//'.git'
         r = ref
@@ -237,6 +252,10 @@ contains
         end if
         write (error_unit, '(a)') 'fy runner: check '//id//' of '//repo//' '//ref
         flush (error_unit)
+        if (len(exec_dir) > 0) then
+            call run_split()
+            return
+        end if
         call proc_run([character(len=1024) :: 'sh', '-c', &
             '{ [ -d "$2/.git" ] || { rm -rf "$2" && mkdir -p "$(dirname "$2")" && '// &
             'git clone --quiet --shared "$1" "$2"; }; } && cd "$2" && '// &
@@ -298,6 +317,59 @@ contains
             json_escape_string(out)//'"}', code, body, stat)
 
     contains
+
+        subroutine run_split()
+            !! The executor checks out and runs the check; this process sends
+            !! its output and reports, as for a check that runs here.
+            live_server = server
+            live_token = token
+            live_id = id
+            live_sent = 0
+            live_base = 0
+            live_have = 0
+            live_between = ''
+            streaming = .true.
+            withdrawn = .false.
+            call executor_run(exec_dir, id, repo, trim(src), ref, work, kind == 'verify', limit, &
+                runner_class, .false., out, code, timed_out, build, state, send_live, &
+                check_withdrawn)
+            if (.not. outcome()) return
+            if (code /= 0 .and. build) then
+                kept = out
+                live_between = '--- the check failed with the kept build directory and is '// &
+                    'rerun from an empty build directory ---'//new_line('a')
+                if (len(kept) > 0) then
+                    if (kept(len(kept):) /= new_line('a')) live_between = new_line('a')// &
+                        live_between
+                end if
+                live_base = live_base + live_have + len(live_between, int64)
+                call executor_run(exec_dir, id, repo, trim(src), ref, work, kind == 'verify', &
+                    limit, runner_class, .true., out, code, timed_out, build, state, send_live, &
+                    check_withdrawn)
+                out = kept//live_between//out
+                if (.not. outcome()) return
+            end if
+            out = out//new_line('a')//disk_report(exec_dir, data_dir)
+            call client_request(server, 'POST', '/api/v1/checks/'//id//'/result', token, &
+                '{"passed":'//merge('true ', 'false', code == 0)//',"log":"'// &
+                json_escape_string(out)//'"}', code, body, stat)
+        end subroutine run_split
+
+        logical function outcome() result(verdict)
+            !! Reports what is no verdict; true when the check ended with one.
+            verdict = .false.
+            if (state == 'cancelled') then
+                write (error_unit, '(a)') 'fy runner: check '//id// &
+                    ' is no longer this runner''s; the executor stopped it'
+            else if (state == 'lost') then
+                call client_request(server, 'POST', '/api/v1/checks/'//id//'/result', token, &
+                    '{"error":"runner","log":"'//json_escape_string(out)//'"}', code, body, stat)
+            else if (timed_out) then
+                call report_timeout()
+            else
+                verdict = .true.
+            end if
+        end function outcome
 
         subroutine report_timeout()
             !! An error, not a result: the server queues the check again, and
@@ -399,8 +471,15 @@ contains
             live_sent = length
         else
             streaming = .false.
+            ! The check ended or went to another runner: an executor stops it.
+            ! An older server's 404 says nothing about the check.
+            withdrawn = code == 403 .or. code == 409
         end if
     end subroutine post_live
+
+    logical function check_withdrawn()
+        check_withdrawn = withdrawn
+    end function check_withdrawn
 
     subroutine expire_state(data_dir)
         !! Work trees and mirrors of repositories not checked for 30 days are
@@ -408,15 +487,19 @@ contains
         !! and fo's cache bound themselves (CCACHE_MAXSIZE, FO_CACHE_MAX_SIZE).
         character(len=*), intent(in) :: data_dir
         character(len=256) :: tmp
-        character(len=:), allocatable :: out
+        character(len=:), allocatable :: out, base
         integer :: n, stat
 
         call get_environment_variable('TMPDIR', tmp, n, stat)
         if (stat /= 0 .or. n == 0) tmp = '/tmp'
+        base = trim(tmp)//'/fy-work'
+        ! Split: the executor expires the work trees, which the checks can
+        ! change; this process removes nothing there.
+        if (len(exec_dir) > 0) base = data_dir//'/mirrors'
         call proc_run([character(len=1024) :: 'sh', '-c', &
-            'for d in "$1/fy-work" "$2/mirrors"; do [ -d "$d" ] && '// &
+            'for d in "$1" "$2/mirrors"; do [ -d "$d" ] && '// &
             'find "$d" -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} +; done; true', &
-            'expire', trim(tmp), data_dir], out, stat, 4096)
+            'expire', base, data_dir], out, stat, 4096)
     end subroutine expire_state
 
     function disk_report(tmp, data_dir) result(text)
