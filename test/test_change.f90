@@ -66,6 +66,10 @@ program test_change
     call run(in//fy//' land')
     call check(stat == 0, 'a first landing: '//out)
 
+    ! A branch already there, as a mirror brings them, is not what the push asks to review.
+    call run('cd '//data//'/repos/demo.git && git update-ref refs/heads/old-work $('//git// &
+        '--git-dir . commit-tree main^{tree} -p main -m Old)')
+    call check(stat == 0, 'an old branch: '//out)
     call run(in//'git -c credential.helper= -c "credential.helper=!'//fy// &
         ' git-credential" fetch -q yard main && git checkout -q -b feature FETCH_HEAD && '// &
         'printf "two\n" >> README && '//git//'commit -q -am "Add a line" -m "Why it is needed."'// &
@@ -76,6 +80,7 @@ program test_change
     call check(index(out, 'NUMBER  STATE  AUTHOR  VERSIONS  BRANCH   TITLE') == 1 .and. &
         index(out, '2       open   admin   1         feature  Add a line') > 0, &
         'fy change list: '//out)
+    call check(index(out, 'old-work') == 0, 'no change for the old branch: '//out)
 
     ! An amended commit pushed under another name is a new version of #2.
     call run(in//'printf "three\n" >> README && '//git//'commit -q -a --amend --no-edit && '// &

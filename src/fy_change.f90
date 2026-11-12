@@ -48,6 +48,7 @@ module fy_change
         change_next_number, &
         change_review_next, &
         change_review_set, &
+        change_branch_tips, &
         change_sync, &
         change_t
 
@@ -88,13 +89,27 @@ module fy_change
 
 contains
 
-    subroutine change_sync(db, repo, git_dir, account, session)
+    function change_branch_tips(git_dir) result(refs)
+        !! The branches of `git_dir` with their tips, one "name id" a line.
+        character(len=*), intent(in) :: git_dir
+        character(len=:), allocatable :: refs
+        integer :: status
+
+        call git(git_dir, [character(len=256) :: 'for-each-ref', '--format=%(refname:short) %(objectname)', &
+            'refs/heads'], refs, status)
+        if (status /= 0) refs = ''
+    end function change_branch_tips
+
+    subroutine change_sync(db, repo, git_dir, account, session, before)
         !! After a push to `repo` by the token named `session`: opens a change
         !! for each new branch and adds a version to the change of each branch
-        !! that moved.
+        !! that moved. With `before`, the branch tips from change_branch_tips
+        !! taken before the push, only the branches the push created or moved
+        !! count; a repository that came from a mirror has many old branches
+        !! nobody asked to review.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: repo, git_dir, account
-        character(len=*), intent(in), optional :: session
+        character(len=*), intent(in), optional :: session, before
         character(len=:), allocatable :: refs, line, branch, tip, key, main, base
         type(change_t) :: c
         character(len=:), allocatable :: pushed_by
@@ -118,6 +133,10 @@ contains
             at = at + eol
             sp = index(line, ' ')
             if (sp < 2) cycle
+            if (present(before)) then
+                if (index(new_line('a')//before//new_line('a'), new_line('a')//line//new_line('a')) > 0) &
+                    cycle
+            end if
             branch = line(1:sp - 1)
             tip = line(sp + 1:)
             if (branch == 'main' .or. index(branch, 'wip/') == 1) cycle

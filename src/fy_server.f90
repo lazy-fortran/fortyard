@@ -42,6 +42,7 @@ module fy_server
         change_list_json, &
         change_message, &
         change_next_number, &
+        change_branch_tips, &
         change_sync, &
         change_t
     use fy_events, only: &
@@ -1783,9 +1784,9 @@ contains
         logical, intent(in) :: write
         type(token_identity_t) :: who
         type(repo_info_t), allocatable :: repos(:)
-        character(len=:), allocatable :: token, mode
+        character(len=:), allocatable :: token, mode, tips
         integer :: status, i, stat
-        logical :: exists
+        logical :: exists, pushing
 
         token = http_basic_password(req)
         if (len(token) == 0) token = http_bearer_token(req)
@@ -1813,11 +1814,13 @@ contains
                 ! A mirror follows its upstream; pushes go there.
                 status = 409
             else
+                pushing = write .and. index(req%path, '/git-receive-pack') > 0
+                if (pushing) tips = change_branch_tips(repo_path(repo))
                 call git_http_serve(cfd, req, rest, repos_dir, repo, who%account, status, &
                     admin=has_scope(who, 'admin'))
                 ! A push opens changes for new branches and versions for moved ones.
-                if (write .and. status == 0 .and. index(req%path, '/git-receive-pack') > 0) &
-                    call change_sync(db, repo, repo_path(repo), who%account, who%session)
+                if (pushing .and. status == 0) &
+                    call change_sync(db, repo, repo_path(repo), who%account, who%session, tips)
             end if
             if (status /= 0) call http_send_response(cfd, status, 'text/plain; charset=utf-8', &
                 git_error(status)//new_line('a'))
