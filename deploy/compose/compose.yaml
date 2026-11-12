@@ -99,9 +99,13 @@ services:
       FY_EXECUTOR: /work
       FY_RUNNER_SERVER: http://fortyard:8740
       TMPDIR: /tmp
+      FY_EGRESS_EXTRA_FILE: /egress-extra/executor.txt
     volumes:
       - .:/fy:ro
       - work:/work
+      # The extra hosts of the check it runs, for the executor proxy; the
+      # executor does not mount them.
+      - ./egress/extra:/egress-extra
     entrypoint: ["/fy/bin/start.sh", "runner"]
     mem_limit: 1g
     cpus: 1
@@ -150,7 +154,7 @@ services:
     networks: [runner-out]
     depends_on: [fortyard-runner, fortyard-egress-runner]
   # Executor allowlist; the runner controller writes the extra hosts of the
-  # check it runs to ./egress/extra/executor.txt.
+  # check it runs to ./egress/extra/executor.txt, read-only here.
   fortyard-egress-runner:
     <<: *egress
     container_name: fortyard-egress-runner

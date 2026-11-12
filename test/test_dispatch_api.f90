@@ -2,8 +2,9 @@ program test_dispatch_api
     !! Backends through the server and the command line: fy repo public, the
     !! policy keys backends= and egress= (backends only for a public
     !! repository), a backend process's claim with its time and concurrency
-    !! limits, the result's started_at, and GET /api/v1/backends with fy
-    !! backends. Here the test is the backend process.
+    !! limits, the result's started_at, GET /api/v1/backends with fy
+    !! backends, and the extra hosts and private flag in a claim. Here the
+    !! test is the backend process.
     use, intrinsic :: iso_fortran_env, only: int64
     use fy_posix, only: tcp_listen, sock_bound_port, sock_close
     use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, SIGTERM
@@ -19,9 +20,9 @@ program test_dispatch_api
     character(len=:), allocatable :: admin, runner, server, fy, env, out, body, started
     character(len=4096) :: cwd
     character(len=16) :: num
-    integer(int64) :: first, second
+    integer(int64) :: first, second, third
     integer :: lfd, stat, sup, i, code, k, run_s
-    logical :: exists
+    logical :: exists, seen_private, seen_public
 
     sup = 0
     call getcwd(cwd)
@@ -30,6 +31,7 @@ program test_dispatch_api
     call store_bootstrap(db, admin, stat)
     call store_token_create(db, 1_int64, 'gh-1', 'runner', runner, stat)
     call store_repo_add(db, 'fx', '', stat, mode='primary')
+    call store_repo_add(db, 'px', '', stat, mode='primary')
     call server_set_data_dir(data)
     call tcp_listen('127.0.0.1', 0, lfd, stat)
     write (num, '(i0)') sock_bound_port(lfd)
@@ -112,6 +114,29 @@ program test_dispatch_api
     call run(env//fy//' backends')
     call check(stat == 0 .and. index(out, 'github-linux') > 0 .and. index(out, 'gh-1') > 0 .and. &
         index(out, 'fx') > 0, 'fy backends: '//out)
+
+    ! The claim names the repository's extra hosts and whether it is private,
+    ! for the runner's executor proxy.
+    call run(env//fy//' repo policy px egress=a.example,b.example')
+    call check(stat == 0, 'a private repository may name extra hosts: '//out)
+    call store_check_add(db, 'px', 'refs/heads/c', third, stat)
+    seen_private = .false.
+    seen_public = .false.
+    do k = 1, 2
+        call http('POST', '/api/v1/checks/claim', '{"class":"linux"}')
+        call check(code == 200, 'a linux claim: '//body)
+        if (index(body, '"repo":"px"') > 0) then
+            call check(index(body, '"egress":"a.example,b.example","private":true}') > 0, &
+                'the claim of a private repository carries its hosts: '//body)
+            seen_private = .true.
+        else
+            call check(index(body, '"egress":"dl.example.org","private":false}') > 0, &
+                'the claim of a public repository carries its hosts: '//body)
+            seen_public = .true.
+        end if
+    end do
+    call check(seen_private .and. seen_public, 'claims of both the private and the public '// &
+        'repository')
 
     call db_close(db)
     call proc_kill(sup, SIGTERM)

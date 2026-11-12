@@ -25,10 +25,9 @@ another host the same: an internal network and two proxies, the executor's
 for the checks (`http_proxy`) and the controller's for `fy runner` and its
 updates (`FY_PROXY`, which reaches `code.tugraz.at`). Their logs and the extra
 file lie in `FY_EGRESS_DIR` (default `DIR-egress`, beside the runner
-directory), which the runner container does not mount, so code under check
-cannot change its own allowlist. Until the runner is split, controller and
-code under check share one container, so a check can still name the
-controller's proxy itself; the split removes that.
+directory), which the executor container does not mount, so code under check
+cannot change its own allowlist; the controller mounts only `extra` of it,
+and the executor's proxy mounts `extra` read-only.
 
 ## Switching over an installed instance
 
@@ -58,7 +57,15 @@ A repository's own hosts (`egress=` in its policy) reach the executor's proxy
 through the file `egress/extra/executor.txt` of the instance
 (`FY_EGRESS_DIR/extra/executor.txt` on other hosts), which the runner controller writes for the check it
 runs: one domain per line, and the line `private` for a private repository,
-which then reaches only the package hosts it names. The proxy reads it on
+which then reaches only the package hosts it names. The controller takes both
+from the claim (`egress` and `private`) and writes them to the file named by
+`FY_EGRESS_EXTRA_FILE` once the executor has taken the check, which it does
+only when no earlier check runs there. Before that and after the result the
+file holds only `private`, so a check that outlives its hand-over reaches no
+package host. When the controller cannot write the file it hands the check
+back instead of running it. Only a runner with `--executor` writes the file:
+without one the code under check runs in the controller and could rewrite
+it, so such a runner gets neither the variable nor the mount. The proxy reads it on
 every request; without the file a check gets the executor list with all
 package hosts. Extra hosts never pass into TU Graz, private or loopback
 networks. One file serves every check behind one proxy: while checks of
@@ -81,3 +88,7 @@ script with `FY_EGRESS_LEARN=0`.
 
 `deploy/egress/test.sh` (needs docker) starts the proxy on a test network
 without a way out and checks its decisions.
+`deploy/egress/test-compose.sh` (needs docker compose and jq, starts
+nothing) validates the compose files and checks that only the runner
+controller writes the extra hosts, the executor's proxy reads them and the
+executor does not see them.

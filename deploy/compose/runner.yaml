@@ -11,7 +11,9 @@
 # and remote-runner.sh); the executor reaches the internet only through the
 # executor proxy (http_proxy, used by the checks) and cannot reach the server
 # or the controller proxy. The proxies' lists and logs lie in @EGRESS@, outside
-# everything the runner mounts, so code under check cannot change them.
+# everything the executor mounts, so code under check cannot change them. The
+# controller alone writes @EGRESS@/extra: the extra hosts of the check it
+# runs, which the executor proxy reads.
 x-egress: &egress
   image: "@EGRESS_IMAGE@"
   restart: unless-stopped
@@ -54,8 +56,10 @@ services:
       HTTPS_PROXY: http://@NAME@-control:3128
       no_proxy: 127.0.0.1,localhost
       NO_PROXY: 127.0.0.1,localhost
+      FY_EGRESS_EXTRA_FILE: /egress-extra/executor.txt
     volumes:
       - "@HOME@:@HOME@"
+      - "@EGRESS@/extra:/egress-extra"
     entrypoint: ["@HOME@/bin/remote-runner.sh"]
     # Healthy once remote-runner.sh made the directories the executor mounts,
     # so that Docker does not create them for root.

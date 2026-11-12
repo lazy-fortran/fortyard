@@ -58,6 +58,9 @@ module fy_runner
     !! The directory shared with the executor that runs the checks (fy
     !! executor); empty: they run in this process.
     character(len=:), allocatable :: exec_dir
+    !! The claim of the check handed to the executor, whose hosts open on
+    !! its proxy once the executor has taken it.
+    character(len=:), allocatable :: egress_claim
     character(len=:), allocatable :: runner_class
 
 contains
@@ -70,7 +73,7 @@ contains
         character(len=*), intent(in) :: server, token, data_dir, follow
         character(len=*), intent(in), optional :: class, executor
         character(len=:), allocatable :: body, release, cls
-        integer :: code, stat, fd
+        integer :: code, stat, fd, n
         logical :: changed, remote
 
         cls = 'linux'
@@ -82,6 +85,12 @@ contains
         call proc_setenv('FORTYARD_RUNNER_CLASS', cls)
         ! Output files of checks a stopped runner left behind.
         call land_live_clean()
+        ! Hosts a stopped runner left open for its check.
+        call egress_put('')
+        call get_environment_variable('FY_EGRESS_EXTRA_FILE', length=n)
+        ! Without an executor the code under check runs here and could rewrite the file.
+        if (n > 0 .and. len(exec_dir) == 0) write (error_unit, '(a)') 'fy runner: '// &
+            'FY_EGRESS_EXTRA_FILE is for a runner with --executor; nothing is written'
         inquire (file=data_dir//'/repos/.', exist=remote)
         remote = .not. remote
         if (remote) then
@@ -105,6 +114,7 @@ contains
                 '{"class":"'//cls//'"}', code, body, stat)
             if (stat == 0 .and. code == 200) then
                 call run_one(server, token, data_dir, body)
+                call egress_put('')
                 cycle
             end if
             ! The server is restarting: try again in a few seconds; otherwise
@@ -168,6 +178,7 @@ contains
                 '{"class":"'//class//'"}', code, body, stat)
             if (stat == 0 .and. code == 200) then
                 call run_one(server, token, data_dir, body, remote=.true.)
+                call egress_put('')
                 cycle
             end if
             call proc_sleep_ms(5000)
@@ -322,6 +333,19 @@ contains
         subroutine run_split()
             !! The executor checks out and runs the check; this process sends
             !! its output and reports, as for a check that runs here.
+            logical :: ok
+
+            ! A file left as it was could open the last check's hosts to this one.
+            call egress_put('', ok)
+            if (.not. ok) then
+                call client_request(server, 'POST', '/api/v1/checks/'//id//'/result', token, &
+                    '{"error":"runner","log":"The runner could not write its egress file; '// &
+                    'the check is queued again."}', code, body, stat)
+                ! Not at once again: another runner may take it.
+                call proc_sleep_ms(60000)
+                return
+            end if
+            egress_claim = claim
             live_server = server
             live_token = token
             live_id = id
@@ -333,7 +357,7 @@ contains
             withdrawn = .false.
             call executor_run(exec_dir, id, repo, trim(src), ref, work, kind == 'verify', limit, &
                 runner_class, .false., out, code, timed_out, build, state, send_live, &
-                check_withdrawn)
+                check_withdrawn, taken_hook=egress_open)
             if (.not. outcome()) return
             if (code /= 0 .and. build) then
                 kept = out
@@ -346,7 +370,7 @@ contains
                 live_base = live_base + live_have + len(live_between, int64)
                 call executor_run(exec_dir, id, repo, trim(src), ref, work, kind == 'verify', &
                     limit, runner_class, .true., out, code, timed_out, build, state, send_live, &
-                    check_withdrawn)
+                    check_withdrawn, taken_hook=egress_open)
                 out = kept//live_between//out
                 if (.not. outcome()) return
             end if
@@ -502,6 +526,57 @@ contains
             'find "$d" -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} +; done; true', &
             'expire', base, data_dir], out, stat, 4096)
     end subroutine expire_state
+
+    subroutine egress_put(claim, ok)
+        !! The extra hosts of the claimed check's repository for the
+        !! executor's proxy (deploy/egress/extra.sh), one per line and the
+        !! line "private" for a private repository, in FY_EGRESS_EXTRA_FILE.
+        !! An empty claim leaves only "private": a check that outlives its
+        !! hand-over gets no package host until the next one is taken.
+        !! Written only by a runner with an executor; `ok` is false when the
+        !! file could not be written.
+        character(len=*), intent(in) :: claim
+        logical, intent(out), optional :: ok
+        character(len=4096) :: file
+        character(len=:), allocatable :: hosts, text, out
+        integer :: n, stat, k, u
+        logical :: found
+
+        if (present(ok)) ok = .true.
+        call get_environment_variable('FY_EGRESS_EXTRA_FILE', file, n, stat)
+        if (stat /= 0 .or. n == 0 .or. len(exec_dir) == 0) return
+        text = 'private'//new_line('a')
+        if (len(claim) > 0) then
+            text = ''
+            call json_extract_string(claim, 'egress', hosts, found)
+            if (found) then
+                do while (len(hosts) > 0)
+                    k = index(hosts, ',')
+                    if (k == 0) k = len(hosts) + 1
+                    if (k > 1) text = text//hosts(1:k - 1)//new_line('a')
+                    hosts = hosts(min(k + 1, len(hosts) + 1):)
+                end do
+            end if
+            if (index(claim, '"private":true') > 0) text = text//'private'//new_line('a')
+        end if
+        ! Renamed into place: the proxy reads the file on every request.
+        open (newunit=u, file=trim(file)//'.new', status='replace', access='stream', &
+            form='unformatted', action='write', iostat=stat)
+        if (stat == 0) then
+            write (u, iostat=stat) text
+            close (u)
+        end if
+        if (stat == 0) call proc_run([character(len=4096) :: 'mv', '-f', trim(file)//'.new', &
+            file], out, stat, 4096)
+        if (stat /= 0) write (error_unit, '(a)') 'fy runner: cannot write '//trim(file)
+        if (present(ok)) ok = stat == 0
+    end subroutine egress_put
+
+    subroutine egress_open()
+        !! The executor has taken the check: its hosts open now, not before,
+        !! so a check that still ran there never reaches them.
+        call egress_put(egress_claim)
+    end subroutine egress_open
 
     function disk_report(tmp, data_dir) result(text)
         !! The runner's disk use, appended to every check log so growth shows.

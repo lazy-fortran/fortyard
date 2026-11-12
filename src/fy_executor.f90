@@ -50,6 +50,10 @@ module fy_executor
         logical function executor_cancel_i()
             !! Whether the check that runs is to be stopped.
         end function executor_cancel_i
+
+        subroutine executor_taken_i()
+            !! The executor has taken the check: no earlier one runs there.
+        end subroutine executor_taken_i
     end interface
 
     ! fy_platform.c.
@@ -129,7 +133,7 @@ module fy_executor
 contains
 
     subroutine executor_run(dir, id, repo, src, ref, work, verify, limit, class, rerun, &
-            out, code, timed_out, build, state, sink, cancel, waits)
+            out, code, timed_out, build, state, sink, cancel, waits, taken_hook)
         !! The controller's side: has the executor at `dir` check `ref` of
         !! `repo` (fetched from `src`, a path the executor sees as well) in
         !! `work`, or with `rerun` run the check again in `work` without its
@@ -140,7 +144,9 @@ contains
         !! A check that runs well past its time limit is stopped and
         !! reported as timed out. `build`: the work tree has a build
         !! directory after the check. `waits`: the seconds of TAKE_SECONDS,
-        !! LATE_CANCEL and LATE_LOST instead of those.
+        !! LATE_CANCEL and LATE_LOST instead of those. `taken_hook`
+        !! is called when the executor has taken the check, which it does only
+        !! when no other runs there.
         character(len=*), intent(in) :: dir, id, repo, src, ref, work, class
         logical, intent(in) :: verify, rerun
         integer, intent(in) :: limit
@@ -150,6 +156,7 @@ contains
         procedure(land_live_i), optional :: sink
         procedure(executor_cancel_i), optional :: cancel
         integer, intent(in), optional :: waits(3)
+        procedure(executor_taken_i), optional :: taken_hook
         character(len=:), allocatable :: status, nonce, fdpath
         character(len=24) :: num
         integer(int64) :: start, now, rate, began, told, used
@@ -201,6 +208,7 @@ contains
                 if (.not. exists(xfd, 'job')) then
                     taken = .true.
                     began = now
+                    if (present(taken_hook)) call taken_hook()
                 end if
             end if
             if (exists(xfd, 'status')) exit

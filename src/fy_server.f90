@@ -2223,8 +2223,10 @@ contains
     subroutine checks_route(req, db, res)
         !! POST /api/v1/checks/claim {"class":"..."}: the next queued check of
         !! that runner class (default linux) for the calling runner (200 with
-        !! {"id","repo","ref","kind","timeout"}, timeout in seconds and 0 for
-        !! none, or 204 when there is none). A backend process (class github-*
+        !! {"id","repo","ref","kind","timeout","egress","private"}, timeout in
+        !! seconds and 0 for none, egress the repository's extra hosts
+        !! (comma-separated) and private true unless it is public, or 204 when
+        !! there is none). A backend process (class github-*
         !! or gitlab-*) adds its time limit and concurrency limit,
         !! "max_minutes" and "max_running", and is given what fy_dispatch allows.
         !! POST /api/v1/checks/N/result {"passed":true|false,"log":"...",
@@ -2242,6 +2244,7 @@ contains
         type(token_identity_t) :: who
         character(len=:), allocatable :: repo, ref, log, kind, error, state, class
         character(len=:), allocatable :: started
+        type(policy_t) :: pol
         character(len=24) :: num, limit
         integer(int64) :: id
         integer :: ios, k, seconds, minutes, most
@@ -2305,8 +2308,12 @@ contains
             ! A job shows its check and runner: its pages ask again.
             call events_notify('jobs')
             write (limit, '(i0)') seconds
+            ! The hosts the runner controller opens on its executor's proxy.
+            call policy_get(db, repo, pol)
             res%body = '{"id":'//trim(num)//',"repo":"'//repo//'","ref":"'//ref//'","kind":"'// &
-                kind//'","timeout":'//trim(limit)//'}'
+                kind//'","timeout":'//trim(limit)//',"egress":"'// &
+                json_escape_string(pol%egress)//'","private":'// &
+                trim(merge('false', 'true ', pol%public))//'}'
             return
         end if
         if (publish) then

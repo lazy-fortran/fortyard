@@ -24,6 +24,8 @@ case $relay in
     *) echo "install-compose: RELAY is ADDRESS:PORT, not a network" >&2; exit 2 ;;
 esac
 root=$(cd "$(dirname "$0")/.." && pwd)
+# egress/extra: the runner controller writes its check's extra hosts there
+# for the executor proxy; made here so that Docker does not make it for root.
 mkdir -p "$home/bin" "$home/releases" "$home/staging" "$home/egress/server" \
     "$home/egress/runner" "$home/egress/extra"
 cp "$root/scripts/deploy.sh" "$root/scripts/self-update.sh" "$root/scripts/start.sh" "$home/bin/"

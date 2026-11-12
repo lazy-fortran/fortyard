@@ -13,8 +13,9 @@
 # The runner reaches the network only through its egress proxies
 # (deploy/egress), built here: the executor's for the checks and the
 # controller's for fy itself. Their logs and the extra hosts of the running
-# check lie in FY_EGRESS_DIR (default DIR-egress), which the runner does not
-# mount. FY_EGRESS_LEARN=0 ends the executor's learning week (default 1:
+# check lie in FY_EGRESS_DIR (default DIR-egress), which the executor does not
+# mount; the controller writes the extra hosts to FY_EGRESS_DIR/extra.
+# FY_EGRESS_LEARN=0 ends the executor's learning week (default 1:
 # unlisted public hosts pass and are logged in FY_EGRESS_DIR/executor).
 # FY_SUBNET, e.g. 198.18.2 (a /24 of its own per installation), gives the
 # networks fixed /28 subnets in it, where Docker's own address pools are used
