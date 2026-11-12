@@ -1173,6 +1173,9 @@ contains
             character(len=*), intent(in) :: target
             integer(int64) :: id
             character(len=24) :: jn
+            type(repo_info_t), allocatable :: repos(:)
+            character(len=:), allocatable :: mode
+            integer :: i, stat
 
             if (index(' '//who%scopes//' ', ' admin ') == 0) then
                 call fail(res, 403, 'verifying needs the admin scope')
@@ -1181,6 +1184,17 @@ contains
             inquire (file=repo_path(target)//'/HEAD', exist=exists)
             if (.not. repo_name_ok(target) .or. .not. exists) then
                 call fail(res, 404, 'no such repository')
+                return
+            end if
+            ! Only primary repositories are verified (fy_verify); a request for a
+            ! mirror would wait for ever.
+            call store_repo_list(db, repos, stat)
+            mode = ''
+            do i = 1, size(repos)
+                if (repos(i)%name == target) mode = repos(i)%mode
+            end do
+            if (mode /= 'primary') then
+                call fail(res, 409, 'only a primary repository is verified; this one is a mirror')
                 return
             end if
             id = verify_request(db, target, repo_path(target))

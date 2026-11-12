@@ -181,6 +181,7 @@ contains
             '                      not allow)', &
         ! changes
             '  change list [--state open|landed|closed|all] [--review flagged|unreviewed]', &
+            '              [--repo NAME]   the changes of NAME, not of this checkout', &
             '                      [--attention needs-author] [--all-repos]', &
             '                      changes, newest activity first; the open ones of', &
             '                      this repository by default (--all: --state all)', &
@@ -1124,6 +1125,11 @@ contains
         end if
         select case (what)
         case ('list')
+            if (len(n) > 0) then
+                write (error_unit, '(a)') 'fy: change list takes no argument '//n// &
+                    '; another repository is --repo NAME'
+                call quit(2)
+            end if
             state = option('--state', 'open')
             if (flag('--all')) state = 'all'
             if (flag('--flagged')) state = 'flagged'

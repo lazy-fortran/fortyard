@@ -80,6 +80,8 @@ program test_change
     call check(index(out, 'NUMBER  STATE  AUTHOR  VERSIONS  BRANCH   TITLE') == 1 .and. &
         index(out, '2       open   admin   1         feature  Add a line') > 0, &
         'fy change list: '//out)
+    call run(in//fy//' change list demo')
+    call check(stat /= 0 .and. index(out, '--repo NAME') > 0, 'a repository is named with --repo: '//out)
     call check(index(out, 'old-work') == 0, 'no change for the old branch: '//out)
 
     ! An amended commit pushed under another name is a new version of #2.

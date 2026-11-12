@@ -74,6 +74,8 @@ program test_mirror
         call proc_sleep_ms(100)
     end do
     call check(index(reply, '"subject":"Second commit"') > 0, 'fetched again after the interval')
+    reply = post('/api/v1/repos/demo/verify', '')
+    call check(index(reply, 'HTTP/1.1 409') == 1, 'a mirror is not verified: '//reply)
     reply = get('/api/v1/repos/nothere/log')
     call check(index(reply, 'HTTP/1.1 404') == 1, 'unknown repository')
     reply = post('/api/v1/repos', '{"name":"evil","upstream":"--upload-pack=x"}')
