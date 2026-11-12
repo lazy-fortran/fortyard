@@ -1,0 +1,2 @@
+# The GitHub backend reads and deletes runs through the API.
+api.github.com

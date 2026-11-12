@@ -159,6 +159,13 @@ contains
             'data = "code_verifier='//verifier//'"'//new_line('a')// &
             'max-time = 15'//new_line('a')//'silent'//new_line('a')
         if (index(cfg%issuer, 'https://') == 1) conf = conf//'proto = "=https"'//new_line('a')
+        ! Behind fortyard's egress proxy the provider is reached only through it.
+        call get_environment_variable('FY_PROXY', length=n, status=stat)
+        if (stat == 0 .and. n > 0 .and. n <= len(buf)) then
+            call get_environment_variable('FY_PROXY', buf(1:n))
+            if (scan(buf(1:n), '"\'//achar(10)//achar(13)) == 0) &
+                conf = conf//'proxy = "'//buf(1:n)//'"'//new_line('a')
+        end if
         argv(1) = 'curl'
         argv(2) = '-K'
         argv(3) = '-'

@@ -256,6 +256,9 @@ contains
                 'header = "Content-Type: application/json"'//NL// &
                 'data-binary = "'//quoted(payload)//'"'//NL
             if (len(key) > 0) conf = conf//'header = "Authorization: Bearer '//quoted(key)//'"'//NL
+            ! Behind fortyard's egress proxy the model is reached only through it.
+            if (len(env_value('FY_PROXY')) > 0) &
+                conf = conf//'proxy = "'//quoted(env_value('FY_PROXY'))//'"'//NL
         end if
         argv(1) = 'curl'
         argv(2) = '-K'

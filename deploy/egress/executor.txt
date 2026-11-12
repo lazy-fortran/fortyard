@@ -1,0 +1,5 @@
+# Hosts the code under check may reach (role executor): sources of code and
+# the release hosts of fo and the toolchain. A domain includes its subdomains.
+github.com
+githubusercontent.com
+ghcr.io

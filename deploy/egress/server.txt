@@ -1,0 +1,6 @@
+# The server pushes mirrors over ssh.github.com:443 and calls the API.
+github.com
+api.github.com
+ssh.github.com
+# The token endpoint of the TU Graz sign-in (the issuer in oidc.conf).
+code.tugraz.at

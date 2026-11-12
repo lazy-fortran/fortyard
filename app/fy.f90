@@ -605,6 +605,9 @@ contains
             end if
         end if
         if (len(token) == 0) error stop 'fy runner: --token-file must hold a runner token'
+        ! Behind an egress proxy the runner reaches its server only through it.
+        call get_environment_variable('FY_PROXY', line, status=ios)
+        if (ios == 0 .and. len_trim(line) > 0) call client_set_proxy(trim(line))
         call runner_main(server, token, option('--data', './fortyard-data'), &
             option('--follow', ''), option('--class', 'linux'), option('--executor', ''))
     end subroutine cmd_runner

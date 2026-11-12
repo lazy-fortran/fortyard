@@ -4,10 +4,14 @@
 # next one when the server moves on (fy runner then returns).
 #   FY_TARGET  the instance, e.g. https://code.tugraz.at/yard
 #   FY_RUNNER  runner directory with `token` (runner scope)
+#   FY_PROXY   proxy to the server, for fy and these requests (optional)
 set -eu
 : "${FY_TARGET:?}" "${FY_RUNNER:?}"
 home=$FY_RUNNER
 tok=$(cat "$home/token")
+curl() {
+    if [ -n "${FY_PROXY:-}" ]; then command curl --proxy "$FY_PROXY" "$@"; else command curl "$@"; fi
+}
 # FY_EXECUTOR: the directory shared with the executor container, which then
 # runs the checks; it mounts that directory and the mirrors.
 mkdir -p "$home/releases" "$home/data/mirrors" ${FY_EXECUTOR:+"$FY_EXECUTOR/tmp"}

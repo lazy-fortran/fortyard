@@ -2,7 +2,8 @@
 # fpm and fo, plus the tools landing checks of C/C++ and CMake projects use
 # (bash, time, bzip2, xz, ccache, cmake, ninja, python3), and the numerical
 # libraries the hosted scientific codes link (OpenBLAS/LAPACK, netCDF,
-# SuiteSparse, found through pkg-config). The release builder compiles fy in it, and landing checks run in
+# SuiteSparse, found through pkg-config), and ssh with nc for the server's
+# pushes to GitHub through the egress proxy. The release builder compiles fy in it, and landing checks run in
 # it with limits, discarded after each run. The server itself runs natively.
 FROM debian:trixie AS base
 ARG FPM_VERSION=0.13.0
@@ -10,6 +11,7 @@ ARG FPM_SHA256
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl git gfortran gcc g++ make libsqlite3-dev \
         bash time bzip2 xz-utils ccache cmake ninja-build python3 \
+        openssh-client netcat-openbsd \
         pkg-config libopenblas-dev liblapack-dev libnetcdf-dev libsuitesparse-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL -o /usr/local/bin/fpm \

@@ -1,0 +1,3 @@
+# The GitLab backend pushes, starts and reads pipelines; the container
+# registry is a subdomain.
+gitlab.tugraz.at

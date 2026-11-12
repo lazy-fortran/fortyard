@@ -5,6 +5,29 @@
 # it checks out and runs the checks without the token, in @HOME@/work, which
 # both share; it sees the mirrors and releases read-only and nothing else of
 # @HOME@.
+#
+# Each is on an internal network of its own without DNS. The controller
+# reaches the server only through the controller proxy (FY_PROXY, used by fy
+# and remote-runner.sh); the executor reaches the internet only through the
+# executor proxy (http_proxy, used by the checks) and cannot reach the server
+# or the controller proxy. The proxies' lists and logs lie in @EGRESS@, outside
+# everything the runner mounts, so code under check cannot change them.
+x-egress: &egress
+  image: "@EGRESS_IMAGE@"
+  restart: unless-stopped
+  init: true
+  user: "@UID@:@GID@"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: ["/tmp:size=64m"]
+  mem_limit: 256m
+  cpus: 1
+  pids_limit: 128
+  # Every request is logged on standard output; Docker keeps 30 MB of it.
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "3"}
 services:
   fortyard-runner:
     image: "@IMAGE@"
@@ -15,6 +38,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    dns: [127.0.0.1]
     tmpfs: ["/tmp:size=256m"]
     environment:
       FY_TARGET: "@TARGET@"
@@ -22,6 +46,9 @@ services:
       FY_EXECUTOR: "@HOME@/work"
       HOME: /tmp
       TMPDIR: "@HOME@/tmp"
+      FY_PROXY: http://@NAME@-control:3128
+      no_proxy: 127.0.0.1,localhost
+      NO_PROXY: 127.0.0.1,localhost
     volumes:
       - "@HOME@:@HOME@"
     entrypoint: ["@HOME@/bin/remote-runner.sh"]
@@ -33,6 +60,8 @@ services:
     mem_limit: 1g
     cpus: 1
     pids_limit: 256
+    networks: [control]
+    depends_on: [fortyard-control]
   fortyard-executor:
     image: "@IMAGE@"
     container_name: "@NAME@-executor"
@@ -42,6 +71,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    dns: [127.0.0.1]
     # Tests write to /var/tmp as on any Linux host, so it is writable too.
     tmpfs: ["/tmp:size=4g,exec", "/var/tmp:size=2g,exec"]
     environment:
@@ -55,6 +85,12 @@ services:
       CCACHE_BASEDIR: "@HOME@/work/fy-work"
       FO_CACHE_DIR: "@CACHE@/fo"
       FO_CACHE_MAX_SIZE: "@CACHE_SIZE@"
+      http_proxy: http://@NAME@-egress:3128
+      https_proxy: http://@NAME@-egress:3128
+      HTTP_PROXY: http://@NAME@-egress:3128
+      HTTPS_PROXY: http://@NAME@-egress:3128
+      no_proxy: 127.0.0.1,localhost
+      NO_PROXY: 127.0.0.1,localhost
     volumes:
       - "@HOME@/work:@HOME@/work"
       - "@HOME@/data/mirrors:@HOME@/data/mirrors:ro"
@@ -78,7 +114,39 @@ services:
     depends_on:
       fortyard-runner:
         condition: service_healthy
+      fortyard-egress:
+        condition: service_started
     mem_limit: "@MEMORY@"
     cpus: "@CPUS@"
     cpu_shares: @SHARES@
     pids_limit: 2048
+    networks: [exec]
+  # The executor's way to packages and sources (executor list).
+  fortyard-egress:
+    <<: *egress
+    container_name: "@NAME@-egress"
+    networks: [exec, egress]
+    environment:
+      FY_EGRESS_ROLE: executor
+      FY_EGRESS_LEARN: "@LEARN@"
+      FY_EGRESS_EXTRA: /extra/executor.txt
+      FY_EGRESS_LOG: /log
+    volumes:
+      - "@EGRESS@/executor:/log"
+      - "@EGRESS@/extra:/extra:ro"
+  # The controller's way to the server (code.tugraz.at), for fy and its updates.
+  fortyard-control:
+    <<: *egress
+    container_name: "@NAME@-control"
+    networks: [control, egress]
+    environment:
+      FY_EGRESS_ROLE: controller
+      FY_EGRESS_LOG: /log
+    volumes:
+      - "@EGRESS@/controller:/log"
+networks:
+  control:
+    internal: true
+  exec:
+    internal: true
+  egress:

@@ -1,8 +1,8 @@
 module fy_client
-    !! HTTP client for a fortyard server, and the stored login. Plain HTTP
-    !! inside a private network is spoken directly; an https:// server is
-    !! reached through curl (as the sign-in does), so runners on other hosts
-    !! can use the public address.
+    !! HTTP client for a fortyard server, and the stored login. Plain HTTP to
+    !! an IPv4 address is spoken directly; a name (a container on an internal
+    !! network) and an https:// server are reached through curl (as the
+    !! sign-in does), so runners on other hosts can use the public address.
     use fy_posix, only: &
         sock_close, &
         sock_recv, &
@@ -160,6 +160,12 @@ contains
         stat = 0
     end subroutine parse_url
 
+    pure logical function ipv4_literal(host)
+        character(len=*), intent(in) :: host
+
+        ipv4_literal = len(host) > 0 .and. verify(host, '0123456789.') == 0
+    end function ipv4_literal
+
     subroutine client_request(server, method, path, token, payload, code, body, stat)
         character(len=*), intent(in) :: server, method, path, token, payload
         integer, intent(out) :: code, stat
@@ -174,6 +180,12 @@ contains
         body = ''
         use_curl = index(server, 'https://') == 1
         if (allocated(proxy)) use_curl = use_curl .or. len(proxy) > 0
+        ! A name, such as a container name on an internal network, is resolved
+        ! by curl; the direct path takes only an IPv4 address.
+        if (.not. use_curl .and. index(server, 'http://') == 1) then
+            call parse_url(server, host, port, base, stat)
+            if (stat == 0) use_curl = .not. ipv4_literal(host)
+        end if
         if (use_curl) then
             call curl_request(server, method, path, token, payload, code, body, stat)
             return

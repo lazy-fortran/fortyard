@@ -1,0 +1,7 @@
+# Package hosts of the executor; a private repository gets only those its
+# policy names (egress=).
+pypi.org
+files.pythonhosted.org
+conda.anaconda.org
+conda-forge.org
+prefix.dev
