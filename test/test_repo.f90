@@ -25,6 +25,19 @@ program test_repo
 
     call repo_clone(up, mirror, status)
     call check(status == 0, 'mirror cloned')
+    call sh('test -z "$(git --git-dir '//mirror//' config core.sshCommand)"')
+
+    ! A deploy key named like the repository stays with its mirror.
+    call sh('rm -rf build/test_repo_keys build/test_repo_keyed.git && mkdir -p build/test_repo_keys'// &
+        ' && touch build/test_repo_keys/test_repo_keyed build/test_repo_keys/known_hosts')
+    call repo_clone(up, 'build/test_repo_keyed.git', status, 'build/test_repo_keys')
+    call check(status == 0, 'mirror cloned with a key directory')
+    call sh('git --git-dir build/test_repo_keyed.git config core.sshCommand | grep -q '// &
+        '"^ssh -i build/test_repo_keys/test_repo_keyed .*UserKnownHostsFile=build/test_repo_keys/known_hosts"')
+    call repo_clone(up, 'build/test_repo_unkeyed.git', status, 'build/test_repo_keys')
+    call check(status == 0, 'mirror cloned without its own key')
+    call sh('test -z "$(git --git-dir build/test_repo_unkeyed.git config core.sshCommand)"'// &
+        ' && rm -rf build/test_repo_keys build/test_repo_keyed.git build/test_repo_unkeyed.git')
 
     call repo_refs_json(mirror, json, status)
     call check(status == 0 .and. index(json, '"default":"main"') > 0 .and. &

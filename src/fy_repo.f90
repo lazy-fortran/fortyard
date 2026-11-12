@@ -262,14 +262,42 @@ contains
         json = json//']}'
     end subroutine repo_refs_json
 
-    subroutine repo_clone(upstream, repo, status)
-        !! A bare mirror of `upstream` at `repo`.
+    subroutine repo_clone(upstream, repo, status, keys)
+        !! A bare mirror of `upstream` at `repo`. With `keys`, a directory that
+        !! holds a private key named like the repository and a known_hosts file,
+        !! git reaches an SSH upstream with that key, now and for later fetches
+        !! and pushes; GitHub accepts a deploy key for one repository only.
         character(len=*), intent(in) :: upstream, repo
         integer, intent(out) :: status
-        character(len=:), allocatable :: out
+        character(len=*), intent(in), optional :: keys
+        character(len=:), allocatable :: out, name, ssh
+        logical :: exists
+        integer :: slash
 
-        call proc_run([character(len=1024) :: 'env', 'GIT_TERMINAL_PROMPT=0', 'timeout', &
-            '600', 'git', 'clone', '--quiet', '--mirror', upstream, repo], out, status, 65536)
+        ssh = ''
+        exists = .false.
+        if (present(keys)) exists = len(keys) > 0
+        if (exists) then
+            slash = index(repo, '/', back=.true.)
+            name = repo(slash + 1:)
+            if (len(name) > 4) then
+                if (name(len(name) - 3:) == '.git') name = name(:len(name) - 4)
+            end if
+            inquire (file=keys//'/'//name, exist=exists)
+            if (exists) ssh = 'ssh -i '//keys//'/'//name//' -o IdentitiesOnly=yes '// &
+                '-o BatchMode=yes -o UserKnownHostsFile='//keys//'/known_hosts'
+        end if
+        if (len(ssh) == 0) then
+            call proc_run([character(len=1024) :: 'env', 'GIT_TERMINAL_PROMPT=0', 'timeout', &
+                '600', 'git', 'clone', '--quiet', '--mirror', upstream, repo], out, status, 65536)
+            return
+        end if
+        call proc_run([character(len=1024) :: 'env', 'GIT_TERMINAL_PROMPT=0', &
+            'GIT_SSH_COMMAND='//ssh, 'timeout', '600', 'git', 'clone', '--quiet', '--mirror', &
+            upstream, repo], out, status, 65536)
+        if (status /= 0) return
+        call proc_run([character(len=1024) :: 'git', '--git-dir', repo, 'config', &
+            'core.sshCommand', ssh], out, status, 65536)
     end subroutine repo_clone
 
     subroutine repo_init(repo, status)

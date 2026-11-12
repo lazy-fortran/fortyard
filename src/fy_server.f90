@@ -478,7 +478,8 @@ contains
                         call repo_init(repo_path(repos(i)%name), status)
                         if (status == 0) call land_hook_install(repo_path(repos(i)%name), status)
                     else if (.not. exists) then
-                        call repo_clone(repos(i)%upstream, repo_path(repos(i)%name), status)
+                        call repo_clone(repos(i)%upstream, repo_path(repos(i)%name), status, &
+                            keys_dir())
                     else if (now - last(k) >= int(mirror_interval, int64) * rate) then
                         call repo_fetch(repo_path(repos(i)%name), status)
                     else
@@ -822,6 +823,20 @@ contains
         end function itoa
 
     end subroutine lander_main
+
+    function keys_dir() result(dir)
+        !! Deploy keys of the instance, one per repository: $FY_HOME/keys.
+        character(len=:), allocatable :: dir
+        character(len=4096) :: home
+        integer :: n, stat
+
+        call get_environment_variable('FY_HOME', home, n, stat)
+        if (stat /= 0 .or. n == 0) then
+            dir = ''
+        else
+            dir = home(:n)//'/keys'
+        end if
+    end function keys_dir
 
     function repo_path(name) result(path)
         character(len=*), intent(in) :: name
@@ -1409,6 +1424,15 @@ contains
             if (mode /= 'primary' .and. mode /= 'mirror') then
                 call fail(res, 400, 'body must be {"mode":"primary"} or {"mode":"mirror"}')
                 return
+            end if
+            if (mode == 'primary') then
+                ! The mirror loop would otherwise create an empty repository.
+                inquire (file=repo_path(target)//'/HEAD', exist=ok)
+                if (.not. ok) then
+                    call fail(res, 409, 'the repository is not cloned yet; see the server log '// &
+                        'for why mirroring fails')
+                    return
+                end if
             end if
             call store_repo_set_mode(db, target, mode, ok)
             if (.not. ok) then

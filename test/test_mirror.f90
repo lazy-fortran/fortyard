@@ -80,6 +80,12 @@ program test_mirror
     call check(index(reply, 'HTTP/1.1 400') == 1, 'upstream must be an https or ssh URL')
     reply = post('/api/v1/repos', '{"name":"fx","upstream":"https://example.invalid/fx.git"}')
     call check(index(reply, 'HTTP/1.1 201') == 1, 'administrator adds a repository')
+    reply = post('/api/v1/repos/fx/mode', '{"mode":"primary"}')
+    call check(index(reply, 'HTTP/1.1 409') == 1, 'a repository not cloned yet stays a mirror')
+    reply = get('/api/v1/repos')
+    call check(index(reply, '"name":"fx","mode":"mirror"') > 0, 'its mode is unchanged: '//reply)
+    reply = post('/api/v1/repos/demo/mode', '{"mode":"primary"}')
+    call check(index(reply, 'HTTP/1.1 200') == 1, 'a cloned mirror becomes primary')
 
     call proc_kill(sup, SIGTERM)
     call proc_wait(sup, stat)
