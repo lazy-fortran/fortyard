@@ -7,6 +7,10 @@ program fy
         json_escape_string
     use fy_audit, only: &
         audit_append
+    use fy_backend_github, only: &
+        github_configure, &
+        github_main, &
+        github_setup
     use fy_build_info, only: &
         FY_COMMIT, &
         FY_VERSION
@@ -72,6 +76,8 @@ program fy
         call cmd_audit()
     case ('backends')
         call cmd_backends()
+    case ('backend')
+        call cmd_backend()
     case ('board')
         call cmd_stats(.true.)
     case ('change')
@@ -183,6 +189,15 @@ contains
             '                      run time per repository with the checks it rests on', &
             '  executor DIR        run the checks a runner hands over in DIR, without its', &
             '                        token (a container of its own next to the runner)', &
+            '  backend github --server URL --token-file F --app-id ID --app-key FILE', &
+            '        --owner ORG [--classes github-linux,...] [--max-running 20] [--max-macos 5]', &
+            '        [--max-minutes 360] [--api https://api.github.com] [--poll SECONDS]', &
+            '        [--start-timeout SECONDS]', &
+            '                      run checks of the GitHub classes on GitHub Actions in', &
+            '                      ORG''s public repositories (runner scope, GitHub App key)', &
+            '  backend github setup GITHUB-NAME --app-id ID --app-key FILE --owner ORG', &
+            '        [--github-token-file F]', &
+            '                      check and prepare ORG/GITHUB-NAME for the GitHub backend', &
         ! landing and pushing
             '  land [BRANCH] [--repo NAME] [--no-push] [--no-wait]', &
             '                      push HEAD to BRANCH, land it on main after its check', &
@@ -523,6 +538,78 @@ contains
         end if
         call executor_main(positional(1))
     end subroutine cmd_executor
+    subroutine cmd_backend()
+        !! fy backend github [setup REPO] ...: a backend process that runs the
+        !! checks of its classes on GitHub Actions, or the setup of one
+        !! repository for it.
+        character(len=:), allocatable :: text, token, gh_token
+        integer :: max_running, max_macos, max_minutes, poll, start, stat
+
+        if (positional(1) /= 'github') then
+            write (error_unit, '(a)') 'fy: usage: fy backend github ... (see fy help)'
+            call quit(2)
+        end if
+        gh_token = ''
+        text = option('--github-token-file', '')
+        if (len(text) > 0) gh_token = token_line(text)
+        call github_configure(option('--app-id', ''), option('--app-key', ''), &
+            option('--owner', ''), option('--api', 'https://api.github.com'), gh_token, &
+            backend_number('--poll', 5), backend_number('--start-timeout', 600))
+        if (len(option('--owner', '')) == 0 .or. (len(gh_token) == 0 .and. &
+            (len(option('--app-id', '')) == 0 .or. len(option('--app-key', '')) == 0))) then
+            write (error_unit, '(a)') 'fy backend github: needs --owner and --app-id with '// &
+                '--app-key (or, for setup, --github-token-file)'
+            call quit(2)
+        end if
+        if (positional(2) == 'setup') then
+            if (len(positional(3)) == 0) then
+                write (error_unit, '(a)') 'fy: usage: fy backend github setup REPO ...'
+                call quit(2)
+            end if
+            call github_setup(positional(3), stat)
+            call quit(stat)
+        end if
+        token = token_line(option('--token-file', ''))
+        if (len(token) == 0) error stop 'fy backend github: --token-file must hold a runner token'
+        max_running = backend_number('--max-running', 20)
+        max_macos = backend_number('--max-macos', 5)
+        max_minutes = backend_number('--max-minutes', 360)
+        call github_main(option('--server', 'http://127.0.0.1:8740'), token, &
+            option('--classes', 'github-linux,github-macos-arm64,github-windows'), max_running, &
+            max_macos, max_minutes)
+
+    end subroutine cmd_backend
+
+    integer function backend_number(name, default)
+        !! The positive number given with option `name`, else `default`.
+        character(len=*), intent(in) :: name
+        integer, intent(in) :: default
+        character(len=:), allocatable :: text
+        integer :: ios
+        text = option(name, '')
+        backend_number = default
+        if (len(text) == 0) return
+        read (text, *, iostat=ios) backend_number
+        if (ios /= 0 .or. backend_number < 1) then
+            write (error_unit, '(a)') 'fy backend github: '//name//' needs a positive number'
+            call quit(2)
+        end if
+    end function backend_number
+
+    function token_line(file) result(s)
+        !! The first line of `file` (a token), empty when it cannot be read.
+        character(len=*), intent(in) :: file
+        character(len=:), allocatable :: s
+        character(len=4096) :: line
+        integer :: u, ios
+        s = ''
+        if (len(file) == 0) return
+        open (newunit=u, file=file, action='read', status='old', iostat=ios)
+        if (ios /= 0) return
+        read (u, '(a)', iostat=ios) line
+        close (u)
+        if (ios == 0) s = trim(line)
+    end function token_line
 
     subroutine cmd_land()
         !! fy land [BRANCH] [--repo NAME] [--no-push] [--no-wait]: pushes HEAD of

@@ -56,6 +56,7 @@ module fy_store
         store_check_finish, &
         store_check_get, &
         store_check_holder, &
+        store_check_info, &
         store_check_jobs, &
         store_check_release, &
         store_check_take, &
@@ -1793,6 +1794,40 @@ contains
         end if
         call stmt_finalize(st)
     end subroutine store_check_holder
+
+    subroutine store_check_info(db, id, repo, ref, kind, class, state, runner, found)
+        !! What check `id` is of and where it stands: its repository, ref,
+        !! kind, class, state and the runner that holds or last held it
+        !! (empty for none).
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: id
+        character(len=:), allocatable, intent(out) :: repo, ref, kind, class, state, runner
+        logical, intent(out) :: found
+        type(stmt_t) :: st
+        integer :: stat
+
+        repo = ''
+        ref = ''
+        kind = ''
+        class = ''
+        state = ''
+        runner = ''
+        found = .false.
+        call db_prepare(db, "SELECT repo, ref, kind, class, state, coalesce(runner, '') FROM"// &
+            ' checks WHERE id = ?1;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, id, stat)
+        if (stmt_step(st) == SQLITE_ROW) then
+            repo = stmt_text(st, 0)
+            ref = stmt_text(st, 1)
+            kind = stmt_text(st, 2)
+            class = stmt_text(st, 3)
+            state = stmt_text(st, 4)
+            runner = stmt_text(st, 5)
+            found = .true.
+        end if
+        call stmt_finalize(st)
+    end subroutine store_check_info
 
     subroutine store_check_jobs(db, id, jobs)
         !! The jobs that check `id` decides: the one whose number ends its ref,

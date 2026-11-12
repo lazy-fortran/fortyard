@@ -18,10 +18,13 @@ module fy_repo
         repo_log_json, &
         repo_name_ok, &
         repo_path_ok, &
+        repo_publish, &
+        repo_published, &
         repo_push_tags, &
         repo_ref_ok, &
         repo_refs_json, &
-        repo_tree_json
+        repo_tree_json, &
+        repo_unpublish
 
     integer, parameter, public :: BLOB_MAX = 1048576
     integer, parameter, public :: DIFF_MAX = 524288
@@ -373,6 +376,95 @@ contains
             close (u)
         end subroutine spit
     end subroutine repo_push_tags
+
+    subroutine repo_publish(repo, upstream, check, ref, branch, commit, out, status)
+        !! Pushes the commit of `ref` in `repo` to `upstream` as `branch`, for
+        !! the check numbered `check`, forced, since a check queued again is
+        !! published again. It is recorded in fortyard-published/<check> of
+        !! `repo` before the push, so that repo_unpublish deletes it even
+        !! when the push broke off half-way.
+        character(len=*), intent(in) :: repo, upstream, check, ref, branch
+        character(len=:), allocatable, intent(out) :: commit, out
+        integer, intent(out) :: status
+        integer :: u, ios
+
+        out = ''
+        call proc_run([character(len=1024) :: 'git', '--git-dir', repo, 'rev-parse', '--verify', &
+            '--quiet', ref//'^{commit}'], commit, status, 4096)
+        commit = trim_newlines(commit)
+        if (status /= 0 .or. len(commit) /= 40) then
+            out = 'No commit for '//ref//'.'
+            status = 1
+            return
+        end if
+        call proc_run([character(len=1024) :: 'mkdir', '-p', repo//'/fortyard-published'], out, &
+            status, 4096)
+        open (newunit=u, file=repo//'/fortyard-published/'//check, status='replace', &
+            action='write', iostat=ios)
+        if (ios /= 0) then
+            out = 'The publication could not be recorded.'
+            status = 1
+            return
+        end if
+        write (u, '(a)') branch
+        close (u)
+        call proc_run([character(len=1024) :: 'sh', '-c', 'exec "$@" 2>&1', 'push', 'env', &
+            'GIT_TERMINAL_PROMPT=0', 'timeout', '300', 'git', '--git-dir', repo, 'push', '--quiet', &
+            '--force', upstream, commit//':refs/heads/'//branch], out, status, 65536)
+    end subroutine repo_publish
+
+    subroutine repo_unpublish(repo, upstream, check, branch, out, status)
+        !! Deletes the branch that repo_publish pushed for check `check` from
+        !! `upstream`, and its record; `branch` is its name, empty when
+        !! nothing of the check is published. A branch the upstream does
+        !! not have counts as deleted. A minute at most: it runs in a
+        !! request worker and in the mirror loop, and the sweep retries.
+        character(len=*), intent(in) :: repo, upstream, check
+        character(len=:), allocatable, intent(out) :: branch, out
+        integer, intent(out) :: status
+        character(len=:), allocatable :: heads
+        character(len=1024) :: line
+        integer :: u, ios, stat
+
+        branch = ''
+        out = ''
+        status = 0
+        open (newunit=u, file=repo//'/fortyard-published/'//check, status='old', action='read', &
+            iostat=ios)
+        if (ios /= 0) return
+        read (u, '(a)', iostat=ios) line
+        close (u)
+        branch = trim(line)
+        if (ios /= 0 .or. .not. repo_ref_ok(branch)) then
+            branch = ''
+            call proc_run([character(len=1024) :: 'rm', '-f', repo//'/fortyard-published/'//check], &
+                out, status, 4096)
+            return
+        end if
+        call proc_run([character(len=1024) :: 'sh', '-c', 'exec "$@" 2>&1', 'push', 'env', &
+            'GIT_TERMINAL_PROMPT=0', 'timeout', '60', 'git', '--git-dir', repo, 'push', '--quiet', &
+            upstream, ':refs/heads/'//branch], out, status, 65536)
+        if (status /= 0) then
+            call proc_run([character(len=1024) :: 'env', 'GIT_TERMINAL_PROMPT=0', 'timeout', &
+                '60', 'git', '--git-dir', repo, 'ls-remote', '--heads', upstream, &
+                'refs/heads/'//branch], heads, stat, 65536)
+            if (stat /= 0 .or. len(trim_newlines(heads)) > 0) return
+            status = 0
+        end if
+        call proc_run([character(len=1024) :: 'rm', '-f', repo//'/fortyard-published/'//check], &
+            heads, stat, 4096)
+    end subroutine repo_unpublish
+
+    function repo_published(repo) result(checks)
+        !! The numbers of the checks that have a branch published from
+        !! `repo`, one per line.
+        character(len=*), intent(in) :: repo
+        character(len=:), allocatable :: checks
+        integer :: status
+
+        call proc_run([character(len=1024) :: 'sh', '-c', 'ls "$1" 2>/dev/null; true', 'ls', &
+            repo//'/fortyard-published'], checks, status, 1048576)
+    end function repo_published
 
     function field(rec, n) result(s)
         !! Field n of a record separated by US.

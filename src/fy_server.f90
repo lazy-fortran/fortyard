@@ -137,10 +137,13 @@ module fy_server
         repo_log_json, &
         repo_name_ok, &
         repo_path_ok, &
+        repo_publish, &
+        repo_published, &
         repo_push_tags, &
         repo_ref_ok, &
         repo_refs_json, &
-        repo_tree_json
+        repo_tree_json, &
+        repo_unpublish
     use fy_review, only: &
         review_enabled, &
         reviewer_main
@@ -167,6 +170,7 @@ module fy_server
         store_check_finish, &
         store_check_get, &
         store_check_holder, &
+        store_check_info, &
         store_check_jobs, &
         store_check_release, &
         store_job, &
@@ -501,6 +505,8 @@ contains
                         flush (error_unit)
                     end if
                 end do
+                ! Branches of ended checks still on an upstream.
+                call published_sweep(db)
                 call db_close(db)
             end if
             ! A consistent copy of the database for the host's file backup, hourly.
@@ -2228,6 +2234,7 @@ contains
         !! reports it; a runner taken as lost gets 409.
         !! POST /api/v1/checks/release: the calling runner's running checks
         !! are queued again (it restarted).
+        !! GET, POST and DELETE /api/v1/checks/N/publish: see publish_check.
         type(http_request_t), intent(in) :: req
         type(db_t), intent(in) :: db
         type(response_t), intent(inout) :: res
@@ -2237,10 +2244,14 @@ contains
         character(len=24) :: num, limit
         integer(int64) :: id
         integer :: ios, k, seconds, minutes, most
-        logical :: found, ok
+        logical :: found, ok, publish
 
         if (.not. authenticated(req, db, who, res)) return
-        if (.not. method_is(req, 'POST', res)) return
+        publish = len(req%path) > 23 .and. index(req%path, '/publish', back=.true.) == &
+            len(req%path) - 7
+        if (.not. (publish .and. (req%method == 'DELETE' .or. req%method == 'GET'))) then
+            if (.not. method_is(req, 'POST', res)) return
+        end if
         if (index(' '//who%scopes//' ', ' admin ') == 0 .and. &
             index(' '//who%scopes//' ', ' runner ') == 0) then
             call fail(res, 403, 'checks need the runner or admin scope')
@@ -2297,6 +2308,10 @@ contains
                 kind//'","timeout":'//trim(limit)//'}'
             return
         end if
+        if (publish) then
+            call publish_check()
+            return
+        end if
         if (index(req%path, '/log') == len(req%path) - 3 .and. len(req%path) > 19) then
             call append_log()
             return
@@ -2340,6 +2355,8 @@ contains
             return
         end if
         call events_notify('checks')
+        ! Its branch on the upstream, if a backend had it published, goes now.
+        call check_unpublish(db, id)
         res%body = '{"recorded":true,"state":"'//state//'"}'
 
     contains
@@ -2366,6 +2383,80 @@ contains
             end do
             iso_time = verify(t(20:), D//'.:+-Z') == 0
         end function iso_time
+        subroutine publish_check()
+            !! POST /api/v1/checks/N/publish [{"class":"..."}]: pushes the commit
+            !! of check N, which the calling runner holds, to the repository's
+            !! upstream as branch fortyard/check/N, with -macos or -windows for
+            !! such a class (the body's, else the check's) and -verify for a
+            !! verification, so the shipped workflow picks the machine and the
+            !! command from the name. Answers {"branch","commit"}. DELETE of
+            !! the route, by the runner that holds or held the check, deletes
+            !! the branch again ({"branch":...} or null when none is left).
+            !! GET, by that runner, answers where it would be published and
+            !! how the check stands: {"repository":"OWNER/NAME","state":...},
+            !! so a backend knows the upstream's name and sees a cancel.
+            !! Only a primary repository's checks are published: a mirror's
+            !! upstream is its source, which fortyard fetches from.
+            character(len=:), allocatable :: digits, holder, branch, commit, out, upstream, ask
+            type(repo_info_t), allocatable :: repos(:)
+            integer :: i, stat
+
+            digits = req%path(16:len(req%path) - 8)
+            read (digits, *, iostat=ios) id
+            if (ios /= 0 .or. len(digits) == 0 .or. verify(digits, '0123456789') /= 0) then
+                call fail(res, 404, 'not found')
+                return
+            end if
+            call store_check_info(db, id, repo, ref, kind, class, state, holder, found)
+            if (.not. found) then
+                call fail(res, 404, 'no check with that number')
+                return
+            end if
+            if (holder /= who%token_name) then
+                call fail(res, 403, 'only the runner that claimed the check publishes it')
+                return
+            end if
+            if (req%method == 'DELETE') then
+                call check_unpublish(db, id, branch, stat, out)
+                if (stat /= 0) then
+                    call fail(res, 502, 'the branch could not be deleted: '//out)
+                    return
+                end if
+                res%body = '{"branch":'//text_or_null(branch)//'}'
+                return
+            end if
+            upstream = ''
+            call store_repo_list(db, repos, stat)
+            do i = 1, size(repos)
+                if (repos(i)%name /= repo) cycle
+                if (repos(i)%mode == 'primary') upstream = repos(i)%upstream
+            end do
+            if (len(upstream) == 0) then
+                call fail(res, 409, 'only a primary repository with an upstream is published')
+                return
+            end if
+            if (req%method == 'GET') then
+                res%body = '{"repository":"'//json_escape_string(upstream_slug(upstream))// &
+                    '","state":"'//state//'"}'
+                return
+            end if
+            if (state /= 'running') then
+                call fail(res, 409, 'no running check with that number')
+                return
+            end if
+            call json_extract_string(req%body, 'class', ask, found)
+            if (found) class = ask
+            branch = 'fortyard/check/'//digits
+            if (index(class, 'macos') > 0) branch = branch//'-macos'
+            if (index(class, 'windows') > 0) branch = branch//'-windows'
+            if (kind == 'verify') branch = branch//'-verify'
+            call repo_publish(repo_path(repo), upstream, digits, ref, branch, commit, out, stat)
+            if (stat /= 0) then
+                call fail(res, 502, 'the check could not be published: '//out)
+                return
+            end if
+            res%body = '{"branch":"'//branch//'","commit":"'//commit//'"}'
+        end subroutine publish_check
 
         subroutine append_log()
             !! POST /api/v1/checks/N/log?offset=O with the bytes the check wrote
@@ -2421,6 +2512,104 @@ contains
         end subroutine append_log
 
     end subroutine checks_route
+
+    subroutine check_unpublish(db, id, branch, stat, out)
+        !! Deletes the branch that was published for check `id` from its
+        !! repository's upstream (repo_unpublish); `branch` is empty when
+        !! none is left.
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: id
+        character(len=:), allocatable, intent(out), optional :: branch, out
+        integer, intent(out), optional :: stat
+        type(repo_info_t), allocatable :: repos(:)
+        character(len=:), allocatable :: repo, ref, kind, class, state, runner, name, text
+        character(len=24) :: num
+        integer :: i, status
+        logical :: found
+
+        if (present(branch)) branch = ''
+        if (present(out)) out = ''
+        if (present(stat)) stat = 0
+        call store_check_info(db, id, repo, ref, kind, class, state, runner, found)
+        if (.not. found) return
+        write (num, '(i0)') id
+        inquire (file=repo_path(repo)//'/fortyard-published/'//trim(num), exist=found)
+        if (.not. found) return
+        call store_repo_list(db, repos, status)
+        if (status /= 0) return
+        do i = 1, size(repos)
+            if (repos(i)%name /= repo .or. len(repos(i)%upstream) == 0) cycle
+            call repo_unpublish(repo_path(repo), repos(i)%upstream, trim(num), name, text, status)
+            if (status /= 0) then
+                write (error_unit, '(a,i0)') 'fy: deleting '//name//' of '//repo// &
+                    ' upstream failed with status ', status
+                flush (error_unit)
+            end if
+            if (present(branch)) branch = name
+            if (present(out)) out = text
+            if (present(stat)) stat = status
+        end do
+    end subroutine check_unpublish
+
+    function upstream_slug(url) result(slug)
+        !! OWNER/NAME of an upstream address (git@github.com:o/n.git,
+        !! https://github.com/o/n, /srv/o/n.git): its last two path parts.
+        character(len=*), intent(in) :: url
+        character(len=:), allocatable :: slug
+        integer :: e, k, cut
+
+        e = len_trim(url)
+        do while (e > 0)
+            if (url(e:e) /= '/') exit
+            e = e - 1
+        end do
+        if (e > 4) then
+            if (url(e - 3:e) == '.git') e = e - 4
+        end if
+        cut = 0
+        do k = e, 1, -1
+            if (url(k:k) /= '/' .and. url(k:k) /= ':') cycle
+            if (cut > 0) exit
+            cut = k
+        end do
+        slug = url(k + 1:e)
+    end function upstream_slug
+
+    subroutine published_sweep(db)
+        !! Deletes the upstream branches of checks that ended: a result
+        !! deletes its check's branch at once, this catches the rest (a
+        !! server that stopped in between, a check that was cancelled).
+        type(db_t), intent(in) :: db
+        type(repo_info_t), allocatable :: repos(:)
+        character(len=:), allocatable :: list, repo, ref, kind, class, state, runner
+        integer(int64) :: id
+        integer :: i, e, ios, stat
+        logical :: found
+
+        call store_repo_list(db, repos, stat)
+        if (stat /= 0) return
+        do i = 1, size(repos)
+            if (len(repos(i)%upstream) == 0) cycle
+            inquire (file=repo_path(repos(i)%name)//'/fortyard-published/.', exist=found)
+            if (.not. found) cycle
+            list = repo_published(repo_path(repos(i)%name))
+            do while (len(list) > 0)
+                e = index(list, new_line('a'))
+                if (e == 0) e = len(list) + 1
+                read (list(1:e - 1), *, iostat=ios) id
+                if (ios == 0 .and. verify(list(1:e - 1), '0123456789') == 0) then
+                    call store_check_info(db, id, repo, ref, kind, class, state, runner, found)
+                    if (state /= 'queued' .and. state /= 'running') then
+                        call check_unpublish(db, id, stat=stat)
+                        ! An upstream that fails is tried again next round, not
+                        ! once per branch now.
+                        if (stat /= 0) exit
+                    end if
+                end if
+                list = list(min(e + 1, len(list) + 1):)
+            end do
+        end do
+    end subroutine published_sweep
 
     subroutine jobs_route(req, db, res)
         !! GET /api/v1/jobs[?repo=NAME][&kind=landing|test|verify][&state=STATE]:
