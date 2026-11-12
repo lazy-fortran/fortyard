@@ -110,6 +110,11 @@ program test_check_timeout
         exitstat=stat)
     call land_check(group, out, code, limit=0, timed_out=timed_out)
     call check(.not. timed_out .and. code == 0, 'a check that ends by itself is no timeout')
+    ! An fpm project with a script of its own is checked by the script.
+    call execute_command_line('printf ''name = "x"\n'' > '//group//'/fpm.toml', exitstat=stat)
+    call land_check(group, out, code, limit=60, timed_out=timed_out)
+    call check(code == 0 .and. index(out, 'quick') > 0, 'the script, not fo, checks an fpm project: '//out)
+    call execute_command_line('rm -f '//group//'/fpm.toml', exitstat=stat)
 
     ! A process the check starts in a session of its own escapes the group's
     ! signals and holds the output open; the limit still ends the check

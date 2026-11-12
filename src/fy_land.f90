@@ -850,9 +850,9 @@ contains
     end function absolute
 
     subroutine land_check(work, out, code, verify, limit, timed_out, grace)
-        !! The check of a landing commit checked out in `work`: fo build and fo
-        !! test for an fpm project (applications built, so tests may run them),
-        !! else an executable .fortyard/check; under a memory cap when systemd can
+        !! The check of a landing commit checked out in `work`: an executable
+        !! .fortyard/check, else fo build and fo test for an fpm project
+        !! (applications built, so tests may run them); under a memory cap when systemd can
         !! give one. `out` is its output (folded as fold() says; the sink set
         !! with land_set_live hears of it while it grows), `code` its exit
         !! status. With `verify`,
@@ -902,17 +902,19 @@ contains
                 cmd = [character(len=1024) :: 'sh', '-c', 'fo build && FO_TEST_RERUN=1 fo test']
             end if
         else
-            inquire (file=work//'/fpm.toml', exist=exists)
+            ! The repository's own script wins, as .fortyard/verify does: an fpm
+            ! project may be tested through another build, such as CMake.
+            inquire (file=work//'/.fortyard/check', exist=exists)
             if (exists) then
-                cmd = [character(len=1024) :: 'sh', '-c', 'fo build && fo test']
+                cmd = [character(len=1024) :: './.fortyard/check']
             else
-                inquire (file=work//'/.fortyard/check', exist=exists)
+                inquire (file=work//'/fpm.toml', exist=exists)
                 if (.not. exists) then
                     out = 'No check is configured (fpm.toml or .fortyard/check).'
                     code = 0
                     return
                 end if
-                cmd = [character(len=1024) :: './.fortyard/check']
+                cmd = [character(len=1024) :: 'sh', '-c', 'fo build && fo test']
             end if
         end if
         ! A sandbox the host provides (FY_CHECK_WRAP, e.g. srt with its
