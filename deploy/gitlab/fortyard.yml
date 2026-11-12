@@ -1,0 +1,144 @@
+# fortyard's fixed pipeline for checks on a GitLab runner. It lives as
+# fortyard.yml on the protected branch config of the CI project, whose CI/CD
+# configuration file points here (fy backend gitlab setup), so a pushed
+# commit never brings its own pipeline definition. fy backend gitlab pushes
+# each check as branch check/<id> and starts the pipeline through the API with
+# FY_REPO (the repository), FY_KIND (check or verify), FY_TIMEOUT (seconds)
+# and, when it holds an archive of fo's cache for the repository,
+# FY_CACHE_FILE and FY_CACHE_SHA256.
+#
+# Every job of the project holds CI_JOB_TOKEN, which can write the project's
+# package and container registries, so nothing a job writes there is trusted:
+# the backend uploads the cache archive itself from the job's artifact and
+# names its SHA-256, and the job uses no other archive. The job writes
+# fy-out/outcome after the check has ended (passed, failed, timeout, or
+# runner and stale for no verdict), so a line the check prints decides
+# nothing. The script below is the job's only one; the backend's test runs it.
+
+workflow:
+  rules:
+    # Only the backend's pipelines; pushes of check branches start none.
+    - if: '$CI_PIPELINE_SOURCE == "api" && $FY_REPO =~ /^[A-Za-z0-9][A-Za-z0-9._-]*$/ && $FY_TIMEOUT =~ /^[0-9]+$/'
+
+variables:
+  GIT_DEPTH: "1"
+  GIT_STRATEGY: clone
+  FO_VERSION: v0.3.2
+  FPM_VERSION: "0.13.0"
+  FPM_SHA256: 2e50a8649ac4136b9cf6b63c5d1b01adf26c02eedc18f32e16261c0ce655d46d
+
+check:
+  image: gcc:14
+  # The job ends itself at FY_TIMEOUT; this bounds a job that does not.
+  timeout: 6h
+  interruptible: true
+  artifacts:
+    when: always
+    expire_in: 1 day
+    paths:
+      - fy-out/
+  script:
+    - |
+      set +e
+      out="$PWD/fy-out"
+      rm -rf "$out"
+      mkdir -p "$out"
+      w="${FY_WORK:-/tmp/fy}"
+      tools="$w/tools"
+      export FO_CACHE_DIR="$w/fo-cache" CCACHE_DIR="$w/ccache"
+      mkdir -p "$w"
+      # Trouble before the check runs is no verdict on it.
+      infra() { echo "fortyard: $1"; echo runner > "$out/outcome"; exit 1; }
+      toolchain=$({ echo "$CI_JOB_IMAGE fo $FO_VERSION fpm $FPM_VERSION"; gfortran --version 2>&1 | head -n 1; } | sha256sum | cut -c1-16)
+      restored=0
+      if [ -n "$FY_CACHE_FILE" ]; then
+        if curl -fsS -H "JOB-TOKEN: $CI_JOB_TOKEN" -o "$w/cache.tar.gz" \
+            "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/fo-cache/$FY_REPO/$FY_CACHE_FILE" &&
+          echo "$FY_CACHE_SHA256  $w/cache.tar.gz" | sha256sum -c --status; then
+          tar -xzf "$w/cache.tar.gz" -C "$w" && [ "$(cat "$w/toolchain" 2>/dev/null)" = "$toolchain" ] && restored=1
+          if [ "$restored" = 1 ]; then
+            echo "fortyard: fo's cache of $FY_REPO is restored"
+          else
+            echo "fortyard: fo's cache of $FY_REPO is of another toolchain; building without it"
+          fi
+        else
+          echo "fortyard: fo's cache of $FY_REPO could not be fetched or is not the backend's; building without it"
+        fi
+        rm -f "$w/cache.tar.gz"
+      fi
+      if [ "$restored" = 1 ]; then
+        if [ -d "$w/dependencies" ]; then mkdir -p build && cp -a "$w/dependencies" build/; fi
+      else
+        rm -rf "$tools" "$FO_CACHE_DIR" "$CCACHE_DIR" "$w/dependencies"
+      fi
+      mkdir -p "$FO_CACHE_DIR" "$CCACHE_DIR" || infra "no room for fo's cache"
+      if [ ! -x "$tools/bin/fo" ] && ! command -v fo >/dev/null 2>&1; then
+        # fo from its release tag, built with fpm's release binary of the pinned checksum.
+        mkdir -p "$tools/bin"
+        { curl -fsSL -o "$tools/bin/fpm" \
+            "https://github.com/fortran-lang/fpm/releases/download/v$FPM_VERSION/fpm-$FPM_VERSION-linux-x86_64-gcc-12" &&
+          echo "$FPM_SHA256  $tools/bin/fpm" | sha256sum -c --status && chmod 755 "$tools/bin/fpm" &&
+          git clone --quiet --depth 1 --branch "$FO_VERSION" https://github.com/lazy-fortran/fo.git "$w/fo-src" &&
+          (cd "$w/fo-src" && "$tools/bin/fpm" install --profile release --prefix "$tools"); } ||
+          { rm -rf "$tools" "$w/fo-src"; infra "fo $FO_VERSION could not be installed"; }
+        rm -rf "$w/fo-src"
+      fi
+      export PATH="$tools/bin:$PATH"
+      echo "$toolchain" > "$w/toolchain"
+      if [ "$FY_KIND" = verify ]; then
+        script=.fortyard/verify; fallback='fo build && FO_TEST_RERUN=1 fo test'
+      else
+        script=.fortyard/check; fallback='fo build && fo test'
+      fi
+      if [ -f "$script" ]; then
+        set -- "./$script"
+      elif [ -f fpm.toml ]; then
+        set -- sh -c "$fallback"
+      else
+        echo "No $FY_KIND is configured ($script or fpm.toml)."
+        echo passed > "$out/outcome"
+        exit 0
+      fi
+      ran() {
+        limit=$1
+        shift
+        s=$(date +%s)
+        timeout -k 30 "$limit" "$@"
+        rc=$?
+        used=$(($(date +%s) - s))
+        # 124 or a kill is the limit only once the limit has passed, not the
+        # check's own exit code or the kernel's OOM killer.
+        timed=0
+        if { [ "$rc" = 124 ] || [ "$rc" = 137 ]; } && [ "$used" -ge "$limit" ]; then timed=1; fi
+      }
+      ran "$FY_TIMEOUT" "$@"
+      if [ "$rc" != 0 ] && [ "$timed" = 0 ] && [ "$restored" = 1 ]; then
+        # A failure is confirmed without the restored cache, so stale build
+        # state never fails a landing.
+        left=$((FY_TIMEOUT - used))
+        if [ "$left" -lt 60 ]; then
+          echo "fortyard: the check failed with fo's restored cache, and no time is left to confirm it without"
+          echo stale > "$out/outcome"
+          exit 1
+        fi
+        echo "--- the check failed with fo's restored cache and is rerun without it ---"
+        rm -rf build "$FO_CACHE_DIR" "$CCACHE_DIR"
+        mkdir -p "$FO_CACHE_DIR" "$CCACHE_DIR"
+        ran "$left" "$@"
+      fi
+      if [ "$timed" = 1 ]; then
+        echo "fortyard: the time limit ($FY_TIMEOUT s) ended the check"
+        echo timeout > "$out/outcome"
+        exit 1
+      fi
+      if [ "$rc" != 0 ]; then
+        echo failed > "$out/outcome"
+        exit 1
+      fi
+      echo passed > "$out/outcome"
+      # fo's cache for the next check of the repository; the backend uploads it.
+      rm -rf "$w/dependencies"
+      if [ -d build/dependencies ]; then cp -a build/dependencies "$w/dependencies"; fi
+      (cd "$w" && tar -czf "$out/fo-cache.tar.gz" toolchain fo-cache ccache $(ls -d tools dependencies 2>/dev/null)) ||
+        rm -f "$out/fo-cache.tar.gz"
+      exit 0

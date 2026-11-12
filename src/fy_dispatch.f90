@@ -241,8 +241,8 @@ contains
 
     subroutine dispatch_candidates(db, class, max_minutes, ids)
         !! The queued checks a backend process of `class` may take, in the
-        !! claim order where 1.5 * run(R, class) fits `max_minutes`: those of its
-        !! own class, and those of the home class it stands in for where
+        !! claim order: those of its own class, and those of the home class it
+        !! stands in for where 1.5 * run(R, class) fits `max_minutes` and
         !! eta(R, class) <= eta(R, home). Only of public repositories whose policy
         !! `backends` names the backend.
         type(db_t), intent(in) :: db
@@ -273,9 +273,11 @@ contains
         do while (stmt_step(st) == SQLITE_ROW)
             repo = stmt_text(st, 1)
             of = stmt_text(st, 2)
-            run_b = dispatch_run(db, repo, class)
-            if (1.5_real64*run_b > 60.0_real64*max_minutes) cycle
+            ! A check of the backend's own class was asked for by the policy; the
+            ! job's time limit bounds it. Standing in, it must fit that limit.
             if (of /= class) then
+                run_b = dispatch_run(db, repo, class)
+                if (1.5_real64*run_b > 60.0_real64*max_minutes) cycle
                 if (wait_b < 0) wait_b = dispatch_wait(db, class, 0_int64)
                 if (.not. wait_b + run_b <= eta_home(stmt_int(st, 0))) cycle
             end if

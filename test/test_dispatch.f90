@@ -176,10 +176,10 @@ program test_dispatch
     call store_check_claim(db, 'ghw', id, repo, ref, found, class='github-windows')
     call check(.not. found, 'github-windows stands in for nothing')
     call store_check_add(db, 'fx', 'win', win, stat, class='github-windows')
+    ! The policy asked for this class: the job's time limit bounds the check,
+    ! not the estimate, which may rest on no history at all.
     call store_check_claim(db, 'ghw', id, repo, ref, found, class='github-windows', max_minutes=5)
-    call check(.not. found, 'its own class too only within its time limit (1.5 * 225 s)')
-    call store_check_claim(db, 'ghw', id, repo, ref, found, class='github-windows')
-    call check(found .and. id == win, 'github-windows takes checks of its own class')
+    call check(found .and. id == win, 'github-windows takes checks of its own class, whatever its limit')
     call store_check_claim(db, 'ghm', id, repo, ref, found, class='github-macos-arm64')
     call check(found .and. id == mac, 'github-macos-arm64 stands in for macos-arm64 only')
     call store_check_claim(db, 'ghm', id, repo, ref, found, class='github-macos-arm64')

@@ -11,6 +11,10 @@ program fy
         github_configure, &
         github_main, &
         github_setup
+    use fy_backend_gitlab, only: &
+        gitlab_backend_main, &
+        gitlab_backend_t, &
+        gitlab_setup
     use fy_build_info, only: &
         FY_COMMIT, &
         FY_VERSION
@@ -198,6 +202,18 @@ contains
             '  backend github setup GITHUB-NAME --app-id ID --app-key FILE --owner ORG', &
             '        [--github-token-file F]', &
             '                      check and prepare ORG/GITHUB-NAME for the GitHub backend', &
+            '  backend gitlab --server URL --token-file F --gitlab URL --project GROUP/NAME', &
+            '         --project-token-file F2 --class gitlab-NAME [--data DIR]', &
+            '         [--max-minutes 15] [--start-wait 60] [--backoff 600] [--poll 5]', &
+            '         [--git-url URL]', &
+            '                      run checks of the class on the project''s GitLab runner:', &
+            '                        one job at a time; a job not started within', &
+            '                        --start-wait seconds is cancelled and the backend', &
+            '                        pauses for --backoff seconds', &
+            '  backend gitlab setup --gitlab URL --project GROUP/NAME', &
+            '         --project-token-file F2 [--config deploy/gitlab/fortyard.yml]', &
+            '                      put the fixed pipeline on the project''s protected', &
+            '                        branch config and make it the project''s CI/CD file', &
         ! landing and pushing
             '  land [BRANCH] [--repo NAME] [--no-push] [--no-wait]', &
             '                      push HEAD to BRANCH, land it on main after its check', &
@@ -508,6 +524,70 @@ contains
         call report(code, body, stat)
     end subroutine cmd_token
 
+    subroutine cmd_backend_gitlab()
+        !! fy backend gitlab [setup]: a backend process, or the setup of its project.
+        type(gitlab_backend_t) :: b
+        integer :: stat
+
+        b%gitlab = option('--gitlab', 'https://gitlab.tugraz.at')
+        b%project = option('--project', '')
+        b%project_token = first_line(option('--project-token-file', ''))
+        if (len(b%project) == 0 .or. len(b%project_token) == 0) then
+            write (error_unit, '(a)') 'fy backend gitlab: --project and --project-token-file '// &
+                '(a project access token) are needed'
+            call quit(2)
+        end if
+        if (positional(2) == 'setup') then
+            call gitlab_setup(b, option('--config', 'deploy/gitlab/fortyard.yml'), stat)
+            if (stat /= 0) call quit(1)
+            return
+        end if
+        b%server = option('--server', 'http://127.0.0.1:8740')
+        b%token = first_line(option('--token-file', ''))
+        if (len(b%token) == 0) &
+            error stop 'fy backend gitlab: --token-file must hold a runner token'
+        b%class = option('--class', '')
+        if (index(b%class, 'gitlab-') /= 1) &
+            error stop 'fy backend gitlab: --class gitlab-NAME is needed'
+        b%data_dir = option('--data', './fortyard-gitlab')
+        b%git_url = option('--git-url', '')
+        b%max_minutes = whole(option('--max-minutes', '15'))
+        b%start_wait = whole(option('--start-wait', '60'))
+        b%backoff = whole(option('--backoff', '600'))
+        b%poll = whole(option('--poll', '5'))
+        if (min(b%max_minutes, b%poll) < 1 .or. min(b%start_wait, b%backoff) < 0) &
+            error stop 'fy backend gitlab: --max-minutes and --poll take whole numbers from 1, '// &
+                '--start-wait and --backoff from 0'
+        call gitlab_backend_main(b)
+    end subroutine cmd_backend_gitlab
+
+    integer function whole(text)
+        !! The whole number `text`, or -1.
+        character(len=*), intent(in) :: text
+        integer :: ios
+
+        whole = -1
+        if (len(text) == 0 .or. verify(text, '0123456789') /= 0) return
+        read (text, *, iostat=ios) whole
+        if (ios /= 0) whole = -1
+    end function whole
+
+    function first_line(file) result(s)
+        !! The first line of `file`, '' when there is none.
+        character(len=*), intent(in) :: file
+        character(len=:), allocatable :: s
+        character(len=4096) :: line
+        integer :: u, ios
+
+        s = ''
+        if (len(file) == 0) return
+        open (newunit=u, file=file, action='read', iostat=ios)
+        if (ios /= 0) return
+        read (u, '(a)', iostat=ios) line
+        close (u)
+        if (ios == 0) s = trim(line)
+    end function first_line
+
     subroutine cmd_runner()
         character(len=:), allocatable :: server, file, token
         integer :: u, ios
@@ -539,14 +619,18 @@ contains
         call executor_main(positional(1))
     end subroutine cmd_executor
     subroutine cmd_backend()
-        !! fy backend github [setup REPO] ...: a backend process that runs the
-        !! checks of its classes on GitHub Actions, or the setup of one
-        !! repository for it.
+        !! fy backend github|gitlab ...: for github a backend process that runs
+        !! the checks of its classes on GitHub Actions, or the setup of one
+        !! repository for it; gitlab: cmd_backend_gitlab.
         character(len=:), allocatable :: text, token, gh_token
         integer :: max_running, max_macos, max_minutes, poll, start, stat
 
+        if (positional(1) == 'gitlab') then
+            call cmd_backend_gitlab()
+            return
+        end if
         if (positional(1) /= 'github') then
-            write (error_unit, '(a)') 'fy: usage: fy backend github ... (see fy help)'
+            write (error_unit, '(a)') 'fy: usage: fy backend github|gitlab ... (see fy help)'
             call quit(2)
         end if
         gh_token = ''

@@ -121,7 +121,9 @@ only takes checks whose home class is `github-windows` (see Nightly classes).
 today. A backend process is given a queued check it may take when
 `eta(R, backend) <= eta(R, home)` and `1.5 * run(R, backend)` fits the
 backend's time limit (`--max-minutes` of the backend process: 360 for GitHub,
-15 for GitLab by default; verifications included). Concurrency limits are
+15 for GitLab by default; verifications included). A check whose home class is
+the backend's own class (named in `verify_on`) was asked for by the policy: the
+backend takes it without an estimate, and the job's time limit bounds it. Concurrency limits are
 enforced at claim: GitHub's Free plan allows 20 jobs at once per organisation,
 5 of them on macOS, configured on the GitHub backend process; a GitLab backend
 runs one job.
