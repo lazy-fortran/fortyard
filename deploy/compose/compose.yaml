@@ -35,7 +35,8 @@ services:
     <<: *fortyard
     container_name: fortyard-runner
     network_mode: "service:fortyard"
-    tmpfs: ["/tmp:size=2g,exec"]
+    # Tests write to /var/tmp as on any Linux host, so it is writable too.
+    tmpfs: ["/tmp:size=2g,exec", "/var/tmp:size=2g,exec"]
     environment:
       FY_HOME: /fy
       TMPDIR: /tmp

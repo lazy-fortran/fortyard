@@ -12,7 +12,8 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    tmpfs: ["/tmp:size=4g,exec"]
+    # Tests write to /var/tmp as on any Linux host, so it is writable too.
+    tmpfs: ["/tmp:size=4g,exec", "/var/tmp:size=2g,exec"]
     environment:
       FY_TARGET: "@TARGET@"
       FY_RUNNER: "@HOME@"
