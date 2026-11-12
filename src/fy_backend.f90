@@ -85,9 +85,10 @@ contains
         !! with limits(k) the most running checks of classes(k)) while fewer
         !! than `max_running` run in all and fewer than limits(k) of that
         !! class, and gives each to `take` in a child process, with the
-        !! check's time limit at most `max_minutes`. Calls `tick`
-        !! at the start and every `tick_seconds`. Waits `idle_ms` when no
-        !! check is given. Runs until it is stopped.
+        !! check's time limit at most `max_minutes`. Calls `tick` at the start
+        !! and every `tick_seconds`, in a child process of its own, one at a
+        !! time, so a long sweep never holds up claiming. Waits `idle_ms` when
+        !! no check is given. Runs until it is stopped.
         character(len=*), intent(in) :: server, token, classes(:)
         integer, intent(in) :: limits(:), max_running, max_minutes, idle_ms, tick_seconds
         procedure(backend_take_i) :: take
@@ -95,7 +96,7 @@ contains
         character(len=:), allocatable :: body, repo, ref, kind
         character(len=24) :: lim, mins, num
         integer, allocatable :: pids(:), owner(:)
-        integer :: code, stat, k, timeout, parent, pid
+        integer :: code, stat, k, timeout, parent, pid, ticker
         integer(int64) :: now, rate, last_tick
         logical :: found, given, done
 
@@ -105,11 +106,23 @@ contains
             stat)
         parent = proc_pid()
         last_tick = -1
+        ticker = 0
         write (mins, '(i0)') max_minutes
         do
             call system_clock(now, rate)
-            if (last_tick < 0 .or. now - last_tick >= int(tick_seconds, int64)*rate) then
-                call tick()
+            if (ticker > 0) then
+                call proc_try_wait(ticker, done, stat)
+                if (done) ticker = 0
+            end if
+            if (ticker == 0 .and. (last_tick < 0 .or. &
+                now - last_tick >= int(tick_seconds, int64)*rate)) then
+                ticker = proc_fork()
+                if (ticker == 0) then
+                    if (.not. proc_die_with_parent(parent)) call proc_exit(1)
+                    call tick()
+                    call proc_exit(0)
+                end if
+                if (ticker < 0) ticker = 0
                 last_tick = now
             end if
             call reap()
