@@ -153,6 +153,12 @@ contains
             write (error_unit, '(a)') 'fy backend gitlab: cannot create '//b%data_dir
             return
         end if
+        call proc_run([character(len=1024) :: 'git', 'init', '--quiet', '--bare', &
+            b%data_dir//'/control.git'], out, stat, 4096)
+        if (stat /= 0) then
+            write (error_unit, '(a)') 'fy backend gitlab: cannot prepare the control repository'
+            return
+        end if
         call credentials(b, stat)
     end subroutine prepare
 
@@ -522,7 +528,7 @@ contains
         call credentials(b, stat)
         call proc_run([character(len=1024) :: 'sh', '-c', &
             'git -c credential.helper= -c "credential.helper=store --file=$(cd "$1" && pwd)/'// &
-            'credentials" push --quiet "$2" --delete "refs/heads/check/$3" 2>&1', 'delete', &
+            'credentials" -C "$1/control.git" push --quiet "$2" --delete "refs/heads/check/$3" 2>&1', 'delete', &
             b%data_dir, b%git_url, id], out, stat, 65536)
     end subroutine delete_branch
 
@@ -548,9 +554,9 @@ contains
         call credentials(b, stat)
         call proc_run([character(len=1024) :: 'sh', '-c', &
             'h="credential.helper=store --file=$(cd "$1" && pwd)/credentials"; '// &
-            'r=$(git -c credential.helper= -c "$h" ls-remote --heads "$2" '// &
+            'r=$(git -c credential.helper= -c "$h" -C "$1/control.git" ls-remote --heads "$2" '// &
             '"refs/heads/check/*" | cut -f2) && { [ -z "$r" ] || '// &
-            'git -c credential.helper= -c "$h" push --quiet "$2" --delete $r; } 2>&1', 'sweep', &
+            'git -c credential.helper= -c "$h" -C "$1/control.git" push --quiet "$2" --delete $r; } 2>&1', 'sweep', &
             b%data_dir, b%git_url], out, stat, 65536)
     end subroutine sweep
 

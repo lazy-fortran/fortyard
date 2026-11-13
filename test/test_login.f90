@@ -42,7 +42,7 @@ program test_login
 
     call execute_command_line('rm -rf '//dir//' && mkdir -p '//dir// &
         '/idp/protocol/openid-connect')
-    call get_environment_variable('PWD', buf)
+    call getcwd(buf)
     cwd = trim(buf)
     issuer = 'file://'//cwd//'/'//dir//'/idp'
     open (newunit=u, file=dir//'/oidc.conf', status='replace', action='write')

@@ -123,6 +123,7 @@ program test_backend_github
     end do
     call execute_command_line('git init -q -b main '//work//' && mkdir -p '//work// &
         '/.github/workflows && cp deploy/github/fortyard.yml '//work//'/.github/workflows/ && '// &
+        'chmod u+w '//work//'/.github/workflows/fortyard.yml && '// &
         'echo "on: push" > '//work//'/.github/workflows/old.yml && cd '//work//' && '//git// &
         'add -A && '//git//'commit -q -m base && for s in pass fail never timedout hold; do '// &
         git//'checkout -q -B $s main && echo $s > scenario && '//git//'add -A && '//git// &

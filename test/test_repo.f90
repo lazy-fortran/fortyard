@@ -1,4 +1,5 @@
 program test_repo
+    use fy_proc, only: proc_setenv
     use fy_repo, only: &
         repo_blob, &
         repo_clone, &
@@ -18,6 +19,8 @@ program test_repo
     character(len=:), allocatable :: json, content
     integer :: status
 
+    call proc_setenv('GIT_CONFIG_GLOBAL', '/dev/null')
+    call proc_setenv('GIT_CONFIG_NOSYSTEM', '1')
     call sh('rm -rf '//up//' '//mirror//' && mkdir -p '//up//'/src && git init -q -b main '//up// &
         ' && printf "hello\n" > '//up//'/README && printf "x = 1\n" > '//up//'/src/a.f90 && '// &
         g//'add -A && '//g//'commit -q -m "First commit" && printf "x = 2\n" > '//up// &

@@ -25,3 +25,13 @@ fortui = { git = "https://github.com/lazy-fortran/fortui.git", rev = "42b3374aaf
 name = "fy"
 source-dir = "app"
 main = "fy.f90"
+
+[[extra.fo.inputs]]
+path = "deploy"
+kind = "directory"
+role = "test-fixture"
+
+[[extra.fo.inputs]]
+path = "scripts"
+kind = "directory"
+role = "test-fixture"

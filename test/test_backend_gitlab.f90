@@ -45,6 +45,7 @@ program test_backend_gitlab
         proc_exit, &
         proc_fork, &
         proc_kill, &
+        proc_pid, &
         proc_run, &
         proc_setenv, &
         proc_sleep_ms, &
@@ -66,11 +67,8 @@ program test_backend_gitlab
         store_token_create
     implicit none
 
-    character(len=*), parameter :: top = 'build/test_backend_gitlab'
-    character(len=*), parameter :: data = top//'/data', work = top//'/work', &
-        backend_dir = top//'/backend', hold = top//'/hold', jobs_dir = top//'/jobs', &
-        pkg_dir = top//'/packages', fake_log = top//'/gitlab.log', script = top//'/job.sh', &
-        stub_dir = top//'/bin'
+    character(len=:), allocatable :: top, data, work, backend_dir, hold, jobs_dir, &
+        pkg_dir, fake_log, script, stub_dir
     character(len=*), parameter :: git = 'git -c user.name=T -c user.email=t@example.org '
     character(len=*), parameter :: prefix = '/api/v4/projects/grp%2Fci'
     character(len=*), parameter :: generic = '/packages/generic/fo-cache/demo/'
@@ -102,6 +100,17 @@ program test_backend_gitlab
     sup = 0
     fake = 0
     back = 0
+    write (num, '(i0)') proc_pid()
+    top = 'build/test_backend_gitlab-'//trim(num)
+    data = top//'/data'
+    work = top//'/work'
+    backend_dir = top//'/backend'
+    hold = top//'/hold'
+    jobs_dir = top//'/jobs'
+    pkg_dir = top//'/packages'
+    fake_log = top//'/gitlab.log'
+    script = top//'/job.sh'
+    stub_dir = top//'/bin'
     call proc_setenv('GIT_CONFIG_GLOBAL', '/dev/null')
     call proc_setenv('GIT_CONFIG_NOSYSTEM', '1')
     call getcwd(cwd)
@@ -187,13 +196,18 @@ program test_backend_gitlab
     b%project = 'grp/ci'
     b%project_token = project_token
     b%class = 'gitlab-test'
-    b%data_dir = backend_dir
+    b%data_dir = trim(cwd)//'/'//backend_dir
     b%git_url = remote
     b%start_wait = 3
     b%backoff = 3
     b%poll = 1
     back = proc_fork()
     if (back == 0) then
+        call proc_setenv('GIT_CEILING_DIRECTORIES', trim(cwd)//'/'//top)
+        call chdir(b%data_dir, stat)
+        call check(stat == 0, 'the backend starts from its data directory')
+        call proc_run([character(len=32) :: 'git', 'rev-parse', '--git-dir'], text, stat, 1024)
+        call check(stat /= 0, 'the backend starts outside a Git repository')
         call gitlab_backend_main(b)
         call proc_exit(0)
     end if

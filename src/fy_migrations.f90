@@ -168,6 +168,11 @@ contains
             'CREATE TABLE verify_nights (repo TEXT NOT NULL, class TEXT NOT NULL,'// &
             ' night TEXT NOT NULL, main TEXT NOT NULL, PRIMARY KEY (repo, class, night));')
 
+        ! Rewritten source remains findable without attributing old checks to it.
+        call migration_add(list, 'history-rewrites', &
+            'CREATE TABLE history_rewrites (repo TEXT NOT NULL, old_id TEXT NOT NULL,'// &
+            ' new_id TEXT NOT NULL, rewritten_at TEXT NOT NULL, PRIMARY KEY (repo, old_id));')
+
     end subroutine migrations_registry
 
 end module fy_migrations

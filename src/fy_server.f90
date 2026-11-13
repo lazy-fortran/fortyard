@@ -128,6 +128,7 @@ module fy_server
         proc_sleep_ms, &
         proc_wait, &
         proc_wait_any
+    use fy_rewrite_store, only: history_rewrite_lookup
     use fy_repo, only: &
         repo_blob, &
         repo_clone, &
@@ -1038,6 +1039,7 @@ contains
         end if
         select case (sub)
         case ('blob')
+            if (.not. resolve_source_ref(ref)) return
             call repo_blob(repo_path(name), ref, path, res%body, status)
             if (status == 413) then
                 call fail(res, 413, 'file larger than 1 MiB')
@@ -1045,21 +1047,44 @@ contains
             end if
             res%ctype = 'text/plain; charset=utf-8'
         case ('log')
+            if (.not. resolve_source_ref(ref)) return
             call repo_log_json(repo_path(name), ref, 100, res%body, status)
         case ('refs')
             call repo_refs_json(repo_path(name), res%body, status)
         case ('tree')
+            if (.not. resolve_source_ref(ref)) return
             call repo_tree_json(repo_path(name), ref, path, res%body, status)
         case default
             if (index(sub, 'commits/') /= 1 .or. .not. repo_ref_ok(sub(9:))) then
                 call fail(res, 404, 'not found')
                 return
             end if
-            call repo_commit_json(repo_path(name), sub(9:), res%body, status)
+            ref = sub(9:)
+            if (.not. resolve_source_ref(ref)) return
+            call repo_commit_json(repo_path(name), ref, res%body, status)
         end select
         if (status /= 0) call fail(res, 404, 'no such ref, path or commit')
 
     contains
+
+        logical function resolve_source_ref(source) result(ok)
+            character(len=:), allocatable, intent(inout) :: source
+            character(len=:), allocatable :: replacement
+            logical :: rewritten
+            integer :: rc
+
+            call history_rewrite_lookup(db, name, source, replacement, rewritten, rc)
+            ok = rc == 0
+            if (.not. ok) then
+                call fail(res, 500, 'history rewrite metadata cannot be resolved')
+                return
+            end if
+            if (.not. rewritten) return
+            ! Source navigation may follow an alias; check evidence never does.
+            res%headers = res%headers//'X-Fortyard-Rewritten-From: '//source//CRLF// &
+                'X-Fortyard-Resolved-Ref: '//replacement//CRLF
+            source = replacement
+        end function resolve_source_ref
 
         subroutine releases_route(target, tail)
             !! GET  .../releases          the newest releases (JSON, or ?format=text

@@ -33,6 +33,14 @@ program fy
         config_t
     use fy_executor, only: &
         executor_main
+    use fy_history, only: &
+        history_recover, &
+        history_rewrite
+    use fy_instance_lock, only: &
+        instance_batch_pending, &
+        instance_lock, &
+        instance_pending, &
+        instance_unlock
     use fy_land, only: &
         land_git_check, &
         land_push_check
@@ -77,6 +85,8 @@ program fy
     ! Asking for help never runs a command: `fy land --help` once landed.
     if (wants_help()) command = 'help'
     select case (command)
+    case ('admin')
+        call cmd_admin()
     case ('audit')
         call cmd_audit()
     case ('backends')
@@ -137,6 +147,11 @@ contains
         write (output_unit, '(a)') &
             'usage: fy <command> [options]', &
             '', &
+            '  admin rewrite NAME --data DIR --bundle FILE --expect-refs FILE', &
+            '        --commit-map FILE [--check] [--journal-id ID]', &
+            '                      offline history replacement (local administrator)', &
+            '  admin rewrite NAME --data DIR --recover JOURNAL', &
+            '                      recover an interrupted offline history replacement', &
         ! the server
             '  serve [--data DIR] [--listen HOST:PORT] [--workers P] [--threads T]', &
             '        [--web DIR] [--mirror-interval SECONDS] [--init]', &
@@ -330,7 +345,7 @@ contains
     subroutine cmd_serve()
         character(len=:), allocatable :: data, listen, host, token, text, web
         type(db_t) :: db
-        integer :: lfd, port, stat, colon, workers, threads, interval, n
+        integer :: lfd, port, stat, colon, workers, threads, interval, n, instance_fd
         logical :: exists
 
         ! Landings are squashed by git itself, which older versions cannot do.
@@ -364,6 +379,15 @@ contains
             write (error_unit, '(a)') 'fy: '//data//' is not initialized; run fy serve --init'
             call quit(1)
         end if
+        call instance_lock(data, instance_fd, stat)
+        if (stat /= 0) then
+            write (error_unit, '(a)') 'fy: the instance is already running or under maintenance'
+            call quit(1)
+        end if
+        if (instance_pending(data) .or. instance_batch_pending(data)) then
+            write (error_unit, '(a)') 'fy: an interrupted history rewrite needs admin recovery'
+            call quit(1)
+        end if
         call store_open(data//'/fortyard.db', db, stat, text)
         if (stat /= 0) then
             if (len(text) == 0) text = db_errmsg(db)
@@ -375,6 +399,8 @@ contains
             if (stat /= 0) error stop 'fy: bootstrap failed'
             call audit_append(db, 'admin', 'token.created', 'bootstrap', 'scopes admin')
             write (output_unit, '(a)') 'Administrator token (shown once, store it now):', token
+            call db_close(db)
+            call instance_unlock(instance_fd)
             return
         end if
 
@@ -413,6 +439,43 @@ contains
         call server_set_mirror_interval(interval)
         call server_supervise(lfd, data//'/fortyard.db', workers, threads)
     end subroutine cmd_serve
+
+    subroutine cmd_admin()
+        character(len=:), allocatable :: data, repo, journal, message, recover
+        integer :: status
+
+        if (arg(2) /= 'rewrite' .or. len(arg(3)) == 0) then
+            write (error_unit, '(a)') 'fy: usage: fy admin rewrite NAME --data DIR '// &
+                '--bundle FILE --expect-refs FILE --commit-map FILE [--check] [--journal-id ID]'
+            call quit(2)
+        end if
+        repo = arg(3)
+        data = option('--data', './fortyard-data')
+        recover = option('--recover', '')
+        if (len(recover) > 0 .and. (flag('--check') .or. flag('--journal-id'))) then
+            write (error_unit, '(a)') 'fy: --recover cannot be combined with --check or --journal-id'
+            call quit(2)
+        end if
+        if (len(recover) > 0) then
+            call history_recover(data, repo, recover, status, message)
+        else if (flag('--journal-id')) then
+            call history_rewrite(data, repo, option('--bundle', ''), &
+                option('--expect-refs', ''), option('--commit-map', ''), journal, status, message, &
+                check_only=flag('--check'), journal_id=option('--journal-id', ''))
+        else
+            call history_rewrite(data, repo, option('--bundle', ''), &
+                option('--expect-refs', ''), option('--commit-map', ''), journal, status, message, &
+                check_only=flag('--check'))
+        end if
+        if (status /= 0) then
+            write (error_unit, '(a)') 'fy: '//message
+            call quit(1)
+        end if
+        write (output_unit, '(a)') message
+        if (allocated(journal)) then
+            if (len(journal) > 0) write (output_unit, '(a)') 'Recovery backup: '//journal
+        end if
+    end subroutine cmd_admin
 
     function beside_program(name) result(path)
         !! `name` in the directory of this executable, as it was started.

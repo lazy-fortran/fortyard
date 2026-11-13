@@ -9,7 +9,7 @@ program test_mirror
         sock_set_timeouts, &
         tcp_connect, &
         tcp_listen
-    use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, SIGTERM
+    use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, proc_setenv, SIGTERM
     use fy_server, only: server_supervise, server_set_data_dir, server_set_mirror_interval
     use fy_sqlite, only: db_t, db_close
     use fy_store, only: store_open, store_bootstrap, store_repo_add
@@ -24,6 +24,8 @@ program test_mirror
     character(len=4096) :: cwd
     integer :: lfd, port, stat, sup, i
 
+    call proc_setenv('GIT_CONFIG_GLOBAL', '/dev/null')
+    call proc_setenv('GIT_CONFIG_NOSYSTEM', '1')
     call execute_command_line('rm -rf '//data//' '//up//' && mkdir -p '//data//' '//up// &
         ' && git init -q -b main '//up//' && printf "hello\n" > '//up//'/README && '//g// &
         'add README && '//g//'commit -q -m "Initial commit"', exitstat=stat)

@@ -38,3 +38,5 @@ FY_TEST_BASE=/yard node test/web_app_test.mjs build/fo/bin/fy build/web   # belo
 
 See [DESIGN.md](DESIGN.md) for goals, decisions and architecture, and
 [doc/testing-at-scale.md](doc/testing-at-scale.md) for testing large codes.
+Instance administrators can [replace primary repository history](doc/history-rewrites.md)
+with leased refs, private backups and recovery.
