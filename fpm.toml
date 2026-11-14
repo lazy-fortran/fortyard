@@ -19,7 +19,7 @@ source-form = "free"
 openmp = "*"
 fy_parser = { path = "parser" }
 fx = { git = "https://github.com/lazy-fortran/fx.git", rev = "dccc8c5ca05e4ebccc57b0a16390f753cb4d26a2" }
-fortui = { git = "https://github.com/lazy-fortran/fortui.git", rev = "fd6dd42e0235bd317c8b6346eb441182be32b874" }
+fortui = { git = "https://github.com/lazy-fortran/fortui.git", rev = "4d75aaa6f023a484d6d3c5bb63e5b661afabf80f" }
 
 [[executable]]
 name = "fy"
