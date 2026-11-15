@@ -239,7 +239,8 @@ contains
                 p%verify_on = value
             else
                 error = 'verify_on is runner classes separated by commas, each 1 to 32 of'// &
-                    ' a-z, 0-9 and -, optionally followed by @nightly, at most 8, each named once'
+                    ' a-z, 0-9 and -, optionally followed by @nightly, at most 8, each entry'// &
+                    ' named once'
             end if
         case ('backends')
             if (backends_ok(value)) then
@@ -272,9 +273,11 @@ contains
         end function number
 
         logical function classes_ok(text)
-            !! Also refuses a class named twice, with or without schedule.
+            !! Also refuses an entry named twice; a class may be named once
+            !! without and once with a schedule (verified after each landing and
+            !! again at night).
             character(len=*), intent(in) :: text
-            character(len=32) :: seen(8)
+            character(len=40) :: seen(8)
             integer :: i, j, n, e
 
             classes_ok = .false.
@@ -293,9 +296,9 @@ contains
                 end if
                 if (.not. policy_class_name(text(i:e))) return
                 if (n >= 8) return
-                if (any(seen(1:n) == text(i:e))) return
+                if (any(seen(1:n) == text(i:j - 1))) return
                 n = n + 1
-                seen(n) = text(i:e)
+                seen(n) = text(i:j - 1)
                 if (j > len(text)) exit
                 i = j + 1
             end do

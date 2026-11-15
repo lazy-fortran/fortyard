@@ -246,6 +246,17 @@ program test_verify_nightly
         index(reply, 'no longer verified at night') > 0, &
         'the report of a class no longer verified at night is closed: '//reply)
 
+    ! A class may be verified after each landing and again at night; the
+    ! nightly run is a check of kind nightly on the same runners.
+    reply = put('/api/v1/repos/demo/policy', '{"verify_on":"linux,linux@nightly"}')
+    call check(index(reply, '"verify_on":"linux,linux@nightly"') > 0, &
+        'linux after each landing and at night is accepted: '//reply)
+    call serve('2026-11-20T01:30')
+    call wait_count("SELECT count(*) FROM landings WHERE kind = 'verify' AND verify_class ="// &
+        " 'linux' AND state = 'passed'", 1)
+    call check(count("SELECT count(*) FROM checks WHERE class = 'linux' AND kind = 'nightly'"// &
+        " AND log LIKE '%nightly suite%'") == 1, 'the linux nightly run is a nightly check')
+
     call proc_kill(run, SIGTERM)
     call proc_wait(run, stat)
     call proc_kill(mac, SIGTERM)

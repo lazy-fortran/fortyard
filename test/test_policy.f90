@@ -309,7 +309,9 @@ contains
         call policy_set(p, 'verify_on', 'linux@daily', error)
         call check(len(error) > 0, 'a schedule other than nightly is refused')
         call policy_set(p, 'verify_on', 'linux,linux@nightly', error)
-        call check(len(error) > 0, 'a class both with and without schedule is refused')
+        call check(len(error) == 0 .and. p%verify_on == 'linux,linux@nightly', &
+            'a class verified after each landing and at night is accepted')
+        p%verify_on = 'linux'
         call policy_set(p, 'verify_on', 'mac@nightly,linux,mac@nightly', error)
         call check(len(error) > 0, 'a nightly class named twice is refused')
         call policy_set(p, 'verify_on', 'linux,linux', error)
