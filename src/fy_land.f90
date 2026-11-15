@@ -1079,7 +1079,7 @@ contains
         character(len=*), intent(in), optional :: output
         character(len=:), allocatable :: file, mark, argv(:)
         character(len=4096) :: outer
-        character(len=24) :: num
+        character(len=48) :: num
         integer(int64) :: now, rate, told, have, used
         integer :: pid, n, stat
         logical :: done, stopped
