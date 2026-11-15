@@ -169,6 +169,14 @@ Policy validation accepts `@nightly` after a class name. Windows is not a
 first-class target, so no repository runs it unless its policy names it;
 macOS on Intel is not supported.
 
+A nightly check runs `.fortyard/nightly`, else `.fortyard/verify`, else, for
+an fpm project, every test with the slow ones (`fo test --all`) run again; on
+the GitHub and GitLab backends it runs as a verification. At most
+`FY_NIGHTLY_SLOTS` (default 2) nightly checks run on a runner class at once,
+so landings at night still find a runner. A class may be verified both after
+each landing and at night (`verify_on=linux,linux@nightly`), the nightly run
+then taking the slow tier.
+
 ## The GitHub backend
 
 **The server pushes, the backend only reads.** For a check given to a GitHub

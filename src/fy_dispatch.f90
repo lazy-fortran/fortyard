@@ -220,7 +220,7 @@ contains
         allocate (repos(0), runs(0))
         ! The claim order of store_check_claim.
         call db_prepare(db, "SELECT c.id, c.repo FROM checks c WHERE c.state = 'queued' AND"// &
-            " c.class = ?1 ORDER BY c.kind = 'verify', (SELECT count(*) FROM checks r WHERE"// &
+            " c.class = ?1 ORDER BY c.kind IN ('verify', 'nightly'), (SELECT count(*) FROM checks r WHERE"// &
             " r.state = 'running' AND r.repo = c.repo AND coalesce(r.ran_class, r.class) ="// &
             " c.class), c.id;", st, stat)
         if (stat /= SQLITE_OK) return
@@ -275,7 +275,7 @@ contains
             " c.class = ?2) AND p.public = 1 AND instr(',' || p.policy_backends || ',', ',' ||"// &
             " ?3 || ',') > 0 AND NOT EXISTS (SELECT 1 FROM checks t WHERE t.id = c.twin AND"// &
             " t.state IN ('queued', 'running'))"// &
-            " ORDER BY c.kind = 'verify', (SELECT count(*) FROM checks r WHERE r.state ="// &
+            " ORDER BY c.kind IN ('verify', 'nightly'), (SELECT count(*) FROM checks r WHERE r.state ="// &
             " 'running' AND r.repo = c.repo AND coalesce(r.ran_class, r.class) = c.class), c.id"// &
             " LIMIT ?4;", st, stat)
         if (stat /= SQLITE_OK) return

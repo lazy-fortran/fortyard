@@ -27,6 +27,7 @@ program test_store
     type(db_t) :: db
     type(token_identity_t) :: who
     character(len=:), allocatable :: admin, second, again
+    integer(int64) :: night_two
     integer :: stat, released
     integer(int64) :: id
     character(len=:), allocatable :: repo, ref
@@ -124,6 +125,27 @@ program test_store
     call store_check_claim(db, 'r2', id, repo, ref, found)
     call check(found .and. ref == 'refs/l', 'the runner that last checked the repository in'// &
         ' its class is the warm one, not the macos runner that checked it since')
+    call store_check_finish(db, id, 'r2', 'passed', '', found)
+    ! At most FY_NIGHTLY_SLOTS (default 2) nightly checks run on a class at
+    ! once; landing checks still find a runner.
+    do k = 1, 3
+        call store_check_add(db, 'demo', 'refs/n'//achar(48 + k), id, stat, kind='nightly', &
+            class='night')
+    end do
+    call db_exec(db, "UPDATE checks SET created_at = '2000-01-01T00:00:00Z' WHERE class ="// &
+        " 'night';", stat)
+    call store_check_claim(db, 'n1', id, repo, ref, found, class='night')
+    call check(found .and. ref == 'refs/n1', 'a first nightly check starts')
+    call store_check_claim(db, 'n2', night_two, repo, ref, found, class='night')
+    call check(found .and. ref == 'refs/n2', 'a second nightly check starts')
+    call store_check_claim(db, 'n3', id, repo, ref, found, class='night')
+    call check(.not. found, 'a third nightly check waits while two run')
+    call store_check_add(db, 'demo', 'refs/nl', id, stat, class='night')
+    call store_check_claim(db, 'n3', id, repo, ref, found, class='night')
+    call check(found .and. ref == 'refs/nl', 'a landing check runs beside them')
+    call store_check_finish(db, night_two, 'n2', 'passed', '', found)
+    call store_check_claim(db, 'n4', id, repo, ref, found, class='night')
+    call check(found .and. ref == 'refs/n3', 'the third starts when a nightly check ended')
 
     ! The jobs list looks up, for each of its rows, the entries of the row's
     ! change and its checks: with 6000 landings and their logs that stays a

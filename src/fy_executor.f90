@@ -133,7 +133,7 @@ module fy_executor
 contains
 
     subroutine executor_run(dir, id, repo, src, ref, work, verify, limit, class, rerun, &
-            out, code, timed_out, build, state, sink, cancel, waits, taken_hook)
+            out, code, timed_out, build, state, sink, cancel, waits, taken_hook, nightly)
         !! The controller's side: has the executor at `dir` check `ref` of
         !! `repo` (fetched from `src`, a path the executor sees as well) in
         !! `work`, or with `rerun` run the check again in `work` without its
@@ -157,7 +157,8 @@ contains
         procedure(executor_cancel_i), optional :: cancel
         integer, intent(in), optional :: waits(3)
         procedure(executor_taken_i), optional :: taken_hook
-        character(len=:), allocatable :: status, nonce, fdpath
+        logical, intent(in), optional :: nightly
+        character(len=:), allocatable :: status, nonce, fdpath, kind_name
         character(len=24) :: num
         integer(int64) :: start, now, rate, began, told, used
         integer :: fd, xfd, rc, stat, take, cancel_after, lost_after
@@ -168,6 +169,11 @@ contains
         timed_out = .false.
         build = .false.
         state = 'lost'
+        kind_name = 'check'
+        if (verify) kind_name = 'verify'
+        if (present(nightly)) then
+            if (nightly) kind_name = 'nightly'
+        end if
         take = TAKE_SECONDS
         cancel_after = LATE_CANCEL
         lost_after = LATE_LOST
@@ -192,7 +198,7 @@ contains
         call put(xfd, 'job', 'commit='//FY_COMMIT//new_line('a')//'id='//nonce//new_line('a')// &
             'repo='//repo//new_line('a')//'src='//absolute(src)//new_line('a')//'ref='//ref// &
             new_line('a')//'work='//absolute(work)//new_line('a')//'kind='// &
-            trim(merge('verify', 'check ', verify))//new_line('a')//'limit='//trim(num)// &
+            trim(kind_name)//new_line('a')//'limit='//trim(num)// &
             new_line('a')//'class='//class//new_line('a')//'rerun='//merge('1', '0', rerun)// &
             new_line('a'))
         fd = -1
@@ -417,8 +423,9 @@ contains
         end if
         call land_set_live(sink)
         call land_set_abort(stop_now)
-        call land_check(work, out, code, verify=field(job, 'kind') == 'verify', limit=limit, &
-            timed_out=timed_out, output=exch//'/output')
+        call land_check(work, out, code, verify=field(job, 'kind') == 'verify' .or. &
+            field(job, 'kind') == 'nightly', nightly=field(job, 'kind') == 'nightly', &
+            limit=limit, timed_out=timed_out, output=exch//'/output')
         call land_set_live()
         call land_set_abort()
         inquire (file=work//'/build/.', exist=build)

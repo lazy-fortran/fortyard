@@ -250,7 +250,7 @@ contains
         id = claim(s:e - 1)
         ! Seconds, 0 for none; a server without the field gives the old hour.
         limit = 3600
-        if (kind == 'verify') limit = 21600
+        if (kind == 'verify' .or. kind == 'nightly') limit = 21600
         s = index(claim, '"timeout":') + 10
         if (s > 10) then
             e = s
@@ -320,7 +320,8 @@ contains
             live_between = ''
             streaming = .true.
             call land_set_live(send_live)
-            call land_check(work, out, code, verify=kind == 'verify', limit=limit, &
+            call land_check(work, out, code, verify=kind == 'verify' .or. kind == 'nightly', &
+                nightly=kind == 'nightly', limit=limit, &
                 timed_out=timed_out)
             if (timed_out) then
                 call report_timeout()
@@ -341,7 +342,8 @@ contains
                             live_between
                     end if
                     live_base = live_base + live_have + len(live_between, int64)
-                    call land_check(work, out, code, verify=kind == 'verify', limit=limit, &
+                    call land_check(work, out, code, verify=kind == 'verify' .or. kind == 'nightly', &
+                        nightly=kind == 'nightly', limit=limit, &
                         timed_out=timed_out)
                     out = kept//live_between//out
                     if (timed_out) then
@@ -384,9 +386,9 @@ contains
             live_between = ''
             streaming = .true.
             withdrawn = .false.
-            call executor_run(exec_dir, id, repo, trim(src), ref, work, kind == 'verify', limit, &
-                runner_class, .false., out, code, timed_out, build, state, send_live, &
-                check_withdrawn, taken_hook=egress_open)
+            call executor_run(exec_dir, id, repo, trim(src), ref, work, kind == 'verify' .or. &
+                kind == 'nightly', limit, runner_class, .false., out, code, timed_out, build, state, send_live, &
+                check_withdrawn, taken_hook=egress_open, nightly=kind == 'nightly')
             if (.not. outcome()) return
             if (code /= 0 .and. build) then
                 kept = out
@@ -397,9 +399,9 @@ contains
                         live_between
                 end if
                 live_base = live_base + live_have + len(live_between, int64)
-                call executor_run(exec_dir, id, repo, trim(src), ref, work, kind == 'verify', &
-                    limit, runner_class, .true., out, code, timed_out, build, state, send_live, &
-                    check_withdrawn, taken_hook=egress_open)
+                call executor_run(exec_dir, id, repo, trim(src), ref, work, kind == 'verify' .or. &
+                    kind == 'nightly', limit, runner_class, .true., out, code, timed_out, build, state, send_live, &
+                    check_withdrawn, taken_hook=egress_open, nightly=kind == 'nightly')
                 out = kept//live_between//out
                 if (.not. outcome()) return
             end if

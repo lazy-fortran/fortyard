@@ -503,7 +503,8 @@ contains
         on = classes//','
         do while (len(on) > 1)
             k = index(on, ',')
-            call store_check_add(db, repo, ref, check, stat, kind='verify', class=on(1:k - 1))
+            call store_check_add(db, repo, ref, check, stat, kind=trim(merge('nightly', 'verify ', &
+                len(track) > 0)), class=on(1:k - 1))
             on = on(k + 1:)
         end do
         call events_notify('checks')

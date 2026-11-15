@@ -867,7 +867,7 @@ contains
         full = trim(cwd)//'/'//path
     end function absolute
 
-    subroutine land_check(work, out, code, verify, limit, timed_out, grace, output)
+    subroutine land_check(work, out, code, verify, limit, timed_out, grace, output, nightly)
         !! The check of a landing commit checked out in `work`: an executable
         !! .fortyard/check, else fo build and fo test for an fpm project
         !! (applications built, so tests may run them); under a memory cap when systemd can
@@ -884,6 +884,9 @@ contains
         !! that the limit ended it. A process it started that outlives it,
         !! also in a new session, is killed when it ends. With `output` the
         !! output grows in that file, which is kept, instead of a temporary one.
+        !! With `nightly` (and `verify`) the nightly run: .fortyard/nightly,
+        !! else .fortyard/verify, else for an fpm project every test, the slow
+        !! ones included, run again.
         character(len=*), intent(in) :: work
         character(len=:), allocatable, intent(out) :: out
         integer, intent(out) :: code
@@ -891,6 +894,7 @@ contains
         integer, intent(in), optional :: limit, grace
         logical, intent(out), optional :: timed_out
         character(len=*), intent(in), optional :: output
+        logical, intent(in), optional :: nightly
         character(len=1024), allocatable :: cmd(:)
         character(len=256) :: runtime
         character(len=16) :: seconds, after
@@ -908,7 +912,13 @@ contains
         write (seconds, '(i0)') lim
         after = '30'
         if (present(grace)) write (after, '(i0)') grace
-        if (full) then
+        exists = .false.
+        if (full .and. present(nightly)) then
+            if (nightly) inquire (file=work//'/.fortyard/nightly', exist=exists)
+        end if
+        if (exists) then
+            cmd = [character(len=1024) :: './.fortyard/nightly']
+        else if (full) then
             inquire (file=work//'/.fortyard/verify', exist=exists)
             if (exists) then
                 cmd = [character(len=1024) :: './.fortyard/verify']
@@ -920,6 +930,10 @@ contains
                     return
                 end if
                 cmd = [character(len=1024) :: 'sh', '-c', 'fo build && FO_TEST_RERUN=1 fo test']
+                if (present(nightly)) then
+                    if (nightly) cmd = [character(len=1024) :: 'sh', '-c', &
+                        'fo build && FO_TEST_RERUN=1 fo test --all']
+                end if
             end if
         else
             ! The repository's own script wins, as .fortyard/verify does: an fpm

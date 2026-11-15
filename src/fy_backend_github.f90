@@ -816,14 +816,23 @@ contains
         text = text//'            curl -fsSL -o "$FY_TOOLS/bin/fpm" \'//NL
         text = text//'              "https://github.com/fortran-lang/fpm/releases/'// &
             'download/v$FPM_VERSION/fpm-$FPM_VERSION-$asset"'//NL
-        text = text//'            echo "$sum  $FY_TOOLS/bin/fpm" | shasum -a 256 -'// &
-            'c -'//NL
+        text = text//'            # Windows images have sha256sum, macOS images shasum.'//NL
+        text = text//'            if command -v sha256sum > /dev/null; then'//NL
+        text = text//'              echo "$sum  $FY_TOOLS/bin/fpm" | sha256sum -c -'//NL
+        text = text//'            else'//NL
+        text = text//'              echo "$sum  $FY_TOOLS/bin/fpm" | shasum -a 256 -c -'//NL
+        text = text//'            fi'//NL
         text = text//'            chmod +x "$FY_TOOLS/bin/fpm"'//NL
         text = text//'            if [ "$RUNNER_OS" = macOS ]; then'//NL
         text = text//'              for v in 15 14 13 12; do'//NL
         text = text//'                if command -v "gfortran-$v" > /dev/null; the'// &
             'n export FPM_FC="gfortran-$v"; break; fi'//NL
         text = text//'              done'//NL
+        text = text//'              # fpm''s binary links Homebrew''s gcc@12 runtime; the'//NL
+        text = text//'              # image''s gfortran ships the same libgfortran.5.'//NL
+        text = text//'              lib=$("${FPM_FC:-gfortran}" -print-file-name=libgfortr'// &
+            'an.5.dylib)'//NL
+        text = text//'              export DYLD_FALLBACK_LIBRARY_PATH="${lib%/*}"'//NL
         text = text//'            fi'//NL
         text = text//'            git init --quiet "$RUNNER_TEMP/fo-src"'//NL
         text = text//'            git -C "$RUNNER_TEMP/fo-src" fetch --quiet --dep'// &

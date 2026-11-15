@@ -172,7 +172,7 @@ contains
                 if (.not. found) kind = 'check'
                 num = json_raw(body, 'id')
                 timeout = 3600
-                if (kind == 'verify') timeout = 21600
+                if (kind == 'verify' .or. kind == 'nightly') timeout = 21600
                 lim = json_raw(body, 'timeout')
                 if (len_trim(lim) > 0) read (lim, *, iostat=stat) timeout
                 ! The external system ends a job at max_minutes, so no limit is longer.

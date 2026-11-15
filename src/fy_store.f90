@@ -185,7 +185,7 @@ module fy_store
     !! Takes check ?3 (or the subquery after it) for runner ?1 of class ?2.
     character(len=*), parameter :: TAKE = "UPDATE checks SET state = 'running', runner = ?1,"// &
         ' ran_class = ?2, claimed_at = '//NOW//', started_at = '//NOW//', time_limit = CASE'// &
-        " WHEN kind = 'verify' THEN 21600 ELSE coalesce((SELECT 60*policy_check_timeout FROM"// &
+        " WHEN kind IN ('verify', 'nightly') THEN 21600 ELSE coalesce((SELECT 60*policy_check_timeout FROM"// &
         ' repos WHERE name = checks.repo), 3600) END WHERE id = '
     !! A job with the number and title of its change and its place among the
     !! entries of that change (job_read).
@@ -1579,7 +1579,8 @@ contains
             ' q.runner IS NOT NULL ORDER BY'// &
             ' q.id DESC LIMIT 1) AND p.runner <> ?1 AND NOT EXISTS (SELECT 1 FROM checks b WHERE'// &
             " b.state = 'running' AND b.runner = p.runner)))"// &
-            " ORDER BY c.kind = 'verify', (SELECT count(*) FROM checks r WHERE r.state ="// &
+            ' AND '//nightly_room()// &
+            " ORDER BY c.kind IN ('verify', 'nightly'), (SELECT count(*) FROM checks r WHERE r.state ="// &
             " 'running' AND r.repo = c.repo AND coalesce(r.ran_class, r.class) = c.class), c.id LIMIT 1)"// &
             " RETURNING id,"// &
             ' repo, ref, kind,'// &
@@ -1677,8 +1678,8 @@ contains
         if (present(limit)) limit = 0
         call db_prepare(db, 'INSERT INTO checks (repo, ref, created_at, kind, class, state,'// &
             ' runner, ran_class, claimed_at, started_at, time_limit, twin) SELECT c.repo, c.ref, '// &
-            NOW//", c.kind, c.class, 'running', ?1, ?2, "//NOW//', '//NOW//", CASE WHEN c.kind ="// &
-            " 'verify' THEN 21600 ELSE coalesce((SELECT 60*policy_check_timeout FROM repos WHERE"// &
+            NOW//", c.kind, c.class, 'running', ?1, ?2, "//NOW//', '//NOW//", CASE WHEN c.kind IN"// &
+            " ('verify', 'nightly') THEN 21600 ELSE coalesce((SELECT 60*policy_check_timeout FROM repos WHERE"// &
             ' name = c.repo), 3600) END, c.id FROM checks c WHERE c.id = ?3 AND c.state ='// &
             " 'queued' AND c.twin IS NULL AND NOT EXISTS (SELECT 1 FROM checks t WHERE t.twin ="// &
             ' c.id) AND '//backend_room()//' RETURNING id, repo, ref, kind, time_limit;', st, stat)
@@ -1717,6 +1718,21 @@ contains
             " 'running' AND r.ran_class LIKE 'github-%') < (SELECT max(max_running) FROM runners"// &
             " WHERE class LIKE 'github-%' AND (seen_at >= "//DISPATCH_SEEN//' OR name = ?1)))'
     end function backend_room
+
+    function nightly_room() result(sql)
+        !! The condition that check c may start: a nightly check only while
+        !! fewer than FY_NIGHTLY_SLOTS (default 2) nightly checks run on its
+        !! runner class, so landings at night keep runners.
+        character(len=:), allocatable :: sql
+        character(len=16) :: slots
+        integer :: n, stat
+
+        call get_environment_variable('FY_NIGHTLY_SLOTS', slots, n, stat)
+        if (stat /= 0 .or. n == 0 .or. verify(trim(slots), '0123456789') > 0) slots = '2'
+        sql = "(c.kind <> 'nightly' OR (SELECT count(*) FROM checks n WHERE n.state ="// &
+            " 'running' AND n.kind = 'nightly' AND coalesce(n.ran_class, n.class) = c.class) < "// &
+            trim(slots)//')'
+    end function nightly_room
 
     subroutine store_check_release(db, runner, count)
         !! Queues the running checks of `runner` again; `count` of them. A

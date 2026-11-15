@@ -2486,7 +2486,7 @@ contains
             branch = 'fortyard/check/'//digits
             if (index(class, 'macos') > 0) branch = branch//'-macos'
             if (index(class, 'windows') > 0) branch = branch//'-windows'
-            if (kind == 'verify') branch = branch//'-verify'
+            if (kind == 'verify' .or. kind == 'nightly') branch = branch//'-verify'
             call repo_publish(repo_path(repo), upstream, digits, ref, branch, commit, out, stat)
             if (stat /= 0) then
                 call fail(res, 502, 'the check could not be published: '//out)

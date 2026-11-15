@@ -221,6 +221,8 @@ contains
         call json_extract_string(claim, 'ref', ref, found)
         call json_extract_string(claim, 'kind', kind, found)
         if (.not. found) kind = 'check'
+        ! The job knows check and verify; a nightly verification runs as verify.
+        if (kind == 'nightly') kind = 'verify'
         call json_extract_int(claim, 'id', pid, found)
         write (num, '(i0)') pid
         id = trim(num)

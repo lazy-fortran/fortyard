@@ -7,7 +7,7 @@ program test_verify_nightly
     !! the class is no longer verified at night. The class without schedule is
     !! verified after each move of main as before. The verifier's clock is set
     !! by FY_VERIFY_NOW, so the server is restarted with another time between
-    !! the phases.
+    !! the phases. A nightly check runs .fortyard/nightly, other checks do not.
     use, intrinsic :: iso_fortran_env, only: int64
     use fy_posix, only: &
         sock_bound_port, &
@@ -113,8 +113,10 @@ program test_verify_nightly
         ' && printf "hello\n" > '//work//'/README && printf "#!/bin/sh\ntest -f README\n" > '// &
         work//'/.fortyard/check && printf "#!/bin/sh\necho full suite\ntest -f README && '// &
         '{ test \"\$FORTYARD_RUNNER_CLASS\" != macos-arm64 || test ! -f MACBROKEN; }\n" > '// &
-        work//'/.fortyard/verify && chmod +x '//work//'/.fortyard/check '//work// &
-        '/.fortyard/verify && '//gw//'add -A && '//gw//'commit -q -m First && '//gw// &
+        work//'/.fortyard/verify && printf "#!/bin/sh\necho nightly suite\nexec ./.fortyard/verify\n"'// &
+        ' > '//work//'/.fortyard/nightly && chmod +x '//work//'/.fortyard/check '//work// &
+        '/.fortyard/verify '//work//'/.fortyard/nightly && '//gw//'add -A && '//gw// &
+        'commit -q -m First && '//gw// &
         'push -q '//url//' HEAD:first', exitstat=stat)
     call check(stat == 0, 'a first branch is pushed')
     reply = post('/api/v1/repos/demo/land', '{"branch":"first"}')
@@ -129,6 +131,11 @@ program test_verify_nightly
     call check(count("SELECT count(*) FROM verify_nights WHERE class = 'macos-arm64'"// &
         " AND night = '2026-11-13' AND main = '"//main_sha()//"'") == 1, &
         'the nightly class records the main of its night')
+    call check(count("SELECT count(*) FROM checks WHERE class = 'macos-arm64' AND kind ="// &
+        " 'nightly' AND log LIKE '%nightly suite%full suite%'") == 1, &
+        'a nightly check runs .fortyard/nightly')
+    call check(count("SELECT count(*) FROM checks WHERE kind <> 'nightly' AND log LIKE"// &
+        " '%nightly suite%'") == 0, 'landing checks and verifications after landing do not')
 
     ! The next night, main has not moved: a requested verification of the
     ! other classes passes, and the nightly class is not verified again.
