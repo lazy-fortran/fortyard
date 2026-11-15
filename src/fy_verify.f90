@@ -76,6 +76,8 @@ module fy_verify
     integer, parameter :: DEPTH = 200
     integer, parameter :: LOG_TAIL = 6000
     character(len=*), parameter :: ACCOUNT = 'fortyard'
+    character(len=*), parameter :: UNCONFIGURED = &
+        'Main has neither .fortyard/verify nor fpm.toml, so nothing verifies it.'
     !! The reports of track ?3: CULPRIT@CLASS for a nightly class, else CULPRIT.
     character(len=*), parameter :: OF_TRACK = "(CASE WHEN ?3 = '' THEN instr(culprit, '@') = 0"// &
         " ELSE substr(culprit, -1 - length(?3)) = '@' || ?3 END)"
@@ -182,6 +184,20 @@ contains
         call events_notify('jobs')
     end function verify_request
 
+    logical function verifiable(git_dir) result(able)
+        !! Whether main exists and has .fortyard/verify or fpm.toml, without
+        !! which a runner has no verification to run.
+        character(len=*), intent(in) :: git_dir
+        character(len=:), allocatable :: out
+        integer :: status
+
+        call git(git_dir, [character(len=256) :: 'cat-file', '-e', &
+            'refs/heads/main:.fortyard/verify'], out, status)
+        if (status /= 0) call git(git_dir, [character(len=256) :: 'cat-file', '-e', &
+            'refs/heads/main:fpm.toml'], out, status)
+        able = status == 0
+    end function verifiable
+
     logical function step(db, repo, git_dir, base, waits) result(ran)
         !! For each track of `repo` (each nightly class, then the classes
         !! without schedule): settles its running verification once its checks
@@ -233,15 +249,14 @@ contains
             if (.not. checked) then
                 checked = .true.
                 head = rev(git_dir, 'refs/heads/main')
-                if (len(head) > 0) then
-                    call git(git_dir, [character(len=256) :: 'cat-file', '-e', &
-                        'refs/heads/main:.fortyard/verify'], out, status)
-                    if (status /= 0) call git(git_dir, [character(len=256) :: 'cat-file', &
-                        '-e', 'refs/heads/main:fpm.toml'], out, status)
-                    able = status == 0
-                end if
+                able = verifiable(git_dir)
             end if
-            if (.not. able) cycle
+            if (.not. able) then
+                ! A request left queued here would wait for ever.
+                if (request > 0) call exec(db, "UPDATE landings SET state = 'cancelled',"// &
+                    ' finished_at = '//NOW//", log = ?2 WHERE id = ?1;", request, UNCONFIGURED)
+                cycle
+            end if
             if (request > 0) then
                 target = head
             else if (len(night) > 0) then
