@@ -4,7 +4,8 @@ program test_egress_config
     !! first, then TU Graz, private, loopback and link-local networks and
     !! literal IPs are denied on the resolved address, and everything else is
     !! denied (or, learning, allowed) and logged; only ports 80 and 443, and
-    !! CONNECT to 443. Lists with anything but domains, unknown roles and
+    !! CONNECT to 443; the server alone may tunnel to the mail relays of
+    !! mail.txt on ports 25 and 587. Lists with anything but domains, unknown roles and
     !! learning for another role than the executor are refused.
     implicit none
 
@@ -17,13 +18,20 @@ program test_egress_config
         'printf "# code\nGitHub.com\napi.github.com\n.ghcr.io\n\nfiles.example.org # x\n" > '// &
         work//'/lists/executor.txt && printf "pypi.org\n" > '//work//'/lists/packages.txt && '// &
         'printf "api.github.com\n" > '//work//'/lists/server.txt && '// &
-        'printf "code.tugraz.at\n" > '//work//'/lists/controller.txt', exitstat=stat)
+        'printf "code.tugraz.at\n" > '//work//'/lists/controller.txt && '// &
+        'printf "# relay\nmail.example.org\n" > '//work//'/lists/mail.txt', exitstat=stat)
     call check(stat == 0, 'lists written')
 
     conf = rendered('server', '')
     call check(has(conf, 'acl listed dstdomain -n .api.github.com'//new_line('a')), &
         'the server list is a dstdomain entry with its subdomains')
     call check(.not. has(conf, 'pypi.org'), 'package hosts are the executor''s only')
+    call check(has(conf, 'acl smtp_port port 25 587') .and. &
+        has(conf, 'acl mail_relay dstdomain -n .mail.example.org'), 'the server''s mail relays')
+    call check(in_order(conf, [character(len=60) :: &
+        'http_access allow CONNECT smtp_port mail_relay !literal_ip', &
+        'http_access deny !ports_ok', 'http_access deny tu_graz']), &
+        'mail to a listed relay passes before the port and network rules')
     call check(.not. has(conf, 'allow all'), 'without learning nothing unlisted passes')
     call check(has(conf, 'acl tu_graz dst 129.27.0.0/16 80.120.198.216/29 2001:628:2090::/48'), &
         'TU Graz networks of IPv4 and IPv6')
@@ -41,6 +49,7 @@ program test_egress_config
     call check(has(conf, 'acl literal_ip dstdom_regex -n '), 'a literal IP is judged as written')
 
     conf = rendered('executor', 'FY_EGRESS_LOG=/log FY_EGRESS_EXTRA=/extra/executor.txt')
+    call check(.not. has(conf, 'mail_relay'), 'only the server may send mail')
     call check(has(conf, 'acl listed dstdomain -n .files.example.org .ghcr.io .github.com'// &
         new_line('a')), 'one entry per domain, lower case, sorted, subdomains of listed ones dropped')
     call check(has(conf, 'acl packages dstdomain -n .pypi.org'), 'the executor gets the package hosts')

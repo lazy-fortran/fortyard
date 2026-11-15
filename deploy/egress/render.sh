@@ -5,7 +5,9 @@
 # ROLE      executor, controller, github-backend, gitlab-backend or server, or
 #           several joined by "," for a container that has more than one role
 # LISTS     directory of the lists ROLE.txt and packages.txt (default: the
-#           directory of this script); one domain per line, "#" comments
+#           directory of this script); one domain per line, "#" comments;
+#           mail.txt names the SMTP relays the server may tunnel to (CONNECT
+#           to port 25 or 587), and may be missing
 # FY_EGRESS_LEARN=1  executor only: unlisted public hosts are allowed and logged
 # FY_EGRESS_EXTRA    executor only: file the runner controller writes for the
 #                    check it runs, one domain per line that the repository's
@@ -48,6 +50,7 @@ domains() {
 }
 
 executor=0
+server=0
 files=
 for role in $(echo "$roles" | tr ',' ' '); do
     case $role in
@@ -57,6 +60,7 @@ for role in $(echo "$roles" | tr ',' ' '); do
     [ -r "$lists/$role.txt" ] || fail "no list $lists/$role.txt"
     files="$files $lists/$role.txt"
     [ "$role" != executor ] || executor=1
+    [ "$role" != server ] || server=1
 done
 [ -n "$files" ] || fail "no role"
 case $learn in 0 | 1) ;; *) fail "FY_EGRESS_LEARN is 0 or 1" ;; esac
@@ -67,6 +71,10 @@ listed=$(domains $files)
 [ -n "$listed" ] || fail "empty list for $roles"
 if [ "$executor" = 1 ]; then
     packages=$(domains "$lists/packages.txt")
+fi
+mail=
+if [ "$server" = 1 ] && [ -r "$lists/mail.txt" ]; then
+    mail=$(domains "$lists/mail.txt")
 fi
 
 cat <<EOF
@@ -92,6 +100,12 @@ acl literal_ip dstdom_regex -n ^[0-9.]+\$ ^\[?[0-9a-fA-F]*:[0-9a-fA-F:.]*\]?\$
 acl tu_graz dst 129.27.0.0/16 80.120.198.216/29 2001:628:2090::/48
 acl local_nets dst 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 ::/128 ::1 fc00::/7 fe80::/10
 EOF
+if [ -n "$mail" ]; then
+    cat <<EOF
+acl smtp_port port 25 587
+acl mail_relay dstdomain -n $mail
+EOF
+fi
 if [ "$executor" = 1 ]; then
     cat <<EOF
 acl packages dstdomain -n $packages
@@ -107,6 +121,8 @@ EOF
 fi
 
 echo
+# Mail is tunnelled to the named relays only, before the port rules.
+[ -z "$mail" ] || echo "http_access allow CONNECT smtp_port mail_relay !literal_ip"
 echo "http_access deny !ports_ok"
 echo "http_access deny CONNECT !tls_port"
 # Before any allow rule: an IP literal never passes, whatever its reverse name.

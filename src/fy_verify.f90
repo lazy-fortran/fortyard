@@ -39,6 +39,8 @@ module fy_verify
     use fy_live, only: &
         live_outcome, &
         live_remove
+    use fy_mail, only: &
+        mail_issue
     use fy_policy, only: &
         policy_get, &
         policy_t
@@ -668,6 +670,7 @@ contains
             track//' is verified at night only (verify_on '//track//'@nightly).'
         number = issue_open(db, repo, git_dir, title, body, ACCOUNT)
         if (number == 0) return
+        call mail_issue(repo, number, title, body)
         call db_prepare(db, 'INSERT INTO verify_reports (repo, culprit, issue, created_at)'// &
             ' VALUES (?1, ?2, ?3, '//NOW//');', st, stat)
         if (stat == SQLITE_OK) then
@@ -715,9 +718,12 @@ contains
         do k = 1, size(issues)
             if (present(why)) then
                 call issue_comment(db, repo, issues(k), ACCOUNT, why)
+                call mail_issue(repo, issues(k), 'issue closed'//on, why)
             else
                 call issue_comment(db, repo, issues(k), ACCOUNT, 'The verification of main'// &
                     on//' passes again at '//head(1:10)//'.')
+                call mail_issue(repo, issues(k), 'main passes again'//on, &
+                    'The verification of main'//on//' passes again at '//head(1:10)//'.')
             end if
             call issue_set_state(db, repo, issues(k), 'closed')
         end do

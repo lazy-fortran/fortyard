@@ -52,6 +52,12 @@ services:
       HTTPS_PROXY: http://fortyard-egress-server:3128
       no_proxy: 127.0.0.1,localhost
       NO_PROXY: 127.0.0.1,localhost
+      # Mail when main breaks or passes again (fy_mail), through the relays of
+      # the egress list mail.txt; the values come from .env beside this file.
+      FY_SMTP_URL: ${FY_SMTP_URL:-}
+      FY_MAIL_FROM: ${FY_MAIL_FROM:-}
+      FY_MAIL_TO: ${FY_MAIL_TO:-}
+      FY_MAIL_PROXY: http://fortyard-egress-server:3128
     volumes:
       - .:/fy
       # ssh to GitHub as ssh.github.com:443 through the proxy; ssh needs an

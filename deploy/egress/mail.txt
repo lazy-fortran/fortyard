@@ -1,0 +1,2 @@
+# SMTP relays the server may tunnel to for its mail (FY_SMTP_URL).
+faepmail.tugraz.at

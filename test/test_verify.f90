@@ -4,7 +4,8 @@ program test_verify
     !! main find it: the commits between the last pass and the failure are
     !! bisected to the one that broke it, an issue names it with the failing
     !! log, its change gets a comment, and the issue is closed once main
-    !! passes again. Landing checks are never held up by verifications.
+    !! passes again. Landing checks are never held up by verifications. Each
+    !! report and each closing is mailed once, through an SMTP sink here.
     use, intrinsic :: iso_fortran_env, only: int64
     use fy_posix, only: &
         sock_bound_port, &
@@ -12,6 +13,7 @@ program test_verify
         sock_recv, &
         sock_send_all, &
         sock_set_timeouts, &
+        tcp_accept, &
         tcp_connect, &
         tcp_listen
     use fy_proc, only: &
@@ -35,12 +37,13 @@ program test_verify
     character(len=:), allocatable :: admin, runner, macos, base, url, reply, gw, issue
     character(len=16) :: num
     character(len=4096) :: cwd
-    integer :: lfd, port, stat, sup, run, mac, i, k
+    integer :: lfd, port, stat, sup, run, mac, smtp, i, k
     logical :: exists
 
     sup = 0
     run = 0
     mac = 0
+    smtp = 0
     call proc_setenv('GIT_CONFIG_GLOBAL', '/dev/null')
     call proc_setenv('GIT_CONFIG_NOSYSTEM', '1')
     call execute_command_line('rm -rf '//data//' '//work//' && mkdir -p '//data, exitstat=stat)
@@ -54,6 +57,19 @@ program test_verify
     call db_close(db)
     call server_set_data_dir(data)
     call server_set_checks('runner')
+    ! Mail goes to a sink that records each message in mail.log.
+    call tcp_listen('127.0.0.1', 0, lfd, stat)
+    write (num, '(i0)') sock_bound_port(lfd)
+    smtp = proc_fork()
+    if (smtp == 0) then
+        call smtp_sink(lfd, data//'/mail.log')
+        call proc_exit(0)
+    end if
+    call sock_close(lfd)
+    call proc_setenv('FY_SMTP_URL', 'smtp://127.0.0.1:'//trim(num))
+    call proc_setenv('FY_SMTP_STARTTLS', '0')
+    call proc_setenv('FY_MAIL_FROM', 'fortyard@example.org')
+    call proc_setenv('FY_MAIL_TO', 'owner@example.org')
     call tcp_listen('127.0.0.1', 0, lfd, stat)
     port = sock_bound_port(lfd)
     write (num, '(i0)') port
@@ -122,6 +138,7 @@ program test_verify
     reply = get('/api/v1/repos/demo/issues/'//issue)
     call check(index(reply, 'full suite') > 0 .and. index(reply, 'landed change #3') > 0, &
         'the issue has the failing log and names the change: '//reply)
+    call wait_mail('Subject: [fortyard] demo: Verification fails since', 1)
     reply = get('/api/v1/repos/demo/changes/3')
     call check(index(reply, 'The verification of main fails since this change landed: issue #'// &
         issue) > 0, 'the change that broke it gets a comment: '//reply)
@@ -135,6 +152,8 @@ program test_verify
     end do
     call check(index(reply, '"state":"closed"') > 0 .and. index(reply, 'passes again') > 0, &
         'the issue is closed when main passes again: '//reply)
+    call wait_mail('Subject: [fortyard] demo: main passes again', 1)
+    call wait_mail('Subject: [fortyard] demo: Verification fails since', 1)
     reply = get('/api/v1/jobs')
     call check(index(reply, '"kind":"verify"') > 0 .and. index(reply, '"state":"passed"') > 0, &
         'verifications are jobs: '//reply)
@@ -164,6 +183,8 @@ program test_verify
     call proc_wait(mac, stat)
     call proc_kill(sup, SIGTERM)
     call proc_wait(sup, stat)
+    call proc_kill(smtp, SIGTERM)
+    call proc_wait(smtp, stat)
     print '(a)', 'verify: all checks passed'
 
 contains
@@ -259,6 +280,100 @@ contains
         call sock_close(cfd)
     end function exchange
 
+    subroutine wait_mail(text, count)
+        !! Until mail.log holds `text` exactly `count` times (once per change of
+        !! state: a later count would mean a mail per run).
+        character(len=*), intent(in) :: text
+        integer, intent(in) :: count
+        character(len=:), allocatable :: log
+        integer :: k, seen
+        do k = 1, 600
+            log = slurp(data//'/mail.log')
+            seen = occurrences(log, text)
+            if (seen >= count) exit
+            call proc_sleep_ms(100)
+        end do
+        call check(seen == count, 'mail "'//text//'" sent once: '//log)
+    end subroutine wait_mail
+
+    integer function occurrences(hay, needle) result(n)
+        character(len=*), intent(in) :: hay, needle
+        integer :: at, j
+        n = 0
+        at = 1
+        do
+            j = index(hay(at:), needle)
+            if (j == 0) exit
+            n = n + 1
+            at = at + j + len(needle) - 1
+        end do
+    end function occurrences
+
+    function slurp(path) result(text)
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: text
+        integer :: unit, size_, st
+        text = ''
+        open (newunit=unit, file=path, access='stream', form='unformatted', status='old', &
+            action='read', iostat=st)
+        if (st /= 0) return
+        inquire (unit=unit, size=size_)
+        if (size_ > 0) then
+            deallocate (text)
+            allocate (character(len=size_) :: text)
+            read (unit, iostat=st) text
+        end if
+        close (unit)
+    end function slurp
+
+    subroutine smtp_sink(lfd, path)
+        !! A minimal SMTP server without STARTTLS: it accepts every message and
+        !! appends its data to `path`.
+        integer, intent(in) :: lfd
+        character(len=*), intent(in) :: path
+        character(len=4096) :: buf
+        character(len=:), allocatable :: pending, line
+        integer :: cfd, n, st, unit, j
+        logical :: in_data
+        do
+            cfd = tcp_accept(lfd)
+            if (cfd < 0) cycle
+            call sock_send_all(cfd, '220 sink'//CRLF, st)
+            pending = ''
+            in_data = .false.
+            do
+                n = sock_recv(cfd, buf)
+                if (n <= 0) exit
+                pending = pending//buf(1:n)
+                do
+                    j = index(pending, CRLF)
+                    if (j == 0) exit
+                    line = pending(1:j - 1)
+                    pending = pending(j + 2:)
+                    if (in_data) then
+                        if (line == '.') then
+                            in_data = .false.
+                            call sock_send_all(cfd, '250 ok'//CRLF, st)
+                        else
+                            open (newunit=unit, file=path, position='append', action='write', &
+                                iostat=st)
+                            write (unit, '(a)') line
+                            close (unit)
+                        end if
+                    else if (index(line, 'DATA') == 1) then
+                        in_data = .true.
+                        call sock_send_all(cfd, '354 go'//CRLF, st)
+                    else if (index(line, 'QUIT') == 1) then
+                        call sock_send_all(cfd, '221 bye'//CRLF, st)
+                    else
+                        call sock_send_all(cfd, '250 ok'//CRLF, st)
+                    end if
+                end do
+            end do
+            call sock_close(cfd)
+        end do
+    end subroutine smtp_sink
+
     subroutine check(ok, what)
         logical, intent(in) :: ok
         character(len=*), intent(in) :: what
@@ -267,6 +382,7 @@ contains
             if (run > 0) call proc_kill(run, SIGTERM)
             if (mac > 0) call proc_kill(mac, SIGTERM)
             if (sup > 0) call proc_kill(sup, SIGTERM)
+            if (smtp > 0) call proc_kill(smtp, SIGTERM)
             error stop 1
         end if
     end subroutine check
