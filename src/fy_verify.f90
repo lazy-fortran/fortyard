@@ -186,14 +186,19 @@ contains
         call events_notify('jobs')
     end function verify_request
 
-    logical function verifiable(git_dir) result(able)
+    logical function verifiable(git_dir, nightly) result(able)
         !! Whether main exists and has .fortyard/verify or fpm.toml, without
-        !! which a runner has no verification to run.
+        !! which a runner has no verification to run; for a `nightly` track
+        !! also .fortyard/nightly, which the nightly run takes first.
         character(len=*), intent(in) :: git_dir
+        logical, intent(in) :: nightly
         character(len=:), allocatable :: out
         integer :: status
 
-        call git(git_dir, [character(len=256) :: 'cat-file', '-e', &
+        status = 1
+        if (nightly) call git(git_dir, [character(len=256) :: 'cat-file', '-e', &
+            'refs/heads/main:.fortyard/nightly'], out, status)
+        if (status /= 0) call git(git_dir, [character(len=256) :: 'cat-file', '-e', &
             'refs/heads/main:.fortyard/verify'], out, status)
         if (status /= 0) call git(git_dir, [character(len=256) :: 'cat-file', '-e', &
             'refs/heads/main:fpm.toml'], out, status)
@@ -214,7 +219,7 @@ contains
         integer(int64) :: request, running
         integer :: status, t
         type(policy_t) :: p
-        logical :: checked, able
+        logical :: checked, able, able_night
 
         ran = .false.
         waits = .false.
@@ -251,9 +256,10 @@ contains
             if (.not. checked) then
                 checked = .true.
                 head = rev(git_dir, 'refs/heads/main')
-                able = verifiable(git_dir)
+                able = verifiable(git_dir, .false.)
+                able_night = verifiable(git_dir, .true.)
             end if
-            if (.not. able) then
+            if (.not. merge(able_night, able, len(night) > 0)) then
                 ! A request left queued here would wait for ever.
                 if (request > 0) call exec(db, "UPDATE landings SET state = 'cancelled',"// &
                     ' finished_at = '//NOW//", log = ?2 WHERE id = ?1;", request, UNCONFIGURED)
