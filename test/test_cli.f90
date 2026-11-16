@@ -1,7 +1,8 @@
 program test_cli
     !! The command line client against a running server: fy login takes the
     !! token on standard input; in a checkout with a remote on the server,
-    !! fy land BRANCH pushes HEAD, lands it and exits 0 once it landed, and 1
+    !! fy land BRANCH pushes that branch (HEAD when there is none), lands it and
+    !! exits 0 once it landed, and 1
     !! with the check's output when it failed; fy jobs and fy landings print
     !! tables.
     use, intrinsic :: iso_fortran_env, only: int64
@@ -156,6 +157,14 @@ program test_cli
     call check(stat == 0 .and. index(out, 'change #') > 0, &
         'fy push from a checkout behind main sends what the server accepts: '//out)
 
+    ! A named branch is pushed as it is, also from a checkout on another branch.
+    call run('cd '//work//' && git checkout -q -b second && printf "two\n" > SECOND && '// &
+        git//'add SECOND && '//git//'commit -q -m Second && git checkout -q behind && '// &
+        env//fy//' push second && git rev-parse second && git --git-dir='//trim(cwd)//'/'// &
+        data//'/repos/demo.git rev-parse refs/heads/second')
+    call check(stat == 0 .and. index(out, 'change #') > 0 .and. same_last_lines(out), &
+        'fy push BRANCH sends that branch, not HEAD: '//out)
+
     call proc_kill(sup, SIGTERM)
     call proc_wait(sup, stat)
     print '(a)', 'cli: all checks passed'
@@ -194,6 +203,17 @@ contains
         if (n > 0) read (u, iostat=ios) text
         close (u)
     end function read_all
+
+    logical function same_last_lines(text)
+        !! The last two lines of `text`, two commit ids, are the same.
+        character(len=*), intent(in) :: text
+        integer :: last, before
+
+        last = index(text(:len(text) - 1), new_line('a'), back=.true.)
+        before = index(text(:max(last - 1, 0)), new_line('a'), back=.true.)
+        same_last_lines = last > 0 .and. len(text) - last > 40 .and. &
+            text(before + 1:last - 1) == text(last + 1:len(text) - 1)
+    end function same_last_lines
 
     subroutine check(ok, what)
         logical, intent(in) :: ok

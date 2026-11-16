@@ -234,7 +234,8 @@ contains
             '                        branch config and make it the project''s CI/CD file', &
         ! landing and pushing
             '  land [BRANCH] [--repo NAME] [--no-push] [--no-wait]', &
-            '                      push HEAD to BRANCH, land it on main after its check', &
+            '                      push branch BRANCH (HEAD when there is none), land it', &
+            '                      on main after its check', &
             '                      passed and follow it to the end (admin)', &
             '  land [BRANCH] --urgent', &
             '                      land before every landing not yet in a candidate,', &
@@ -244,7 +245,8 @@ contains
             '  land --cancel-all REPO', &
             '                      cancel every landing of REPO that has not ended (admin)', &
             '  land REPO BRANCH    land a branch that is already pushed', &
-            '  push [BRANCH]       push HEAD to BRANCH, which opens or updates its change', &
+            '  push [BRANCH]       push branch BRANCH (HEAD when there is none), which', &
+            '                      opens or updates its change', &
             '                      (push and land send no file over 1 MiB, or over the bytes', &
             '                      in .fortyard/size-limit, that .fortyard/allow-large does', &
             '                      not allow)', &
@@ -772,8 +774,9 @@ contains
     end function token_line
 
     subroutine cmd_land()
-        !! fy land [BRANCH] [--repo NAME] [--no-push] [--no-wait]: pushes HEAD of
-        !! the checkout to BRANCH (default: the current branch), queues its
+        !! fy land [BRANCH] [--repo NAME] [--no-push] [--no-wait]: pushes the
+        !! checkout's branch BRANCH, or HEAD when there is no branch of that name,
+        !! to BRANCH (default: the current branch), queues its
         !! landing and follows it to the end; the exit status tells the outcome.
         !! The repository is the one of a remote on the server, unless --repo
         !! names it. The form fy land REPO BRANCH lands a branch already pushed.
@@ -1077,13 +1080,20 @@ contains
     end function field_int
 
     subroutine push_head(cfg, repo, branch)
-        !! git push of HEAD to BRANCH of REPO on the server. The token and proxy
-        !! reach git through its environment, so no command line shows them.
+        !! git push to BRANCH of REPO on the server of the checkout's own branch
+        !! BRANCH, or of HEAD when the checkout has no branch of that name. The
+        !! token and proxy reach git through its environment, so no command line
+        !! shows them.
         type(config_t), intent(in) :: cfg
         character(len=*), intent(in) :: repo, branch
-        character(len=:), allocatable :: remote, large
+        character(len=:), allocatable :: remote, large, source
         integer :: stat
 
+        ! A named branch may be checked out in another worktree of this one.
+        source = 'HEAD'
+        call execute_command_line('git rev-parse --quiet --verify refs/heads/'//branch// &
+            ' > /dev/null', exitstat=stat)
+        if (stat == 0) source = 'refs/heads/'//branch
         call proc_setenv('GIT_TERMINAL_PROMPT', '0')
         call proc_setenv('GIT_CONFIG_COUNT', '2')
         call proc_setenv('GIT_CONFIG_KEY_0', 'http.extraHeader')
@@ -1092,18 +1102,18 @@ contains
         call proc_setenv('GIT_CONFIG_VALUE_1', cfg%proxy)
         remote = cfg%server//'/'//repo//'.git'
         ! What the server would refuse is found before anything is sent.
-        call land_push_check(remote, large)
+        call land_push_check(remote, source, large)
         if (len_trim(large) > 0) then
             call proc_setenv('GIT_CONFIG_COUNT', '0')
             write (error_unit, '(a)') 'fy: not pushed, files over the size limit (allow them in '// &
                 '.fortyard/allow-large):', trim(large)
             call quit(1)
         end if
-        call execute_command_line('git push --quiet --force "'//remote//'" HEAD:refs/heads/'// &
-            branch, exitstat=stat)
+        call execute_command_line('git push --quiet --force "'//remote//'" '//source// &
+            ':refs/heads/'//branch, exitstat=stat)
         call proc_setenv('GIT_CONFIG_COUNT', '0')
         if (stat /= 0) then
-            write (error_unit, '(a)') 'fy: pushing HEAD to '//repo//' '//branch//' failed'
+            write (error_unit, '(a)') 'fy: pushing '//source//' to '//repo//' '//branch//' failed'
             call quit(1)
         end if
     end subroutine push_head
@@ -1350,7 +1360,8 @@ contains
     end subroutine cmd_job
 
     subroutine cmd_push()
-        !! fy push [BRANCH] [--repo NAME]: pushes HEAD to BRANCH (default: the
+        !! fy push [BRANCH] [--repo NAME]: pushes the checkout's branch BRANCH, or
+        !! HEAD when there is no branch of that name, to BRANCH (default: the
         !! current branch), which opens a change or adds a version to it, and
         !! names the change.
         type(config_t) :: cfg

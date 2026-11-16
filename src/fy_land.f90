@@ -136,16 +136,16 @@ module fy_land
         'while read -r t s f; do [ "$t" = blob ] && [ "$s" -gt "$lim" ] || continue; '// &
         'printf "%s\n" "$allow" | { while IFS= read -r p; do [ -n "$p" ] || continue; '// &
         'case "$f" in $p) exit 0;; esac; done; exit 1; } || echo "$f ($s bytes)"; done; }'
-    !! What a push of HEAD to the remote $1 sends: the commits HEAD has beyond
+    !! What a push of the revision $2 to the remote $1 sends: the commits it has beyond
     !! the remote's refs. A ref whose commit is not here cannot be left out, so
     !! before a refusal those are fetched and the push is looked at again:
     !! history the remote already has is never held against the push. Nothing
     !! when the remote does not answer; the push then fails by itself.
     character(len=*), parameter :: PUSH_CHECK = SIZE_RECEIVE//'; '// &
-        'refs=$(git ls-remote "$1" 2>/dev/null) || exit 0; '// &
-        'sent() { { echo HEAD; printf "%s\n" "$refs" | while read -r h r; do '// &
+        'src=$2; refs=$(git ls-remote "$1" 2>/dev/null) || exit 0; '// &
+        'sent() { { echo "$src"; printf "%s\n" "$refs" | while read -r h r; do '// &
         'git cat-file -e "$h^{commit}" 2>/dev/null && echo "^$h"; done; } | '// &
-        'git rev-list --stdin | large HEAD; }; '// &
+        'git rev-list --stdin | large "$src"; }; '// &
         'out=$(sent); [ -n "$out" ] || exit 0; '// &
         'miss=$(printf "%s\n" "$refs" | while read -r h r; do case "$r" in '// &
         'refs/*"^{}") ;; refs/*) git cat-file -e "$h^{commit}" 2>/dev/null || echo "$r";; '// &
@@ -253,17 +253,17 @@ contains
             repo//'/hooks/pre-receive.new', repo//'/hooks/pre-receive'], out, stat, 1024)
     end subroutine land_hook_install
 
-    subroutine land_push_check(remote, large)
-        !! What the receiving repository would refuse of a push of HEAD of the
-        !! checkout in the current directory to the git remote `remote`: `large`
-        !! lists the files over the size limit that .fortyard/allow-large does not allow,
-        !! and is empty when there are none.
-        character(len=*), intent(in) :: remote
+    subroutine land_push_check(remote, source, large)
+        !! What the receiving repository would refuse of a push of `source` (a
+        !! revision of the checkout in the current directory) to the git remote
+        !! `remote`: `large` lists the files over the size limit that
+        !! .fortyard/allow-large does not allow, and is empty when there are none.
+        character(len=*), intent(in) :: remote, source
         character(len=:), allocatable, intent(out) :: large
         integer :: status
 
-        call proc_run([character(len=2048) :: 'sh', '-c', PUSH_CHECK, 'push-check', remote], &
-            large, status, LOG_BYTES)
+        call proc_run([character(len=2048) :: 'sh', '-c', PUSH_CHECK, 'push-check', remote, &
+            source], large, status, LOG_BYTES)
     end subroutine land_push_check
 
     subroutine land_branch(repo, work, name, branch, ident, base_url, upstream, commit, log, ok, &
