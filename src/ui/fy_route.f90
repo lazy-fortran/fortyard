@@ -28,6 +28,7 @@ module fy_route
         'app', &
         'healthz', &
         'jobs', &
+        'readyz', &
         'server', &
         'status', &
         'tokens']

@@ -87,6 +87,8 @@ program fy
     select case (command)
     case ('admin')
         call cmd_admin()
+    case ('alerts')
+        call cmd_alerts()
     case ('audit')
         call cmd_audit()
     case ('backends')
@@ -290,6 +292,9 @@ contains
             '  board --stats [REPO] [--days N]', &
             '                      the same for one repository, the checkout''s by default', &
             '                      (--json: the answer of the API instead of text)', &
+        ! alerts
+            '  alerts [--json]     the alerts that fire now, with repository, since', &
+            '                      and detail; exits 1 when one fires', &
         ! the audit log
             '  audit list [--before ID] [--limit N] [--json]', &
             '                      the audit log, newest entry first (admin)', &
@@ -1203,6 +1208,27 @@ contains
         flush (output_unit)
         if (.not. flag('--no-wait')) call follow_job(cfg, id)
     end subroutine cmd_verify
+
+    subroutine cmd_alerts()
+        !! fy alerts [--json]: the alerts that fire now; exits 1 when one does,
+        !! so a monitor can run it.
+        type(config_t) :: cfg
+        character(len=:), allocatable :: body
+        integer :: code, stat
+
+        call config_load(cfg)
+        call require_login(cfg)
+        call client_request(cfg%server, 'GET', '/api/v1/alerts', cfg%token, '', code, body, stat)
+        if (stat /= 0 .or. code /= 200 .or. flag('--json')) then
+            call report(code, body, stat)
+        else if (index(body, '"rule":') == 0) then
+            write (output_unit, '(a)') 'No alerts.'
+        else
+            write (output_unit, '(a)', advance='no') cli_table('{"alerts":'//body//'}', &
+                'alerts', [character(len=6) :: 'rule', 'repo', 'since', 'detail'])
+        end if
+        if (index(body, '"rule":') > 0) call quit(1)
+    end subroutine cmd_alerts
 
     subroutine cmd_stats(board)
         !! fy stats [REPO] [--days N]: the queue numbers of a repository, or of

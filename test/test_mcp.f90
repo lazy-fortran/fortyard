@@ -6,7 +6,7 @@ program test_mcp
     use fy_posix, only: tcp_listen, sock_bound_port, sock_close
     use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, SIGTERM
     use fy_server, only: server_supervise, server_set_data_dir
-    use fy_sqlite, only: db_t, db_close
+    use fy_sqlite, only: db_t, db_close, db_exec
     use fy_store, only: store_open, store_bootstrap, store_repo_add
     implicit none
 
@@ -249,6 +249,23 @@ program test_mcp
         'job with no lines answers the state and the change alone: '//a)
     call check(passed(6) .and. index(answer(6), 'check ran\ncheck done') > 0, &
         'job with more lines than the log has answers all of it: '//answer(6))
+
+    ! Alerts: none, then a failed verification of main, through fy and the tool.
+    call run(env//fy//' alerts')
+    call check(stat == 0 .and. index(out, 'No alerts.') == 1, 'fy alerts without one: '//out)
+    call store_open(data//'/fortyard.db', db, stat)
+    call db_exec(db, "INSERT INTO landings (repo, branch, account, state, kind, created_at,"// &
+        " finished_at) VALUES ('demo', 'main', 'fortyard', 'failed', 'verify', 'x', 'x');", stat)
+    call db_close(db)
+    call run(env//fy//' alerts')
+    call check(stat == 1 .and. index(out, 'RULE') == 1 .and. &
+        index(out, new_line('a')//'main-broken  demo  x ') > 0, &
+        'fy alerts prints the alert and exits 1: '//out)
+    requests = ''
+    call tool(1, 'alerts', '')
+    call mcp()
+    call check(passed(1) .and. index(answer(1), '[{\"rule\":\"main-broken\",\"repo\":\"demo\"') &
+        > 0, 'the tool alerts answers them: '//answer(1))
 
     call proc_kill(sup, SIGTERM)
     call proc_wait(sup, stat)

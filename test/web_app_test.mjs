@@ -871,6 +871,35 @@ try {
   await load(`/work/-/changes/${second}`);
   await until(landButton, 'the Land button for a land session');
   check(true, 'a session with the land scope and without admin is offered the Land button');
+
+  // Alerts lead the server page, for any signed-in scope: a failed
+  // verification of main of its own repository is an alert there until main
+  // passes again. The admin token for the API: earlier sections sign out and in.
+  {
+    const alertAuth = { Authorization: `Bearer ${admin}`, 'Content-Type': 'application/json' };
+    await fetch(url + 'api/v1/repos', { method: 'POST', headers: alertAuth, body: JSON.stringify({ name: 'alerting' }) });
+    const verified = (state) => execFileSync('sqlite3', [join(data, 'd', 'fortyard.db'),
+      `INSERT INTO landings (repo, branch, account, state, kind, created_at, finished_at) VALUES ('alerting', 'main',
+      'fortyard', '${state}', 'verify', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));`]);
+    const alertRow = `[...document.querySelectorAll('[data-box="card-alerts"] .fui')].some((e) => e.textContent === 'alerting')`;
+    verified('failed');
+    const fired = await (await fetch(url + 'api/v1/alerts', { headers: alertAuth })).json();
+    check(fired.some((a) => a.rule === 'main-broken' && a.repo === 'alerting' && a.detail.endsWith('failed')),
+      'GET /api/v1/alerts lists the failed verification of main as main-broken');
+    await load('/server');
+    check(await evaluate(`window.__ssrTexts.includes('main-broken') && window.__ssrBoxes.indexOf('card-alerts') >= 0 &&
+      window.__ssrBoxes.indexOf('card-alerts') < window.__ssrBoxes.indexOf('card-server')`),
+      'the server sends the alert in the page, above the version and commit');
+    check(await adopted(), 'and the WebAssembly adopts the server page with its alerts');
+    await until(`${hasText('main-broken')} && ${alertRow}`, 'the alert on the server page');
+    check(await evaluate(hasText('Delivery')), 'the server page names what the instance serves against main');
+    verified('passed');
+    await load('/server');
+    await until(`!!document.querySelector('[data-box="card-alerts"]') && !(${alertRow})`, 'the alert gone');
+    check(true, 'the alert is gone once main passes again');
+    check((await fetch(url + 'readyz')).status === 200 && (await fetch(url + 'healthz')).status === 200,
+      '/readyz and /healthz answer 200 on a migrated store');
+  }
 } catch (e) {
   check(false, e.message);
 } finally {

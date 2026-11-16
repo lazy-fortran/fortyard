@@ -21,6 +21,11 @@ module fy_ui_app
         json_parser_init, &
         json_parser_next, &
         json_parser_t
+    use fy_alerts_view, only: &
+        alerts_view_compose, &
+        alerts_view_delivery, &
+        alerts_view_receive, &
+        alerts_view_show
     use fy_change_view, only: &
         change_view_compose, &
         change_view_counts_changed, &
@@ -211,6 +216,8 @@ contains
             call jobs_view_show(r)
         case (R_REPOS)
             call repo_view_list()
+        case (R_SERVER)
+            call alerts_view_show()
         case (R_TOKENS)
             copied = .false.
             call fetch_start(tokens_req, 'GET', '/api/v1/tokens')
@@ -576,6 +583,8 @@ contains
     subroutine server_view()
 
         call text("Server", size=TITLE, style=UI_HEADING, id="title")
+        ! What needs attention first, then what runs.
+        call alerts_view_compose()
         call column_begin(0.0, id="card-server")
         call field("Version", version, .false.)
         call field("Commit", commit, .true.)
@@ -584,6 +593,7 @@ contains
         else
             call field("Built", "unknown", .false.)
         end if
+        call field("Delivery", alerts_view_delivery(), .false.)
         call column_end()
         call text("Your account", size=HEADING, style=UI_HEADING, id="heading2")
         call column_begin(0.0, id="card-account")
@@ -755,6 +765,7 @@ contains
             call apply_whoami(whoami_req%body, whoami_req%status)
             if (signed_in) call show(here)
         end if
+        call alerts_view_receive()
         call change_view_receive()
         if (change_view_counts_changed()) call repo_view_repos()
         call changes_view_receive()

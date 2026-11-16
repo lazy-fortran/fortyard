@@ -2162,7 +2162,8 @@ contains
         type(stmt_t) :: st
         integer :: stat
 
-        call db_prepare(db, 'UPDATE repos SET fetched_at = '//NOW//', fetch_status = ?2'// &
+        call db_prepare(db, 'UPDATE repos SET fetched_at = '//NOW//', fetch_status = ?2,'// &
+            ' fetch_ok_at = CASE WHEN ?2 = 0 THEN '//NOW//' ELSE fetch_ok_at END'// &
             ' WHERE name = ?1;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, name, stat)

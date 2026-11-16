@@ -180,6 +180,12 @@ contains
             'ALTER TABLE changes ADD COLUMN title_edited INTEGER NOT NULL DEFAULT 0;'// &
             'ALTER TABLE changes ADD COLUMN description_edited INTEGER NOT NULL DEFAULT 0;')
 
+        ! When a mirror's clone or fetch last succeeded: fetched_at is the last
+        ! attempt, and the alert mirror-failing counts from the last success.
+        ! NULL until the first success after this column.
+        call migration_add(list, 'repos-fetch-ok-at', &
+            'ALTER TABLE repos ADD COLUMN fetch_ok_at TEXT;')
+
     end subroutine migrations_registry
 
 end module fy_migrations

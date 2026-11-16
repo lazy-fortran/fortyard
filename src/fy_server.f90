@@ -23,6 +23,13 @@ module fy_server
         json_extract_string
     use fx_string, only: &
         to_lower
+    use fy_alert, only: &
+        alert_delivery_json, &
+        alert_json, &
+        alert_list, &
+        alert_ready, &
+        alert_self_repo, &
+        alert_t
     use fy_audit, only: &
         audit_append, &
         audit_json, &
@@ -1051,6 +1058,13 @@ contains
         character(len=:), allocatable :: path
         path = repos_dir//'/'//trim(name)//'.git'
     end function repo_path
+
+    function mirrors_dir() result(path)
+        !! The directory of the mirrors; '' without a data directory.
+        character(len=:), allocatable :: path
+        path = ''
+        if (allocated(repos_dir)) path = repos_dir
+    end function mirrors_dir
 
     subroutine server_set_mirror_interval(seconds)
         !! Set once before the mirror process starts.
@@ -2131,7 +2145,8 @@ contains
         type(db_t), intent(in) :: db
         type(response_t), intent(out) :: res
         type(token_identity_t) :: who
-        character(len=:), allocatable :: rest
+        type(alert_t), allocatable :: alerts(:)
+        character(len=:), allocatable :: rest, reason
         integer(int64) :: id
         integer :: ios
 
@@ -2160,11 +2175,23 @@ contains
             if (.not. method_is(req, 'GET', res)) return
             if (.not. authenticated(req, db, who, res)) return
             res%body = dispatch_json(db)
+        case ('/api/v1/alerts')
+            ! The alerts that fire now (fy_alert), for any signed-in scope.
+            if (.not. method_is(req, 'GET', res)) return
+            if (.not. authenticated(req, db, who, res)) return
+            call alert_list(db, mirrors_dir(), FY_COMMIT, alert_self_repo(), alerts)
+            res%body = alert_json(alerts)
         case ('/api/v1/changes')
             ! The changes of every repository, as GET /api/v1/repos/R/changes.
             if (.not. method_is(req, 'GET', res)) return
             if (.not. authenticated(req, db, who, res)) return
             res%body = change_list_json(db, '', req%query, res%code)
+        case ('/api/v1/delivery')
+            ! What the instance serves against main of the repository it follows.
+            if (.not. method_is(req, 'GET', res)) return
+            if (.not. authenticated(req, db, who, res)) return
+            res%body = alert_delivery_json(db, mirrors_dir(), FY_COMMIT, FY_VERSION, &
+                alert_self_repo())
         case ('/api/v1/session')
             if (req%method == 'POST') then
                 call open_session(req, db, res)
@@ -2204,6 +2231,16 @@ contains
         case ('/login')
             if (.not. method_is(req, 'GET', res)) return
             call login_start(res)
+        case ('/readyz')
+            ! 503 while the store cannot be read or lacks this release's schema.
+            if (.not. method_is(req, 'GET', res)) return
+            res%ctype = 'text/plain; charset=utf-8'
+            if (alert_ready(db, reason)) then
+                res%body = 'ready '//FY_VERSION//' '//FY_COMMIT//new_line('a')
+            else
+                res%code = 503
+                res%body = 'not ready: '//reason//new_line('a')
+            end if
         case ('/status')
             if (.not. method_is(req, 'GET', res)) return
             res%ctype = 'text/html; charset=utf-8'

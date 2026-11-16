@@ -52,6 +52,7 @@ module fy_mcp
     ! server
         'whoami', 'Account of the stored fortyard token', '', &
         'version', 'Version of the fortyard server', '', &
+        'alerts', 'Alerts that fire now: rule, repository, since, detail', '', &
         'repos', 'Repositories of the server', '', &
     ! changes
         'changes', 'Changes, the open ones by default', 'repo? state? review? attention?', &
@@ -353,6 +354,7 @@ contains
         payload = ''
         expect = 200
         select case (tool)
+        case ('alerts'); path = '/api/v1/alerts'
         case ('whoami'); path = '/api/v1/whoami'
         case ('version'); path = '/api/v1/version'
         case ('repos'); path = '/api/v1/repos'
