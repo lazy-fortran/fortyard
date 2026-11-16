@@ -3,8 +3,9 @@ module fy_backend_github
     !! github-linux, github-macos-arm64 and github-windows. For each it asks
     !! the server which GitHub repository (the upstream) the check would go
     !! to, reads .github/workflows of the check's commit from the server and
-    !! gives the check back (error runner) unless fortyard.yml is the shipped
-    !! file and every other workflow there is disabled on GitHub, asks the
+    !! refuses the check (error refused: it ends failed with the reason, as
+    !! no attempt here could run it) unless fortyard.yml is the shipped file
+    !! and every other workflow there is disabled on GitHub, asks the
     !! server to publish the commit as branch fortyard/check/<id>, finds the
     !! run of that workflow for the branch, follows it with conditional
     !! requests (cancelling it when the check is withdrawn on the server),
@@ -13,8 +14,10 @@ module fy_backend_github
     !! signs the App's JWT with openssl; every request uses an installation
     !! token restricted to one repository. A sweep every ten minutes deletes
     !! finished runs of fortyard/check/ branches older than an hour and
-    !! cancels runs of checks that no longer run here. fy backend github
-    !! setup REPO prepares a repository.
+    !! cancels runs of checks that no longer run here, in the repositories
+    !! this backend published checks to until none of their runs is left, so
+    !! an idle backend asks GitHub nothing. fy backend github setup REPO
+    !! prepares a repository.
     use, intrinsic :: iso_fortran_env, only: &
         int64, &
         output_unit
@@ -173,13 +176,6 @@ contains
         token_path = path
     end subroutine github_token_file
 
-    logical function fixed()
-        !! A fixed token (file or setup's token) stands in for the App.
-        fixed = .false.
-        if (allocated(token_path)) fixed = len(token_path) > 0
-        if (allocated(fixed_token)) fixed = fixed .or. len(fixed_token) > 0
-    end function fixed
-
     function repo_token(repo) result(token)
         !! An installation token for the one repository `repo`, or with an
         !! empty `repo` one that only reads metadata (to list the installed
@@ -239,8 +235,8 @@ contains
         end if
         name = full(index(full, '/') + 1:)
         if (lower(full(1:index(full, '/') - 1)) /= lower(owner)) then
-            call give_back('The upstream '//full//' is not in '//owner//', the GitHub owner '// &
-                'this backend runs checks for; the check returns to its home class.')
+            call refuse('The upstream '//full//' is not in '//owner//', the GitHub owner '// &
+                'this backend runs checks for.')
             return
         end if
         gtoken = repo_token(name)
@@ -253,7 +249,7 @@ contains
         call backend_git_file(server, token, repo, ref, WORKFLOW_PATH, content, stat, listing)
         if (stat /= 0) content = ''
         if (content /= github_workflow()) then
-            call give_back('The GitHub backend gives this '//kind//' back to its home class: '// &
+            call refuse('The GitHub backend cannot run this '//kind//': '// &
                 WORKFLOW_PATH//' of the commit is not the workflow fortyard ships '// &
                 '(deploy/github/fortyard.yml).')
             return
@@ -262,8 +258,7 @@ contains
         ! token's rights: nothing but the shipped one may be active.
         why = foreign_workflows()
         if (len(why) > 0) then
-            call give_back('The GitHub backend gives this '//kind//' back to its home class: '// &
-                why)
+            call refuse('The GitHub backend cannot run this '//kind//': '//why)
             return
         end if
         call client_request(server, 'POST', '/api/v1/checks/'//id//'/publish', token, &
@@ -274,6 +269,7 @@ contains
             call give_back('The GitHub backend could not publish the commit: '//body)
             return
         end if
+        call sweep_add(name)
         t0 = backend_seconds()
         ! The run of the shipped workflow for the branch and commit.
         rid = ''
@@ -379,6 +375,13 @@ contains
             character(len=*), intent(in) :: why
             call backend_report(server, token, id, 'runner', why, '')
         end subroutine give_back
+
+        subroutine refuse(why)
+            !! The commit itself keeps the check from GitHub: giving it back
+            !! would bring it here again at once.
+            character(len=*), intent(in) :: why
+            call backend_report(server, token, id, 'refused', why, '')
+        end subroutine refuse
 
         logical function withdrawn()
             !! Whether the check no longer runs here (cancelled on the server,
@@ -496,78 +499,127 @@ contains
     end subroutine github_take
 
     subroutine github_sweep()
-        !! In every repository the App is installed for: deletes the finished
-        !! runs of fortyard/check/ branches that ended more than an hour ago,
-        !! and cancels the runs still going of checks that do not run here
-        !! (ended, queued again, cancelled, or a run GitHub started only after
-        !! its check was given back). Runs followed by a child are left alone.
-        character(len=:), allocatable :: listing, cutoff, body, token, rid, answer
-        character(len=:), allocatable :: head, base, num
-        character(len=128), allocatable :: repos(:)
-        integer :: code, k, j, q, stat
+        !! In each repository of the sweep list (sweep_add): deletes the
+        !! finished runs of fortyard/check/ branches that ended more than an
+        !! hour ago, and cancels the runs still going of checks that do not run
+        !! here (ended, queued again, cancelled, or a run GitHub started only
+        !! after its check was given back), with one listing of its runs. A
+        !! repository leaves the list once none of its check runs is left, so
+        !! an idle backend asks GitHub nothing.
+        character(len=:), allocatable :: cutoff, body, token, rid, answer, head, base, num
+        character(len=:), allocatable :: status, listing
+        character(len=128), allocatable :: repos(:), later(:), keep(:)
+        integer :: code, k, j, stat
+        logical :: left
 
-        token = repo_token('')
-        if (len(token) == 0) return
-        allocate (repos(0))
-        if (fixed()) then
-            ! A fine-grained token lists the owner's public repositories.
-            call gh('GET', '/orgs/'//owner//'/repos?type=public&per_page=100', token, '', code, &
-                listing)
-            if (code /= 200) return
-            do k = 1, 100
-                if (len(json_raw(listing, '['//itoa(k)//'].name')) == 0) exit
-                repos = [repos, [character(len=128) :: json_raw(listing, '['//itoa(k)//'].name')]]
-            end do
-        else
-            call gh('GET', '/installation/repositories?per_page=100', token, '', code, listing)
-            if (code /= 200) return
-            do k = 1, 100
-                if (len(json_raw(listing, 'repositories['//itoa(k)//'].name')) == 0) exit
-                repos = [repos, [character(len=128) :: json_raw(listing, 'repositories['// &
-                    itoa(k)//'].name')]]
-            end do
-        end if
+        call sweep_read(repos)
+        if (size(repos) == 0) return
         cutoff = backend_time(-3600)
         if (len(cutoff) /= 20) return
+        allocate (keep(0))
         do k = 1, size(repos)
             token = repo_token(trim(repos(k)))
-            if (len(token) == 0) cycle
-            base = '/repos/'//owner//'/'//trim(repos(k))//'/actions/runs'
-            call gh('GET', base//'?per_page=100&status=completed&created=%3C'//cutoff, token, '', &
-                code, body)
-            if (code == 200) then
-                do j = 1, 100
-                    rid = json_raw(body, 'workflow_runs['//itoa(j)//'].id')
-                    if (len(rid) == 0) exit
-                    head = json_raw(body, 'workflow_runs['//itoa(j)//'].head_branch')
-                    if (index(head, 'fortyard/check/') /= 1) cycle
-                    if (json_raw(body, 'workflow_runs['//itoa(j)//'].status') /= 'completed') cycle
-                    if (json_raw(body, 'workflow_runs['//itoa(j)//'].updated_at') >= cutoff) cycle
-                    call gh('DELETE', base//'/'//rid, token, '', code, listing)
-                end do
+            if (len(token) == 0) then
+                keep = [keep, repos(k)]
+                cycle
             end if
-            do q = 1, 2
-                call gh('GET', base//'?per_page=100&status='//trim(merge('in_progress', &
-                    'queued     ', q == 1)), token, '', code, body)
-                if (code /= 200) cycle
-                do j = 1, 100
-                    rid = json_raw(body, 'workflow_runs['//itoa(j)//'].id')
-                    if (len(rid) == 0) exit
-                    head = json_raw(body, 'workflow_runs['//itoa(j)//'].head_branch')
-                    if (index(head, 'fortyard/check/') /= 1) cycle
-                    if (json_raw(body, 'workflow_runs['//itoa(j)//'].status') == 'completed') cycle
-                    num = head(16:)
-                    if (index(num, '-') > 0) num = num(1:index(num, '-') - 1)
-                    if (len(num) == 0 .or. verify(num, '0123456789') /= 0) cycle
-                    call client_request(sweep_server, 'GET', '/api/v1/checks/'//num//'/publish', &
-                        sweep_token, '', code, answer, stat)
-                    if (stat /= 0 .or. code >= 500) cycle
-                    if (code == 200 .and. json_raw(answer, 'state') == 'running') cycle
-                    call gh('POST', base//'/'//rid//'/cancel', token, '', code, listing)
-                end do
+            base = '/repos/'//owner//'/'//trim(repos(k))//'/actions/runs'
+            call gh('GET', base//'?per_page=100&event=push', token, '', code, body)
+            if (code /= 200) then
+                keep = [keep, repos(k)]
+                cycle
+            end if
+            left = .false.
+            do j = 1, 100
+                rid = json_raw(body, 'workflow_runs['//itoa(j)//'].id')
+                if (len(rid) == 0) exit
+                head = json_raw(body, 'workflow_runs['//itoa(j)//'].head_branch')
+                if (index(head, 'fortyard/check/') /= 1) cycle
+                status = json_raw(body, 'workflow_runs['//itoa(j)//'].status')
+                if (status == 'completed') then
+                    if (json_raw(body, 'workflow_runs['//itoa(j)//'].updated_at') >= cutoff) then
+                        left = .true.
+                    else
+                        call gh('DELETE', base//'/'//rid, token, '', code, listing)
+                        if (code /= 204 .and. code /= 404) left = .true.
+                    end if
+                    cycle
+                end if
+                num = head(16:)
+                if (index(num, '-') > 0) num = num(1:index(num, '-') - 1)
+                if (len(num) == 0 .or. verify(num, '0123456789') /= 0) cycle
+                ! A cancelled run completes and is deleted by a later sweep.
+                left = .true.
+                call client_request(sweep_server, 'GET', '/api/v1/checks/'//num//'/publish', &
+                    sweep_token, '', code, answer, stat)
+                if (stat /= 0 .or. code >= 500) cycle
+                if (code == 200 .and. json_raw(answer, 'state') == 'running') cycle
+                call gh('POST', base//'/'//rid//'/cancel', token, '', code, listing)
             end do
+            if (left) keep = [keep, repos(k)]
         end do
+        ! Repositories a check added while this sweep ran stay listed.
+        call sweep_read(later)
+        do k = 1, size(later)
+            if (any(repos == later(k))) cycle
+            if (any(keep == later(k))) cycle
+            keep = [keep, later(k)]
+        end do
+        call sweep_write(keep)
     end subroutine github_sweep
+
+    function sweep_path() result(path)
+        !! The sweep list: a file in $TMPDIR (else /tmp), shared by the
+        !! backend's processes. Lost with the container, it costs only runs a
+        !! finished check did not delete itself.
+        character(len=:), allocatable :: path
+        character(len=4096) :: tmp
+        integer :: n, stat
+        call get_environment_variable('TMPDIR', tmp, n, stat)
+        if (stat /= 0 .or. n == 0) tmp = '/tmp'
+        path = trim(tmp)//'/fy-github-sweep-'//owner
+    end function sweep_path
+
+    subroutine sweep_read(repos)
+        character(len=128), allocatable, intent(out) :: repos(:)
+        character(len=128) :: line
+        integer :: u, ios
+        allocate (repos(0))
+        open (newunit=u, file=sweep_path(), status='old', action='read', iostat=ios)
+        if (ios /= 0) return
+        do
+            read (u, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            if (len_trim(line) == 0) cycle
+            if (any(repos == line)) cycle
+            repos = [repos, line]
+        end do
+        close (u)
+    end subroutine sweep_read
+
+    subroutine sweep_write(repos)
+        character(len=128), intent(in) :: repos(:)
+        integer :: u, ios, k
+        open (newunit=u, file=sweep_path(), status='replace', action='write', iostat=ios)
+        if (ios /= 0) return
+        do k = 1, size(repos)
+            write (u, '(a)') trim(repos(k))
+        end do
+        close (u)
+    end subroutine sweep_write
+
+    subroutine sweep_add(repo)
+        !! Puts `repo` on the sweep list once a check branch is published there.
+        character(len=*), intent(in) :: repo
+        character(len=128), allocatable :: repos(:)
+        integer :: u, ios
+        call sweep_read(repos)
+        if (any(repos == repo)) return
+        open (newunit=u, file=sweep_path(), position='append', action='write', iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a)') trim(repo)
+        close (u)
+    end subroutine sweep_add
 
     subroutine github_setup(repo, stat)
         !! fy backend github setup REPO: refuses a repository that is private or

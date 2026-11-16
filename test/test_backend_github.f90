@@ -7,12 +7,14 @@ program test_backend_github
     !! failing run are reported with their job logs, after polls that the
     !! fake answers with 304 for an unchanged run; their runs and branches are
     !! deleted. A run whose job never starts is cancelled and its check given
-    !! back (error runner), and so is a check whose workflow file differs from
-    !! the shipped one or that brings another active workflow, before
-    !! anything is pushed. GitHub's own time limit ends a check as timeout;
-    !! a check withdrawn on the server has its run cancelled. The sweep
+    !! back (error runner); a check whose workflow file differs from the
+    !! shipped one or that brings another active workflow fails with the
+    !! reason, before anything is pushed. GitHub's own time limit ends a check
+    !! as timeout; a check withdrawn on the server has its run cancelled. The
+    !! sweep, in the repositories of its list with one listing of runs each,
     !! deletes old runs of check branches and cancels the runs of checks that
-    !! do not run, and touches nothing else. Setup refuses a repository with secrets and
+    !! do not run, and touches nothing else; with an empty list it asks GitHub
+    !! nothing. Setup refuses a repository with secrets and
     !! prepares a clean one. The workflow built into fy is the shipped file.
     use, intrinsic :: iso_fortran_env, only: int64
     use fy_backend_github, only: github_configure, github_main, github_setup, github_token_file, &
@@ -145,6 +147,8 @@ program test_backend_github
     call store_check_add(db, 'fx', 'refs/heads/hold', id, stat, class='github-linux')
     call db_close(db)
     call execute_command_line('printf "%s\n" '//runner//' > '//dir//'/token')
+    ! A check published to demo before this backend started left runs there.
+    call execute_command_line('printf "demo\n" > '//dir//'/tmp/fy-github-sweep-acme')
 
     back = proc_fork()
     if (back == 0) then
@@ -156,12 +160,14 @@ program test_backend_github
     call wait_check(2, 'failed', '')
     call check_log(1, 'GitHub log of check 1: pass', 'the job log of a pass is copied')
     call check_log(2, 'GitHub log of check 2: fail', 'the job log of a failure is copied')
-    call wait_check(4, '', 'is not the workflow fortyard ships')
-    call cancel(4)
+    call wait_check(4, 'failed', '')
+    call check_log(4, 'is not the workflow fortyard ships', &
+        'a check whose workflow differs fails with the reason')
     call wait_check(3, '', 'The job did not start within 3 s')
     call cancel(3)
-    call wait_check(5, '', '.github/workflows/x.yml is new or changed in this check')
-    call cancel(5)
+    call wait_check(5, 'failed', '')
+    call check_log(5, '.github/workflows/x.yml is new or changed in this check', &
+        'a check that brings another workflow fails with the reason')
     call wait_check(6, 'timeout', '')
     call check_log(6, 'GitHub ended the job at the time limit', &
         'a job GitHub timed out ends as timeout')
@@ -191,6 +197,10 @@ program test_backend_github
     call check(index(log, 'POST /repos/acme/demo/actions/runs/8000000003/cancel') > 0 .and. &
         index(log, '8000000004/cancel') == 0, &
         'the sweep cancels a run of a check that does not run, not a run of main')
+    call check(index(log, '/orgs/acme/repos') == 0 .and. index(log, &
+        'installation/repositories') == 0 .and. index(log, 'status=queued') == 0 .and. &
+        index(log, 'status=in_progress') == 0, &
+        'the sweep lists only the runs of the repositories on its list, once each')
     call check(index(log, '/access_tokens {"repositories":["demo"]}') > 0 .and. &
         index(log, '401 ') == 0, 'tokens are signed by the App and limited to the repository')
     do i = 1, 600
@@ -222,7 +232,8 @@ program test_backend_github
     call proc_wait(back, stat)
     back = 0
     mark = len(slurp(api_log))
-    call execute_command_line('printf "ghs_test\n" > '//dir//'/gh.token')
+    call execute_command_line('printf "ghs_test\n" > '//dir//'/gh.token && : > '//dir// &
+        '/tmp/fy-github-sweep-acme')
     call store_open(data//'/fortyard.db', db, stat)
     call store_check_add(db, 'fx', 'refs/heads/pass', id, stat, class='github-linux')
     call db_close(db)
@@ -240,6 +251,8 @@ program test_backend_github
     call check(index(log, '/actions/runs') > 0 .and. index(log, 'access_tokens') == 0 .and. &
         index(log, '/orgs/acme/installation') == 0 .and. index(log, '401 ') == 0, &
         'a token file stands in for the App: '//log)
+    call check(index(log, 'actions/runs?per_page') == 0, &
+        'with an empty sweep list the sweep lists no runs: '//log)
 
     call stop_all()
     call execute_command_line('rm -rf '//dir)

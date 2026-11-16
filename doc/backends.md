@@ -205,8 +205,10 @@ pushed commit whose trigger matches, not only this one. The workflows of
 `main` are the repository's own and stay as they are, releases included. A
 check whose commit adds or changes any other file of `.github/workflows`
 (compared with `main` on GitHub), or whose copy of `fortyard.yml` differs
-from the shipped one, is given back to its home class (`{"error":"runner"}`)
-instead of being run there. The change's code therefore runs on GitHub only
+from the shipped one, is refused (`{"error":"refused"}`): it fails with the
+reason instead of being run there, as no later attempt on GitHub could run that
+commit; a raced copy of a check that waits for its home class is only
+withdrawn. The change's code therefore runs on GitHub only
 in `fortyard.yml`, with no secrets and no token beyond reading the repository;
 the result is read only from that workflow's run. GitHub's own permissions are
 not narrowed further: what this design protects is the TU Graz side, which
@@ -218,13 +220,15 @@ backend, has the permissions Actions (read and write) and Metadata (read),
 nothing else. The backend process holds its private key, signs the App's JWT
 with `openssl`, and requests an installation token restricted to the one
 repository for each request. It finds the run by branch and workflow path,
-polls it every few seconds with conditional requests (ETag), copies the job
+polls it every 30 seconds with conditional requests (ETag), copies the job
 log into the check, reports the result with `started_at`, deletes the run,
 and asks the server to delete the branch (`DELETE` of the same publish route).
 
-**Nothing left behind.** A sweep in the backend process deletes runs of
-`fortyard/check/*` branches older than an hour, and the server deletes such
-branches it pushed for checks that have ended. The workflow uploads no
+**Nothing left behind.** A finished check deletes its own run. A sweep in the
+backend process deletes runs of `fortyard/check/*` branches older than an hour
+in the repositories it published checks to, with one listing of runs each,
+until none is left there, so an idle backend sends GitHub no request; the
+server deletes such branches it pushed for checks that have ended. The workflow uploads no
 artifacts, and GitHub discards its machines after each job.
 
 **Setup** (`fy backend github setup REPO`, run with an owner's token): checks

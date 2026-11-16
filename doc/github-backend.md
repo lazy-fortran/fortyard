@@ -62,13 +62,15 @@ fy backend github --server http://fortyard:8740 --token-file runner-token \
 The runner token needs the runner scope; the process releases the checks it
 held when it starts, so a restart queues them again. It notices a check withdrawn
 on the server (a landing candidate that lost a member) within six polls and
-cancels its run. Every ten minutes it deletes finished runs of check branches
-older than an hour and cancels runs of check branches whose check no longer
-runs here, such as a run GitHub started only after its check was given back.
+cancels its run. Every ten minutes, in the repositories it published checks
+to and only while runs of check branches are left there, it deletes finished
+runs older than an hour and cancels runs whose check no longer runs here, such
+as a run GitHub started only after its check was given back; an idle backend
+sends GitHub no request.
 The check's time limit is at most `--max-minutes` (the workflow's own
 `timeout-minutes` is 360); a job that GitHub ends at its limit counts as a
 timeout, not as trouble of the runner. `--poll` (seconds
-between requests about a run, default 5) and `--start-timeout` (seconds a run
+between requests about a run, default 30) and `--start-timeout` (seconds a run
 may take to start before its check is given back, default 600) rarely need
 changing. Its network needs only `api.github.com` (and the fortyard server);
 GitHub's log downloads redirect to `*.blob.core.windows.net` hosts, which the

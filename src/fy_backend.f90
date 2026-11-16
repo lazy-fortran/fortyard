@@ -247,9 +247,10 @@ contains
 
     subroutine backend_report(server, token, id, outcome, log, started_at)
         !! Reports check `id`: outcome "passed" or "failed" with `started_at`
-        !! (when the external job started; empty when unknown), or "runner"
-        !! or "timeout" for a run that ended without a verdict, which queues
-        !! the check again. The log keeps its end when it is too long.
+        !! (when the external job started; empty when unknown), "runner" or
+        !! "timeout" for a run that ended without a verdict, which queues the
+        !! check again, or "refused" for a check its commit keeps from this
+        !! class, which ends it. The log keeps its end when it is too long.
         character(len=*), intent(in) :: server, token, id, outcome, log, started_at
         character(len=:), allocatable :: body, text, payload
         integer :: code, stat, try

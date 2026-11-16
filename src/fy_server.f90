@@ -166,6 +166,7 @@ module fy_server
         store_account_find, &
         store_check_add, &
         store_check_cancel, &
+        store_check_raced, &
         store_check_claim, &
         store_check_error, &
         store_check_finish, &
@@ -1388,8 +1389,10 @@ contains
             !! DELETE /api/v1/repos/NAME/landings/ID (land scope): cancels a queued
             !! landing at once and a running one at the lander's next step, which
             !! never moves main to a commit that holds it; 409 with the state of
-            !! one that ended or is moving main now. DELETE .../landings (admin):
-            !! cancels all queued and running ones; answers their numbers.
+            !! one that ended or is moving main now. With the admin scope ID may
+            !! also be a verification of main, whose checks are withdrawn.
+            !! DELETE .../landings (admin): cancels all queued and running
+            !! landings; answers their numbers.
             character(len=*), intent(in) :: target, tail
             character(len=:), allocatable :: state, list
             integer(int64), allocatable :: ids(:)
@@ -1437,7 +1440,8 @@ contains
                 call fail(res, 403, 'cancelling a landing needs the land or admin scope')
                 return
             end if
-            call store_landing_cancel(db, target, id, actor, state, found, cancelled)
+            call store_landing_cancel(db, target, id, actor, state, found, cancelled, &
+                verify=index(' '//who%scopes//' ', ' admin ') > 0)
             write (num, '(i0)') id
             if (.not. found) then
                 call fail(res, 404, 'no landing '//trim(num)//' in '//target)
@@ -2258,7 +2262,10 @@ contains
         !! "started_at":"ISO time"} (started_at optional: the claim's time), or
         !! {"error":"timeout"|"runner","log":"..."} for a check that ended
         !! without a verdict: it is queued again, at its second timeout it
-        !! ends in the state timeout. Only the runner that holds the check
+        !! ends in the state timeout. {"error":"refused","log":"..."}: a
+        !! backend cannot run the check's commit at all (its workflow, say),
+        !! so the check fails with the log instead of coming back to it; a
+        !! raced twin is only withdrawn. Only the runner that holds the check
         !! reports it; a runner taken as lost gets 409.
         !! POST /api/v1/checks/release: the calling runner's running checks
         !! are queued again (it restarted).
@@ -2364,12 +2371,17 @@ contains
         if (.not. found) log = ''
         call json_extract_string(req%body, 'error', error, found)
         if (found) then
-            if (error /= 'timeout' .and. error /= 'runner') then
-                call fail(res, 400, 'error is timeout or runner')
+            if (error /= 'timeout' .and. error /= 'runner' .and. error /= 'refused') then
+                call fail(res, 400, 'error is timeout, runner or refused')
                 return
             end if
-            call store_check_error(db, id, log, error == 'timeout', state, found, &
-                runner=who%token_name)
+            if (error == 'refused' .and. .not. store_check_raced(db, id)) then
+                state = 'failed'
+                call store_check_finish(db, id, who%token_name, state, log, found)
+            else
+                call store_check_error(db, id, log, error == 'timeout', state, found, &
+                    runner=who%token_name)
+            end if
         else
             state = merge('passed', 'failed', ok)
             call json_extract_string(req%body, 'started_at', started, found)

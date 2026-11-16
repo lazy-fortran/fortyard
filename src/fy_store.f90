@@ -51,6 +51,7 @@ module fy_store
         store_bootstrap, &
         store_check_add, &
         store_check_cancel, &
+        store_check_raced, &
         store_check_claim, &
         store_check_error, &
         store_check_finish, &
@@ -1053,10 +1054,12 @@ contains
         call stmt_finalize(st)
     end subroutine change_moved
 
-    subroutine store_landing_cancel(db, repo, id, account, state, found, cancelled)
+    subroutine store_landing_cancel(db, repo, id, account, state, found, cancelled, verify)
         !! Cancels landing `id` of `repo` for `account` when it is queued, or
         !! running and not sealed; its log says who cancelled it and when. The
-        !! lander drops a running one at its next step. `state` is the
+        !! lander drops a running one at its next step. With `verify` `id` may
+        !! also be a verification of main: its checks are withdrawn at once,
+        !! and the verifier goes on as if it had ended. `state` is the
         !! landing's state afterwards; `found` is false when `repo` has no
         !! landing `id`, `cancelled` whether this call cancelled it.
         type(db_t), intent(in) :: db
@@ -1065,15 +1068,22 @@ contains
         character(len=:), allocatable, intent(out) :: state
         logical, intent(out) :: found
         logical, intent(out) :: cancelled
+        logical, intent(in), optional :: verify
+        character(len=:), allocatable :: kinds
+        character(len=24) :: num
         type(stmt_t) :: st
         integer :: stat
 
         found = .false.
         state = ''
         cancelled = .false.
+        kinds = "kind = 'landing'"
+        if (present(verify)) then
+            if (verify) kinds = "kind IN ('landing', 'verify')"
+        end if
         call db_prepare(db, "UPDATE landings SET state = 'cancelled', finished_at = "//NOW// &
             ", log = coalesce(nullif(log, '') || char(10), '') || 'Cancelled by ' || ?3 ||"// &
-            " ' at ' || "//NOW//" || '.' WHERE id = ?1 AND repo = ?2 AND kind = 'landing'"// &
+            " ' at ' || "//NOW//" || '.' WHERE id = ?1 AND repo = ?2 AND "//kinds// &
             " AND state IN ('queued', 'running') AND sealed = 0 RETURNING state;", st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, id, stat)
@@ -1085,9 +1095,21 @@ contains
         end if
         call stmt_finalize(st)
         cancelled = found
-        if (found) return
-        call db_prepare(db, "SELECT state FROM landings WHERE id = ?1 AND repo = ?2 AND"// &
-            " kind = 'landing';", st, stat)
+        if (found) then
+            ! A verification's checks are named by its number; a landing's
+            ! are withdrawn by the lander.
+            write (num, '(i0)') id
+            call db_prepare(db, "UPDATE checks SET state = 'cancelled', finished_at = "//NOW// &
+                " WHERE repo = ?1 AND ref = ?2 AND state IN ('queued', 'running');", st, stat)
+            if (stat /= SQLITE_OK) return
+            call stmt_bind_text(st, 1, repo, stat)
+            call stmt_bind_text(st, 2, 'refs/fortyard/verify/'//trim(num), stat)
+            stat = stmt_step(st)
+            call stmt_finalize(st)
+            return
+        end if
+        call db_prepare(db, "SELECT state FROM landings WHERE id = ?1 AND repo = ?2 AND "// &
+            kinds//";", st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, id, stat)
         call stmt_bind_text(st, 2, repo, stat)
@@ -1488,6 +1510,22 @@ contains
         stat = stmt_step(st)
         call stmt_finalize(st)
     end subroutine store_check_cancel
+
+    logical function store_check_raced(db, id) result(raced)
+        !! Whether check `id` is the twin that raced an earlier check of the
+        !! same ref for its home class (store_check_twin).
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: id
+        type(stmt_t) :: st
+        integer :: stat
+
+        raced = .false.
+        call db_prepare(db, 'SELECT count(*) FROM checks WHERE id = ?1 AND twin < id;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, id, stat)
+        if (stmt_step(st) == SQLITE_ROW) raced = stmt_int(st, 0) > 0
+        call stmt_finalize(st)
+    end function store_check_raced
 
     subroutine store_check_claim(db, runner, id, repo, ref, found, kind, limit, class, &
             max_minutes, max_running)

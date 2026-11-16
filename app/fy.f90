@@ -212,7 +212,7 @@ contains
             '  backend github --server URL --token-file F --owner ORG', &
             '        (--github-token-file F2 | --app-id ID --app-key FILE)', &
             '        [--classes github-linux,...] [--max-running 20] [--max-macos 5]', &
-            '        [--max-minutes 360] [--api https://api.github.com] [--poll SECONDS]', &
+            '        [--max-minutes 360] [--api https://api.github.com] [--poll 30]', &
             '        [--start-timeout SECONDS]', &
             '                      run checks of the GitHub classes on GitHub Actions in', &
             '                      ORG''s public repositories (runner token; F2: a fine-grained', &
@@ -239,7 +239,8 @@ contains
             '  land [BRANCH] --urgent', &
             '                      land before every landing not yet in a candidate,', &
             '                      in a candidate of its own (admin)', &
-            '  land --cancel ID    cancel a landing that has not ended (land scope)', &
+            '  land --cancel ID    cancel a landing that has not ended (land scope), or a', &
+            '                      verification of main (admin)', &
             '  land --cancel-all REPO', &
             '                      cancel every landing of REPO that has not ended (admin)', &
             '  land REPO BRANCH    land a branch that is already pushed', &
@@ -711,7 +712,7 @@ contains
         if (len(text) > 0) gh_token = token_line(text)
         call github_configure(option('--app-id', ''), option('--app-key', ''), &
             option('--owner', ''), option('--api', 'https://api.github.com'), gh_token, &
-            backend_number('--poll', 5), backend_number('--start-timeout', 600))
+            backend_number('--poll', 30), backend_number('--start-timeout', 600))
         if (len(text) > 0) call github_token_file(text)
         if (len(option('--owner', '')) == 0 .or. (len(gh_token) == 0 .and. &
             (len(option('--app-id', '')) == 0 .or. len(option('--app-key', '')) == 0))) then
