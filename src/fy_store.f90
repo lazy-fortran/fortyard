@@ -72,6 +72,7 @@ module fy_store
         store_landing_cancel_all, &
         store_landing_check, &
         store_landing_finish, &
+        store_landing_left, &
         store_landing_list, &
         store_landing_next, &
         store_landing_requeue, &
@@ -1014,6 +1015,44 @@ contains
         call stmt_finalize(st)
     end subroutine store_landing_requeue
 
+    subroutine store_landing_left(db, lander, ls, checks)
+        !! What a stopped `lander` left: the landings it was running (lander 1
+        !! also those of a release before there were several landers) and the
+        !! other members, in any state, of the candidates whose checks they
+        !! share, oldest first, which is their order in the candidate.
+        !! `checks(k)` is the check that decides `ls(k)`, 0 when none.
+        type(db_t), intent(in) :: db
+        integer, intent(in) :: lander
+        type(landing_t), allocatable, intent(out) :: ls(:)
+        integer(int64), allocatable, intent(out) :: checks(:)
+        type(stmt_t) :: st
+        type(landing_t) :: l
+        integer :: stat
+
+        allocate (ls(0), checks(0))
+        call db_prepare(db, "SELECT id, repo, branch, account, created_at, coalesce(change, 0),"// &
+            ' urgent, state, coalesce(check_id, 0) FROM landings WHERE id IN (SELECT id FROM'// &
+            " landings WHERE state = 'running' AND kind = 'landing' AND (lander = ?1 OR"// &
+            ' (lander IS NULL AND ?1 = 1)) UNION SELECT m.id FROM landings r JOIN landings m'// &
+            " ON m.check_id = r.check_id WHERE r.state = 'running' AND r.kind = 'landing' AND"// &
+            " (r.lander = ?1 OR (r.lander IS NULL AND ?1 = 1))) ORDER BY id;", st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, int(lander, int64), stat)
+        do while (stmt_step(st) == SQLITE_ROW)
+            l%id = stmt_int(st, 0)
+            l%repo = stmt_text(st, 1)
+            l%branch = stmt_text(st, 2)
+            l%account = stmt_text(st, 3)
+            l%created = stmt_text(st, 4)
+            l%change = stmt_int(st, 5)
+            l%urgent = stmt_int(st, 6) /= 0
+            l%state = stmt_text(st, 7)
+            ls = [ls, l]
+            checks = [checks, stmt_int(st, 8)]
+        end do
+        call stmt_finalize(st)
+    end subroutine store_landing_left
+
     subroutine store_landing_finish(db, id, state, commit, log, found)
         !! Ends landing `id` in `state`. A cancelled landing stays cancelled
         !! (`found` false) unless it landed: what is on main has landed.
@@ -1926,18 +1965,19 @@ contains
         call stmt_finalize(st)
     end subroutine store_check_finish
 
-    subroutine store_check_get(db, id, state, log, age, limit, which)
+    subroutine store_check_get(db, id, state, log, age, limit, which, ref)
         !! State and log of a check, and seconds since it was queued, queued
         !! again or claimed; `limit`, the time limit in seconds its last claim
         !! was given (0: none). A raced pair reads as one check: its twin
         !! when that has the verdict, or runs while the check itself neither
-        !! runs nor has a verdict; `which` is the check read.
+        !! runs nor has a verdict; `which` is the check read, `ref` what it checks.
         type(db_t), intent(in) :: db
         integer(int64), intent(in) :: id
         character(len=:), allocatable, intent(out) :: state, log
         integer, intent(out) :: age
         integer, intent(out), optional :: limit
         integer(int64), intent(out), optional :: which
+        character(len=:), allocatable, intent(out), optional :: ref
         type(stmt_t) :: st
         integer :: stat
 
@@ -1946,9 +1986,10 @@ contains
         age = 0
         if (present(limit)) limit = 0
         if (present(which)) which = id
+        if (present(ref)) ref = ''
         call db_prepare(db, "SELECT state, coalesce(log, ''), CAST(strftime('%s', 'now') -"// &
             " strftime('%s', coalesce(claimed_at, queued_at, created_at)) AS INTEGER),"// &
-            ' coalesce(time_limit, 3600), id FROM checks WHERE id = (SELECT CASE WHEN t.state'// &
+            ' coalesce(time_limit, 3600), id, ref FROM checks WHERE id = (SELECT CASE WHEN t.state'// &
             " IN ('passed', 'failed') OR (c.state NOT IN ('passed', 'failed', 'running') AND"// &
             " t.state = 'running') THEN t.id ELSE c.id END FROM checks c LEFT JOIN checks t ON"// &
             ' t.id = c.twin WHERE c.id = ?1);', st, stat)
@@ -1960,6 +2001,7 @@ contains
             age = int(stmt_int(st, 2))
             if (present(limit)) limit = int(stmt_int(st, 3))
             if (present(which)) which = stmt_int(st, 4)
+            if (present(ref)) ref = stmt_text(st, 5)
         end if
         call stmt_finalize(st)
     end subroutine store_check_get

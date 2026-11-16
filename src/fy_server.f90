@@ -81,7 +81,10 @@ module fy_server
         land_candidate, &
         land_check, &
         land_hook_install, &
+        land_landed_commit, &
         land_live_clean, &
+        land_pinned_ref, &
+        land_push_main, &
         land_set_live
     use fy_live, only: &
         live_append, &
@@ -125,6 +128,7 @@ module fy_server
         proc_poll_child, &
         proc_readlink, &
         proc_reexec, &
+        proc_run, &
         proc_sleep_ms, &
         proc_wait, &
         proc_wait_any
@@ -186,6 +190,7 @@ module fy_server
         store_landing_cancel_all, &
         store_landing_check, &
         store_landing_finish, &
+        store_landing_left, &
         store_landing_list, &
         store_landing_next, &
         store_landing_requeue, &
@@ -283,6 +288,9 @@ module fy_server
     !! is withdrawn when one of them is cancelled, and main moves only when
     !! none of them is.
     integer(int64), allocatable :: lander_members(:)
+    !! A check a stopped lander left running for the candidate the lander
+    !! checks now: the next runner check waits for it instead of queuing one.
+    integer(int64) :: resume_check = 0
     !! The jobs whose check runs in the lander itself, and how many bytes of
     !! its output their live logs hold.
     integer(int64), allocatable :: live_jobs(:)
@@ -551,6 +559,8 @@ contains
         if (stat /= 0) call proc_exit(1)
         ! Opened before the first look at the queue, so no landing is missed.
         watch = events_watch_open()
+        lander_db = db
+        call resume()
         call store_landing_requeue(db, lander)
         ! Output files of checks a stopped lander left behind.
         call land_live_clean()
@@ -610,6 +620,153 @@ contains
 
     contains
 
+        subroutine resume()
+            !! Goes on with what this lander did when it was stopped, as by a
+            !! deploy. A landing whose commit is on main has landed. A candidate
+            !! whose runner check is queued, running or has its result waits
+            !! for that check and lands as it says, with the same ref and
+            !! commits. The rest is queued again and built anew: a candidate
+            !! whose check or refs are gone, and every landing whose check ran
+            !! in the old process.
+            type(landing_t), allocatable :: left(:), g(:)
+            integer(int64), allocatable :: decides(:)
+            character(len=40), allocatable :: commits(:), tips(:)
+            character(len=1024), allocatable :: branches(:), holds(:)
+            character(len=:), allocatable :: commit, log, state, ref, out, pushed
+            type(change_t) :: ch
+            integer :: i, k, age, status, running
+            logical :: usable, has_change
+
+            call store_landing_left(db, lander, left, decides)
+            do i = 1, size(left)
+                if (left(i)%state /= 'running') cycle
+                commit = land_landed_commit(repo_path(left(i)%repo), itoa(int(left(i)%id))// &
+                    '@'//left(i)%created)
+                if (len(commit) == 0) cycle
+                ! main moved before the restart and the landing was not recorded.
+                log = ''
+                if (decides(i) > 0) call store_check_get(db, decides(i), state, log, age)
+                log = live_outcome(log, 'Landed as '//commit//' before a restart.')
+                call use_repo(left(i)%repo)
+                call land_push_main(repo_path(left(i)%repo), upstream, pushed)
+                if (len(pushed) > 0) log = live_outcome(log, pushed)
+                ! Its branch goes as after any landing, unless pushed to since.
+                call git(left(i)%repo, [character(len=1024) :: 'rev-parse', '--verify', &
+                    '--quiet', land_pinned_ref(itoa(int(left(i)%id)))//'^{commit}'], out, status)
+                if (status == 0) call git(left(i)%repo, [character(len=1024) :: 'update-ref', &
+                    '-d', 'refs/heads/'//left(i)%branch, out])
+                call drop_refs(left(i))
+                call finish(left(i), .true., commit, log)
+                if (left(i)%change > 0) then
+                    call change_by_id(db, left(i)%change, ch, has_change)
+                    if (has_change) call change_landed(db, ch%id, commit)
+                end if
+                left(i)%state = 'landed'
+            end do
+            if (.not. checks_mode_set()) return
+            if (checks_mode /= 'runner') return
+            do i = 1, size(left)
+                if (decides(i) == 0) cycle
+                if (any(decides(1:i - 1) == decides(i))) cycle
+                g = [landing_t ::]
+                running = 0
+                usable = .true.
+                do k = 1, size(left)
+                    if (decides(k) /= decides(i)) cycle
+                    g = [g, left(k)]
+                    if (left(k)%state == 'running') running = running + 1
+                    ! A cancelled member withdraws the check in check_candidate.
+                    if (left(k)%state /= 'running' .and. left(k)%state /= 'cancelled') &
+                        usable = .false.
+                end do
+                call store_check_get(db, decides(i), state, log, age, ref=ref)
+                usable = usable .and. running > 0 .and. (state == 'queued' .or. &
+                    state == 'running' .or. state == 'passed' .or. state == 'failed' .or. &
+                    state == 'timeout')
+                if (allocated(commits)) deallocate (commits, tips, branches, holds)
+                allocate (commits(size(g)), tips(size(g)), branches(size(g)), holds(size(g)))
+                do k = 1, size(g)
+                    ! The last member's commit is the candidate the check names.
+                    holds(k) = 'refs/fortyard/queue/'//itoa(int(g(k)%id))
+                    if (k == size(g)) holds(k) = ref
+                    branches(k) = g(k)%branch
+                    commits(k) = ''
+                    tips(k) = ''
+                    if (.not. usable) cycle
+                    call git(g(k)%repo, [character(len=1024) :: 'rev-parse', '--verify', &
+                        '--quiet', trim(holds(k))//'^{commit}'], out, status)
+                    if (status == 0) commits(k) = out
+                    call git(g(k)%repo, [character(len=1024) :: 'rev-parse', '--verify', &
+                        '--quiet', land_pinned_ref(itoa(int(g(k)%id)))//'^{commit}'], out, status)
+                    if (status == 0) tips(k) = out
+                    usable = len_trim(commits(k)) == 40 .and. len_trim(tips(k)) == 40
+                end do
+                if (.not. usable) then
+                    ! Built again from the queue; a runner that still holds the
+                    ! check has its result refused.
+                    call store_check_cancel(db, decides(i))
+                    call events_notify('checks')
+                    do k = 1, size(g)
+                        call drop_refs(g(k))
+                    end do
+                    cycle
+                end if
+                call use_repo(g(1)%repo)
+                write (error_unit, '(a)') 'fy: the candidate of landing '// &
+                    itoa(int(g(size(g))%id))//' of '//g(1)%repo// &
+                    ' goes on with its check after a restart'
+                flush (error_unit)
+                resume_check = decides(i)
+                call check_candidate(g, commits, tips, branches, holds, ref)
+            end do
+        end subroutine resume
+
+        subroutine use_repo(name)
+            !! The repository the lander lands in now: its upstream and policy.
+            character(len=*), intent(in) :: name
+            integer :: k, st
+
+            call store_repo_list(db, repos, st)
+            upstream = ''
+            mode = ''
+            do k = 1, size(repos)
+                if (repos(k)%name /= name) cycle
+                mode = repos(k)%mode
+                upstream = repos(k)%upstream
+            end do
+            call policy_get(db, name, policy)
+        end subroutine use_repo
+
+        subroutine drop_refs(l)
+            !! The refs that held what landing `l` was checked with.
+            type(landing_t), intent(in) :: l
+            character(len=:), allocatable :: out
+            integer :: status
+
+            call git(l%repo, [character(len=1024) :: 'update-ref', '-d', &
+                'refs/fortyard/queue/'//itoa(int(l%id))], out, status)
+            call git(l%repo, [character(len=1024) :: 'update-ref', '-d', &
+                'refs/fortyard/checks/'//itoa(int(l%id))], out, status)
+            call git(l%repo, [character(len=1024) :: 'update-ref', '-d', &
+                land_pinned_ref(itoa(int(l%id)))], out, status)
+        end subroutine drop_refs
+
+        subroutine git(repo, args, out, status)
+            !! git in the bare repository of `repo`; `out` is its first line.
+            character(len=*), intent(in) :: repo, args(:)
+            character(len=:), allocatable, intent(out), optional :: out
+            integer, intent(out), optional :: status
+            character(len=:), allocatable :: o
+            integer :: st, e
+
+            call proc_run([character(len=1024) :: 'git', '--git-dir', repo_path(repo), args], &
+                o, st, 65536)
+            e = index(o, new_line('a'))
+            if (e > 0) o = o(1:e - 1)
+            if (present(out)) out = o
+            if (present(status)) status = st
+        end subroutine git
+
         subroutine land_one(l)
             !! Lands one branch by itself: its own commit on main, checked alone.
             type(landing_t), intent(in) :: l
@@ -620,6 +777,8 @@ contains
 
             if (store_landing_state(db, l%id) == 'cancelled') return
             lander_members = [l%id]
+            ! Its runner check is recorded, so a lander after a restart finds it.
+            candidate_jobs = [l%id]
             ! Scratch space of a landing lives in the temporary directory and is
             ! removed when the landing ends, whatever its outcome.
             work = tmp_dir()//'/fy-land-'//itoa(int(l%id))
@@ -660,6 +819,7 @@ contains
                         min_number=next, check=policy%tests /= 'none', proceed=lander_proceed)
                 end if
             end if
+            deallocate (candidate_jobs)
             call land_set_live()
             call execute_command_line('rm -rf '''//work//'''')
             if (.not. ok) call store_landing_unseal(db, lander_members)
@@ -676,7 +836,7 @@ contains
             !! built again without it, whatever its check said.
             type(landing_t), intent(in) :: g(:)
             type(change_t) :: ch
-            integer, allocatable :: held(:), single(:), live(:)
+            integer, allocatable :: held(:), single(:)
             character(len=40), allocatable :: commits(:), tips(:)
             character(len=40) :: pinned
             character(len=1024), allocatable :: branches(:), holds(:)
@@ -722,58 +882,90 @@ contains
                 end if
             end do
             if (size(held) > 0) then
-                work = tmp_dir()//'/fy-land-'//itoa(int(g(held(1))%id))
-                candidate_jobs = g(held)%id
-                lander_members = g(held)%id
-                call live_begin(g(held)%id)
-                if (checks_mode == 'runner') then
-                    call land_candidate(repo_path(g(1)%repo), work, g(1)%repo, tip, branches, &
-                        holds, upstream, log, ok, runner=runner_check, &
-                        check=policy%tests /= 'none', pinned=tips, proceed=lander_proceed)
-                else
-                    call land_candidate(repo_path(g(1)%repo), work, g(1)%repo, tip, branches, &
-                        holds, upstream, log, ok, check=policy%tests /= 'none', &
-                        pinned=tips, proceed=lander_proceed)
-                end if
-                deallocate (candidate_jobs)
-                call land_set_live()
-                call execute_command_line('rm -rf '''//work//'''')
-                if (.not. ok) call store_landing_unseal(db, lander_members)
-                lander_members = [integer(int64) ::]
-                allocate (live(0))
+                ! Where a lander after a restart finds what each branch was at.
                 do k = 1, size(held)
-                    if (store_landing_state(db, g(held(k))%id) /= 'cancelled') live = [live, held(k)]
+                    call git(g(1)%repo, [character(len=1024) :: 'update-ref', &
+                        land_pinned_ref(itoa(int(g(held(k))%id))), tips(k)])
                 end do
-                if (ok) then
-                    do k = 1, size(held)
-                        if (size(held) > 1) then
-                            call finish(g(held(k)), .true., commits(k), live_outcome(log, &
-                                'Landed as '//commits(k)//', checked with '// &
-                                itoa(size(held) - 1)//' other landing(s) in one candidate.'))
-                        else
-                            call finish(g(held(k)), .true., commits(k), live_outcome(log, &
-                                'Landed as '//commits(k)//'.'))
-                        end if
-                        if (g(held(k))%change > 0) then
-                            call change_by_id(db, g(held(k))%change, ch, has_change)
-                            if (has_change) call change_landed(db, ch%id, commits(k))
-                        end if
-                    end do
-                else if (size(live) < size(held)) then
-                    ! The check included a cancelled member, so it decides nothing.
-                    if (size(live) > 0) call land_group(g(live))
-                else if (size(held) == 1) then
-                    call finish(g(held(1)), .false., '', log)
-                else
-                    k = size(held) / 2
-                    call land_group(g(held(1:k)))
-                    call land_group(g(held(k + 1:)))
-                end if
+                call check_candidate(g(held), commits, tips, branches, holds, tip)
             end if
             do k = 1, size(single)
                 call land_one(g(single(k)))
             end do
         end subroutine land_group
+
+        recursive subroutine check_candidate(g, commits, tips, branches, holds, tip)
+            !! Checks the candidate at the ref `tip` whose members `g` were
+            !! squashed to `commits` from their branches at `tips`, `holds` the
+            !! refs of these commits, and lands it when it passes. A failing
+            !! candidate is split in halves, so a branch is blamed only when it
+            !! fails on main by itself.
+            type(landing_t), intent(in) :: g(:)
+            character(len=40), intent(in) :: commits(:), tips(:)
+            character(len=1024), intent(in) :: branches(:), holds(:)
+            character(len=*), intent(in) :: tip
+            type(change_t) :: ch
+            integer, allocatable :: live(:)
+            character(len=:), allocatable :: log, work
+            character(len=1024), allocatable :: drop(:)
+            logical :: ok, has_change
+            integer :: k
+
+            work = tmp_dir()//'/fy-land-'//itoa(int(g(1)%id))
+            candidate_jobs = g%id
+            lander_members = g%id
+            ! The pinned refs go with the holds, whatever the outcome.
+            allocate (drop(size(g)))
+            do k = 1, size(g)
+                drop(k) = land_pinned_ref(itoa(int(g(k)%id)))
+            end do
+            drop = [character(len=1024) :: holds, drop]
+            call live_begin(g%id)
+            if (checks_mode == 'runner') then
+                call land_candidate(repo_path(g(1)%repo), work, g(1)%repo, tip, branches, &
+                    drop, upstream, log, ok, runner=runner_check, &
+                    check=policy%tests /= 'none', pinned=tips, proceed=lander_proceed)
+            else
+                call land_candidate(repo_path(g(1)%repo), work, g(1)%repo, tip, branches, &
+                    drop, upstream, log, ok, check=policy%tests /= 'none', &
+                    pinned=tips, proceed=lander_proceed)
+            end if
+            resume_check = 0
+            deallocate (candidate_jobs)
+            call land_set_live()
+            call execute_command_line('rm -rf '''//work//'''')
+            if (.not. ok) call store_landing_unseal(db, lander_members)
+            lander_members = [integer(int64) ::]
+            allocate (live(0))
+            do k = 1, size(g)
+                if (store_landing_state(db, g(k)%id) /= 'cancelled') live = [live, k]
+            end do
+            if (ok) then
+                do k = 1, size(g)
+                    if (size(g) > 1) then
+                        call finish(g(k), .true., commits(k), live_outcome(log, &
+                            'Landed as '//commits(k)//', checked with '// &
+                            itoa(size(g) - 1)//' other landing(s) in one candidate.'))
+                    else
+                        call finish(g(k), .true., commits(k), live_outcome(log, &
+                            'Landed as '//commits(k)//'.'))
+                    end if
+                    if (g(k)%change > 0) then
+                        call change_by_id(db, g(k)%change, ch, has_change)
+                        if (has_change) call change_landed(db, ch%id, commits(k))
+                    end if
+                end do
+            else if (size(live) < size(g)) then
+                ! The check included a cancelled member, so it decides nothing.
+                if (size(live) > 0) call land_group(g(live))
+            else if (size(g) == 1) then
+                call finish(g(1), .false., '', log)
+            else
+                k = size(g) / 2
+                call land_group(g(1:k))
+                call land_group(g(k + 1:))
+            end if
+        end subroutine check_candidate
 
         function reviewed(ch) result(head)
             !! The commit the branch of `ch` has to be at to land: the version
@@ -2152,11 +2344,16 @@ contains
             return
         end if
         fd = events_watch_open()
-        call store_check_add(lander_db, repo, ref, id, stat)
-        if (stat /= 0) then
-            log = 'The check could not be queued.'
-            call events_watch_close(fd)
-            return
+        if (resume_check > 0) then
+            id = resume_check
+            resume_check = 0
+        else
+            call store_check_add(lander_db, repo, ref, id, stat)
+            if (stat /= 0) then
+                log = 'The check could not be queued.'
+                call events_watch_close(fd)
+                return
+            end if
         end if
         if (allocated(candidate_jobs)) call store_landing_check(lander_db, candidate_jobs, id)
         call events_notify('checks')

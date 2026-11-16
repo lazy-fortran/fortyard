@@ -34,9 +34,12 @@ module fy_land
         land_git_check, &
         land_git_new_enough, &
         land_hook_install, &
+        land_landed_commit, &
         land_live_clean, &
         land_live_i, &
+        land_pinned_ref, &
         land_push_check, &
+        land_push_main, &
         land_set_abort, &
         land_set_live
 
@@ -549,8 +552,12 @@ contains
             status = 0
         else if (present(runner)) then
             call git([character(len=1024) :: 'update-ref', check_ref(ident), made])
+            ! A lander started after a restart finds the branch's commit here
+            ! and goes on with the same check (land_candidate).
+            call git([character(len=1024) :: 'update-ref', land_pinned_ref(ident), tip])
             call runner(name, check_ref(ident), passed, runner_log)
             call git([character(len=1024) :: 'update-ref', '-d', check_ref(ident)])
+            call git([character(len=1024) :: 'update-ref', '-d', land_pinned_ref(ident)])
             ! Set after the cleanup above, which reuses status and out.
             out = runner_log
             if (passed) out = live_outcome(runner_log, 'Checked by a runner.')
@@ -1261,6 +1268,52 @@ contains
         if (at == 0) at = len(ident) + 1
         ref = 'refs/fortyard/checks/'//ident(1:at - 1)
     end function check_ref
+
+    function land_pinned_ref(ident) result(ref)
+        !! Where the commit of its branch that landing `ident` (N or N@time) was
+        !! made from is kept while its check runs: refs/fortyard/pinned/N.
+        character(len=*), intent(in) :: ident
+        character(len=:), allocatable :: ref
+        integer :: at
+        at = index(ident, '@')
+        if (at == 0) at = len(ident) + 1
+        ref = 'refs/fortyard/pinned/'//ident(1:at - 1)
+    end function land_pinned_ref
+
+    function land_landed_commit(repo, ident) result(commit)
+        !! The commit on main of the bare repository `repo` that landing `ident`
+        !! made (fortyard's commit with the trailer `Landing: ident`), or ''.
+        character(len=*), intent(in) :: repo, ident
+        character(len=:), allocatable :: commit
+        character(len=:), allocatable :: out
+        integer :: status
+
+        commit = ''
+        call proc_run([character(len=1024) :: 'git', '--git-dir', repo, 'log', '-1', &
+            '--format=%H', '--fixed-strings', '--committer=fortyard@localhost', &
+            '--grep=Landing: '//ident, 'refs/heads/main'], out, status, LOG_BYTES)
+        if (status == 0 .and. len_trim(out) >= 40) commit = first_line(out)
+    end function land_landed_commit
+
+    subroutine land_push_main(repo, upstream, log)
+        !! Pushes main of the bare repository `repo` to `upstream`, when there is
+        !! one; `log` says how that went, or is empty.
+        character(len=*), intent(in) :: repo, upstream
+        character(len=:), allocatable, intent(out) :: log
+        character(len=:), allocatable :: out
+        integer :: status
+
+        log = ''
+        if (len(upstream) == 0) return
+        call proc_run([character(len=1024) :: 'env', 'GIT_TERMINAL_PROMPT=0', 'timeout', '300', &
+            'git', '--git-dir', repo, 'push', '--quiet', upstream, &
+            'refs/heads/main:refs/heads/main'], out, status, LOG_BYTES)
+        if (status == 0) then
+            log = 'Pushed to '//upstream//'.'
+        else
+            log = 'Pushing to '//upstream//' failed:'//new_line('a')//out
+        end if
+    end subroutine land_push_main
 
     subroutine write_file(path, text)
         character(len=*), intent(in) :: path, text
