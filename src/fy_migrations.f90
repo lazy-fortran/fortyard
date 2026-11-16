@@ -173,6 +173,13 @@ contains
             'CREATE TABLE history_rewrites (repo TEXT NOT NULL, old_id TEXT NOT NULL,'// &
             ' new_id TEXT NOT NULL, rewritten_at TEXT NOT NULL, PRIMARY KEY (repo, old_id));')
 
+        ! A change's title or description that a person edited (fy change edit,
+        ! the page, the API) stays; one not edited is recomputed from the
+        ! commits of each new version, and the landing takes the newest.
+        call migration_add(list, 'changes-title-description-edited', &
+            'ALTER TABLE changes ADD COLUMN title_edited INTEGER NOT NULL DEFAULT 0;'// &
+            'ALTER TABLE changes ADD COLUMN description_edited INTEGER NOT NULL DEFAULT 0;')
+
     end subroutine migrations_registry
 
 end module fy_migrations

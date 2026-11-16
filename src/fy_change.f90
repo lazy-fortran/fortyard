@@ -166,46 +166,99 @@ contains
             else
                 call exec_bind(db, 'UPDATE changes SET branch = ?2, updated_at = '//NOW// &
                     ' WHERE id = ?1;', c%id, branch)
+                call redescribe(db, git_dir, c, tip, base)
             end if
             call add_version(db, repo, git_dir, c, tip, base, account, pushed_by)
         end do
     end subroutine change_sync
 
+    subroutine describe(git_dir, tip, base, title, description, ok)
+        !! The title and description of a version: those of the branch's one
+        !! commit, or the first one's subject and the list of all of them; merge
+        !! commits count only as a merge onto main.
+        character(len=*), intent(in) :: git_dir, tip, base
+        character(len=:), allocatable, intent(out) :: title, description
+        logical, intent(out) :: ok
+        character(len=:), allocatable :: range, subjects, body
+        integer :: status, n
+
+        ok = .false.
+        title = ''
+        description = ''
+        range = tip
+        if (len(base) > 0) range = base//'..'//tip
+        ! A merge onto main (such as of an upstream) lands as itself and is
+        ! described by its own message; main merged into a branch is not.
+        call git(git_dir, [character(len=256) :: 'rev-parse', '--verify', '--quiet', tip//'^2'], &
+            body, status)
+        if (status == 0 .and. len(base) > 0) call git(git_dir, [character(len=256) :: &
+            'merge-base', '--is-ancestor', tip//'^1', base], body, status)
+        if (status == 0) then
+            subjects = ''
+            n = 0
+        else
+            call git(git_dir, [character(len=256) :: 'log', '--no-merges', '--reverse', &
+                '--format=%s', range], subjects, status)
+            if (status /= 0) return
+            subjects = trim_nl(subjects)
+            n = count_lines(subjects)
+        end if
+        if (n == 0) then
+            call git(git_dir, [character(len=256) :: 'log', '-1', '--format=%s', tip], title, status)
+            title = trim_nl(title)
+            call git(git_dir, [character(len=256) :: 'log', '-1', '--format=%b', tip], body, status)
+            description = strip_trailers(trim_nl(body))
+        else if (n == 1) then
+            title = first_line(subjects)
+            call git(git_dir, [character(len=256) :: 'log', '--no-merges', '-1', '--format=%b', &
+                range], body, status)
+            description = strip_trailers(trim_nl(body))
+        else
+            title = first_line(subjects)
+            description = 'Commits:'//new_line('a')//bullets(subjects)
+        end if
+        ok = .true.
+    end subroutine describe
+
+    subroutine redescribe(db, git_dir, c, tip, base)
+        !! A new version of `c` takes the title and description of its own
+        !! commits, except where a person edited them.
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: git_dir, tip, base
+        type(change_t), intent(in) :: c
+        character(len=:), allocatable :: title, description
+        type(stmt_t) :: st
+        integer :: stat
+        logical :: ok
+
+        call describe(git_dir, tip, base, title, description, ok)
+        if (.not. ok .or. len(title) == 0) return
+        call db_prepare(db, 'UPDATE changes SET'// &
+            ' title = CASE WHEN title_edited <> 0 THEN title ELSE ?2 END,'// &
+            ' description = CASE WHEN description_edited <> 0 THEN description ELSE ?3 END'// &
+            ' WHERE id = ?1;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, c%id, stat)
+        call stmt_bind_text(st, 2, title, stat)
+        call stmt_bind_text(st, 3, description, stat)
+        stat = stmt_step(st)
+        call stmt_finalize(st)
+    end subroutine redescribe
+
     subroutine open_change(db, repo, git_dir, key, branch, tip, base, account, c, ok)
-        !! A new change: its title and description come from the branch's one
-        !! commit, or from the first one and the list of all of them.
+        !! A new change, described by its commits (describe).
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: repo, git_dir, key, branch, tip, base, account
         type(change_t), intent(out) :: c
         logical, intent(out) :: ok
-        character(len=:), allocatable :: range, subjects, title, description, body
+        character(len=:), allocatable :: title, description
         type(stmt_t) :: st
-        integer :: status, stat, n
+        integer :: stat
 
+        call describe(git_dir, tip, base, title, description, ok)
+        if (.not. ok) return
         ok = .false.
-        range = tip
-        if (len(base) > 0) range = base//'..'//tip
-        call git(git_dir, [character(len=256) :: 'log', '--reverse', '--format=%s', range], &
-            subjects, status)
-        if (status /= 0) return
-        subjects = trim_nl(subjects)
-        n = count_lines(subjects)
-        title = first_line(subjects)
-        ! A merge (such as of an upstream) is described by its own message.
-        call git(git_dir, [character(len=256) :: 'rev-parse', '--verify', '--quiet', tip//'^2'], &
-            body, status)
-        if (status == 0) then
-            call git(git_dir, [character(len=256) :: 'log', '-1', '--format=%s', tip], title, status)
-            title = trim_nl(title)
-            n = 1
-        end if
-        if (n <= 1) then
-            call git(git_dir, [character(len=256) :: 'log', '-1', '--format=%b', tip], body, status)
-            description = strip_trailers(trim_nl(body))
-        else
-            description = 'Commits:'//new_line('a')//bullets(subjects)
-        end if
-        call db_prepare(db, 'INSERT INTO changes (repo, number, change_key, branch, title,'// &
+        call db_prepare(db,'INSERT INTO changes (repo, number, change_key, branch, title,'// &
             ' description, author, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '// &
             NOW//', '//NOW//') RETURNING id;', st, stat)
         if (stat /= SQLITE_OK) return
@@ -666,12 +719,13 @@ contains
                     call refuse(400, 'a title is one non-empty line')
                     return
                 end if
-                call exec_bind(db, 'UPDATE changes SET title = ?2, updated_at = '//NOW// &
-                    ' WHERE id = ?1;', c%id, s)
+                ! An edited title is no longer taken from the commits.
+                call exec_bind(db, 'UPDATE changes SET title = ?2, title_edited = 1,'// &
+                    ' updated_at = '//NOW//' WHERE id = ?1;', c%id, s)
             end if
             call json_extract_string(body, 'description', s, ok)
-            if (ok) call exec_bind(db, 'UPDATE changes SET description = ?2, updated_at = '// &
-                NOW//' WHERE id = ?1;', c%id, s)
+            if (ok) call exec_bind(db, 'UPDATE changes SET description = ?2,'// &
+                ' description_edited = 1, updated_at = '//NOW//' WHERE id = ?1;', c%id, s)
             call json_extract_string(body, 'state', s, ok)
             if (ok) then
                 if ((s /= 'open' .and. s /= 'closed') .or. c%state == 'landed') then
@@ -915,8 +969,18 @@ contains
         integer :: stat, n
 
         json = summary_json(c)
-        json = json(1:len(json) - 1)//',"description":"'//json_escape_string(c%description)// &
-            '","versions_list":['
+        json = json(1:len(json) - 1)//',"description":"'//json_escape_string(c%description)//'"'
+        ! Whether a person edited them; otherwise each version recomputes them.
+        call db_prepare(db, 'SELECT title_edited, description_edited FROM changes WHERE id = ?1;', &
+            st, stat)
+        if (stat == SQLITE_OK) then
+            call stmt_bind_int(st, 1, c%id, stat)
+            if (stmt_step(st) == SQLITE_ROW) json = json//',"title_edited":'// &
+                trim(merge('true ', 'false', stmt_int(st, 0) /= 0))//',"description_edited":'// &
+                trim(merge('true ', 'false', stmt_int(st, 1) /= 0))
+            call stmt_finalize(st)
+        end if
+        json = json//',"versions_list":['
         call db_prepare(db, 'SELECT version, head, base, coalesce(pusher, ''''), created_at,'// &
             ' coalesce(session, '''') FROM change_versions WHERE change = ?1 ORDER BY version;', st, stat)
         n = 0
