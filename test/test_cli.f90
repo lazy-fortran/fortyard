@@ -62,6 +62,13 @@ program test_cli
     call check(stat == 0 .and. index(out, 'logged in to '//server//' as admin') > 0, &
         'fy login takes the token on standard input: '//out)
 
+    call run(env//fy//' ingest demo 7 --head '//repeat('a', 40))
+    call check(stat /= 0 .and. index(out, '--approve-execution') > 0, &
+        'ingest requires explicit approval before any request: '//out)
+    call run(env//fy//' ingest demo 7 --approve-execution --head '//repeat('a', 40)//' --json')
+    call check(stat /= 0 .and. index(out, 'ingest needs a GitHub upstream') > 0, &
+        'approved ingest reaches the server with parsed arguments: '//out)
+
     call execute_command_line('git init -q -b main '//work//' && mkdir '//work//'/.fortyard'// &
         ' && printf "hello\n" > '//work//'/README && printf "#!/bin/sh\necho check ran\n'// &
         'test -f README\n" > '//work//'/.fortyard/check && chmod +x '//work//'/.fortyard/check'// &

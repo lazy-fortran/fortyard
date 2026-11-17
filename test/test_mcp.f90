@@ -108,6 +108,13 @@ program test_mcp
     call tool(37, 'changes', '"state":"all"')
     call tool(38, 'changes', demo//',"state":"all","review":"flagged"')
     call tool(39, 'changes', demo//',"review":"a b"')
+    call tool(40, 'ingest', one//',"head":"'//repeat('a', 40)//'"')
+    call tool(41, 'ingest', one//',"head":"'//repeat('a', 40)// &
+        '","approve_execution":false')
+    call tool(42, 'ingest', one//',"head":"'//repeat('a', 40)// &
+        '","approve_execution":"true"')
+    call tool(43, 'ingest', one//',"head":"'//repeat('a', 40)// &
+        '","approve_execution":true')
     call request(35, 'shutdown', '{}')
     ! Nothing after a shutdown is read.
     call request(36, 'ping', '{}')
@@ -116,6 +123,14 @@ program test_mcp
     call check(index(answer(1), '"serverInfo":{"name":"fortyard"') > 0, &
         'initialize names the server: '//answer(1))
     a = answer(2)
+    call check(index(a, '"approve_execution":{"type":"boolean"') > 0, &
+        'ingest requires a boolean execution approval')
+    do i = 40, 42
+        call check(index(answer(i), 'ingest needs a valid approve_execution') > 0, &
+            'missing, false and string approval cannot import: '//answer(i))
+    end do
+    call check(index(answer(43), 'ingest needs a GitHub upstream') > 0, &
+        'explicit approval reaches the server validation: '//answer(43))
     call check(index(a, '{"name":"repos","description":') > 0 .and. &
         index(a, '{"name":"landings","description":') > 0 .and. index(a, '{"name":"job",') > 0, &
         'tools/list names each tool: '//a)

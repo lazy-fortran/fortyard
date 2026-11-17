@@ -105,6 +105,8 @@ program fy
         call cmd_git_credential()
     case ('issue')
         call cmd_issue()
+    case ('ingest')
+        call cmd_ingest()
     case ('job')
         call cmd_job()
     case ('jobs')
@@ -149,6 +151,8 @@ contains
         write (output_unit, '(a)') &
             'usage: fy <command> [options]', &
             '', &
+            '  ingest REPO PR --head SHA --approve-execution', &
+            '                      import an approved GitHub head without running checks (admin)', &
             '  admin rewrite NAME --data DIR --bundle FILE --expect-refs FILE', &
             '        --commit-map FILE [--check] [--journal-id ID]', &
             '                      offline history replacement (local administrator)', &
@@ -777,6 +781,36 @@ contains
         close (u)
         if (ios == 0) s = trim(line)
     end function token_line
+
+    subroutine cmd_ingest()
+        type(config_t) :: cfg
+        character(len=:), allocatable :: repo, pr, head, body
+        integer :: code, stat
+
+        repo = positional(1)
+        pr = positional(2)
+        head = option('--head', '')
+        if (len(repo) == 0 .or. len(pr) == 0 .or. len(head) /= 40 .or. &
+                .not. flag('--approve-execution')) then
+            write (error_unit, '(a)') 'fy: usage: fy ingest REPO PR --head SHA --approve-execution', &
+                'Approve only the head reviewed by a person. Import queues no checks.'
+            call quit(2)
+        end if
+        call config_load(cfg)
+        call require_login(cfg)
+        call client_request(cfg%server, 'POST', '/api/v1/repos/'//repo//'/ingest', cfg%token, &
+            '{"pr":"'//json_escape_string(pr)//'","head":"'//json_escape_string(head)// &
+            '","approve_execution":true}', code, body, stat)
+        if (stat /= 0 .or. (code /= 201 .and. code /= 200)) call report(code, body, stat)
+        if (stat /= 0 .or. (code /= 201 .and. code /= 200)) return
+        if (flag('--json')) then
+            write (output_unit, '(a)') body
+        else
+            write (output_unit, '(a)') 'change #'//cli_field(body, 'change')//' imported at '//head, &
+                'No checks queued. Land separately after review: fy change land '// &
+                cli_field(body, 'change')//' --repo '//repo
+        end if
+    end subroutine cmd_ingest
 
     subroutine cmd_land()
         !! fy land [BRANCH] [--repo NAME] [--no-push] [--no-wait]: pushes the
@@ -1829,7 +1863,8 @@ contains
         do while (i <= command_argument_count())
             if (index(arg(i), '--') == 1) then
                 select case (arg(i))
-                case ('--follow', '--no-push', '--no-wait', '--wait', '--json', '--init', &
+                case ('--approve-execution', '--follow', '--no-push', '--no-wait', &
+                        '--wait', '--json', '--init', &
                         '--all', '--all-repos', '--stats', '--urgent')
                     i = i + 1
                 case default

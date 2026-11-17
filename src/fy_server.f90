@@ -54,6 +54,7 @@ module fy_server
         change_branch_tips, &
         change_sync, &
         change_t
+    use fy_ingest, only: ingest_github
     use fy_dispatch, only: &
         dispatch_backend, &
         dispatch_json
@@ -1198,6 +1199,10 @@ contains
                     call queue_verify(rest(1:len(rest) - 7))
                     return
                 end if
+                if (rest(len(rest) - 6:) == '/ingest') then
+                    call ingest(rest(1:len(rest) - 7))
+                    return
+                end if
             end if
         end if
         if (len(rest) > 7) then
@@ -1380,6 +1385,55 @@ contains
             end if
             call fail(res, 404, 'not found')
         end subroutine releases_route
+
+        subroutine ingest(target)
+            character(len=*), intent(in) :: target
+            character(len=:), allocatable :: head, pr, body, upstream
+            logical :: approved, ok
+            integer :: code, j
+
+            if (.not. has_scope(who, 'admin')) then
+                call fail(res, 403, 'ingesting external code needs the admin scope')
+                return
+            end if
+            call json_extract_bool(req%body, 'approve_execution', approved, ok)
+            if (.not. ok) approved = .false.
+            if (.not. approved) then
+                call fail(res, 403, 'external code needs explicit approve_execution for this head')
+                return
+            end if
+            call json_extract_string(req%body, 'head', head, ok)
+            if (.not. ok) head = ''
+            call json_extract_string(req%body, 'pr', pr, ok)
+            if (.not. ok) pr = ''
+            if (.not. repo_name_ok(target)) then
+                call fail(res, 400, 'invalid repository name')
+                return
+            end if
+            call store_repo_list(db, repos, stat)
+            if (stat /= 0) then
+                call fail(res, 500, 'repository list could not be read')
+                return
+            end if
+            upstream = ''
+            do j = 1, size(repos)
+                if (repos(j)%name /= target) cycle
+                if (repos(j)%mode /= 'primary') then
+                    call fail(res, 409, 'only a primary repository ingests proposals')
+                    return
+                end if
+                upstream = repos(j)%upstream
+                exit
+            end do
+            if (j > size(repos)) then
+                call fail(res, 404, 'repository not found')
+                return
+            end if
+            call ingest_github(db, target, repo_path(target), upstream, pr, head, approved, &
+                who%account, who%session, code, body)
+            res%code = code
+            res%body = body
+        end subroutine ingest
 
         subroutine queue_landing(target)
             !! POST /api/v1/repos/NAME/land {"branch":"..."}: queues the branch to

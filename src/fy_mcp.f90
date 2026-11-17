@@ -8,6 +8,7 @@ module fy_mcp
     use fx_json_parse, only: &
         JSON_ARRAY_END, &
         JSON_ARRAY_START, &
+        JSON_BOOL, &
         JSON_END_OF_INPUT, &
         JSON_ERROR, &
         JSON_INTEGER, &
@@ -55,6 +56,8 @@ module fy_mcp
         'alerts', 'Alerts that fire now: rule, repository, since, detail', '', &
         'repos', 'Repositories of the server', '', &
     ! changes
+        'ingest', 'Import an approved GitHub head without checks (admin)', &
+        'repo number head approve_execution', &
         'changes', 'Changes, the open ones by default', 'repo? state? review? attention?', &
         'change', 'A change with its versions, comments and landings', 'repo number', &
         'change_diff', 'The diff of a change', 'repo number version? from?', &
@@ -195,6 +198,9 @@ contains
                     case (JSON_INTEGER, JSON_REAL)
                         value = ev%raw_val
                         kind = JSON_INTEGER
+                    case (JSON_BOOL)
+                        value = trim(merge('true ', 'false', ev%bool_val))
+                        kind = JSON_BOOL
                     end select
                 end if
                 hit(depth) = .false.
@@ -261,6 +267,9 @@ contains
         case ('repo'); json = text_arg('Repository name')
         case ('review'); json = text_arg('flagged or unreviewed')
         case ('number'); json = number_arg('Number of the change or issue')
+        case ('head'); json = text_arg('Full GitHub head SHA reviewed and approved by a person')
+        case ('approve_execution')
+            json = '{"type":"boolean","description":"Explicit human approval for this head"}'
         case ('state')
             json = text_arg('open (default), closed or all')
             if (tool == 'changes') json = text_arg('open (default), closed, landed, '// &
@@ -306,6 +315,7 @@ contains
         character(len=:), allocatable :: tool, name, value, repo, n, path, method, payload, body
         integer :: k, j, code, stat, expect, lines, kind
         logical :: found, optional
+        character(len=32) :: approval_keys(3)
 
         is_error = .true.
         call member(message, [character(len=8) :: 'params', 'name'], tool, kind)
@@ -326,6 +336,14 @@ contains
             ! What becomes part of the request's path must not reshape it.
             select case (name)
             case ('repo'); if (len(value) > 0) found = repo_name_ok(value)
+            case ('head')
+                found = len(value) == 40 .and. verify(value, '0123456789abcdef') == 0
+            case ('approve_execution')
+                approval_keys(1) = 'params'
+                approval_keys(2) = 'arguments'
+                approval_keys(3) = name
+                call member(message, approval_keys, value, kind)
+                found = kind == JSON_BOOL .and. value == 'true'
             case ('review', 'attention')
                 found = verify(value, 'abcdefghijklmnopqrstuvwxyz-') == 0
             case ('branch'); if (len(value) > 0) found = repo_ref_ok(value)
@@ -419,6 +437,12 @@ contains
             expect = 201
             payload = '{"title":"'//json_escape_string(argument(message, 'title'))// &
                 '","body":"'//json_escape_string(argument(message, 'body'))//'"}'
+        case ('ingest')
+            path = '/api/v1/repos/'//repo//'/ingest'
+            method = 'POST'
+            expect = 201
+            payload = '{"pr":"'//n//'","head":"'//argument(message, 'head')// &
+                '","approve_execution":true}'
         case ('land')
             path = '/api/v1/repos/'//repo//'/land'
             method = 'POST'
@@ -441,6 +465,7 @@ contains
         call client_request(cfg%server, method, path, cfg%token, payload, code, text, stat)
         if (stat /= 0) text = '{"error":"server not reachable"}'
         is_error = stat /= 0 .or. code /= expect
+        if (tool == 'ingest' .and. stat == 0 .and. code == 200) is_error = .false.
         if (tool /= 'job' .or. is_error) return
         if (len(argument(message, 'offset')) > 0) then
             ! New log text from the offset on, and where to ask next.
@@ -472,12 +497,12 @@ contains
     end subroutine call_tool
 
     function argument(message, name) result(value)
-        !! params.arguments.NAME of a tools/call request, a string or a number.
+        !! params.arguments.NAME of a tools/call request, as scalar text.
         character(len=*), intent(in) :: message, name
         character(len=:), allocatable :: value
         integer :: kind
 
-        call member(message, [character(len=16) :: 'params', 'arguments', name], value, kind)
+        call member(message, [character(len=32) :: 'params', 'arguments', name], value, kind)
     end function argument
 
 end module fy_mcp

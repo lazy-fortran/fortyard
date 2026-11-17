@@ -229,6 +229,9 @@ contains
             '        exit 1', &
             '    fi', &
             '    case "$ref" in', &
+            '    refs/heads/external/github/*)', &
+            '        echo "external imports are pinned. Ingest a newly approved head instead" >&2', &
+            '        exit 1 ;;', &
             '    refs/fortyard/*)', &
             '        echo "$ref is kept by fortyard and takes no push" >&2', &
             '        exit 1 ;;', &

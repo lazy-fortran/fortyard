@@ -405,6 +405,8 @@ runs the CI of all repositories that move to it (milestone M8 in
   external author as commit author, runs its tests in the sandbox without
   credentials, and the person's check counts as review before merge. After
   landing, a bot comments with the commit and closes the pull request.
+  The implemented [manual import](github-pull-requests.md) requires explicit
+  execution approval and leaves landing and the closing receipt to the caller.
 - **Issues are synchronised both ways.** Each GitHub issue is linked to one
   fortyard issue, which holds the full record. Comments, state and labels are
   mirrored with their original authors; when title or text changed on both
