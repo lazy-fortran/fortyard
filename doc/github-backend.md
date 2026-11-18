@@ -66,7 +66,11 @@ cancels its run. Every ten minutes, in the repositories it published checks
 to and only while runs of check branches are left there, it deletes finished
 runs older than an hour and cancels runs whose check no longer runs here, such
 as a run GitHub started only after its check was given back; an idle backend
-sends GitHub no request.
+sends GitHub no request. The same sweep sends the
+[closing receipts](github-pull-requests.md#closing-receipts) of landed branches
+in all repositories of `--owner`, one listing per landing. They need the
+permissions Pull requests (read and write) and Contents (read) besides those
+above. Without them a receipt is retried for 14 days after its landing.
 The check's time limit is at most `--max-minutes` (the workflow's own
 `timeout-minutes` is 360); a job that GitHub ends at its limit counts as a
 timeout, not as trouble of the runner. `--poll` (seconds

@@ -186,6 +186,13 @@ contains
         call migration_add(list, 'repos-fetch-ok-at', &
             'ALTER TABLE repos ADD COLUMN fetch_ok_at TEXT;')
 
+        ! Closing receipts (fy_receipt): a landing whose GitHub pull requests the
+        ! GitHub backend commented on and closed, with their numbers, so a
+        ! restarted backend sends no receipt twice.
+        call migration_add(list, 'github-receipts', &
+            'CREATE TABLE github_receipts (landing INTEGER PRIMARY KEY, prs TEXT NOT NULL,'// &
+            ' sent_at TEXT NOT NULL);')
+
     end subroutine migrations_registry
 
 end module fy_migrations

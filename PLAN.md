@@ -757,7 +757,10 @@ elsewhere.
   model is available; instructions and settings per group and repository;
   benchmark and outcome evaluation.
 - M10 Issues with two-way GitHub synchronisation; manual ingest of GitHub
-  pull requests; staging and promotion for live services.
+  pull requests; staging and promotion for live services. Done: manual ingest
+  and closing receipts, which the GitHub backend sends for the pull requests
+  of landed branches
+  ([GitHub pull requests](doc/github-pull-requests.md#closing-receipts)).
 - M11 MILCA and further code repositories move to fortyard.
 
 ## Study readiness

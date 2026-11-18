@@ -55,6 +55,10 @@ module fy_server
         change_sync, &
         change_t
     use fy_ingest, only: ingest_github
+    use fy_receipt, only: &
+        receipt_due, &
+        receipt_owner_ok, &
+        receipt_record
     use fy_dispatch, only: &
         dispatch_backend, &
         dispatch_json
@@ -2304,6 +2308,9 @@ contains
                 call audit_route(req, db, res)
             else if (index(req%path, '/api/v1/checks/') == 1) then
                 call checks_route(req, db, res)
+            else if (req%path == '/api/v1/receipts' .or. &
+                    index(req%path, '/api/v1/receipts/') == 1) then
+                call receipts_route(req, db, res)
             else if (req%path == '/api/v1/jobs' .or. index(req%path, '/api/v1/jobs/') == 1) then
                 call jobs_route(req, db, res)
             else if (req%path == '/api/v1/repos' .or. index(req%path, '/api/v1/repos/') == 1) then
@@ -3306,6 +3313,64 @@ contains
         write (num, '(i0)') next
         res%body = res%body//'],"next":'//trim(num)//'}'
     end subroutine audit_route
+
+    subroutine receipts_route(req, db, res)
+        !! GET /api/v1/receipts?owner=OWNER: the landings whose GitHub closing
+        !! receipt is due (fy_receipt). POST /api/v1/receipts/N {"prs":"..."}:
+        !! landing N has its receipt. Both need the runner or admin scope, as
+        !! the GitHub backend sends the receipts.
+        type(http_request_t), intent(in) :: req
+        type(db_t), intent(in) :: db
+        type(response_t), intent(inout) :: res
+        type(token_identity_t) :: who
+        character(len=:), allocatable :: owner, prs, digits
+        character(len=1024) :: url
+        integer(int64) :: id
+        integer :: n, stat, ios
+        logical :: found
+
+        if (.not. authenticated(req, db, who, res)) return
+        if (index(' '//who%scopes//' ', ' admin ') == 0 .and. &
+            index(' '//who%scopes//' ', ' runner ') == 0) then
+            call fail(res, 403, 'receipts need the runner or admin scope')
+            return
+        end if
+        if (req%path == '/api/v1/receipts') then
+            if (.not. method_is(req, 'GET', res)) return
+            owner = http_query_param(req%query, 'owner')
+            if (.not. receipt_owner_ok(owner)) then
+                call fail(res, 400, 'owner is a GitHub account name')
+                return
+            end if
+            ! The change's page as people reach it, as in the landing's commit.
+            call get_environment_variable('FY_PUBLIC_URL', url, n, stat)
+            if (stat /= 0 .or. n == 0) call get_environment_variable('FY_URL', url, n, stat)
+            if (stat /= 0) url = ''
+            call receipt_due(db, owner, trim(url), res%body, stat)
+            if (stat /= 0) call fail(res, 500, 'the receipts could not be read')
+            return
+        end if
+        if (.not. method_is(req, 'POST', res)) return
+        digits = req%path(18:)
+        read (digits, *, iostat=ios) id
+        if (ios /= 0 .or. len(digits) == 0 .or. len(digits) > 18 .or. &
+            verify(digits, '0123456789') /= 0) then
+            call fail(res, 404, 'not found')
+            return
+        end if
+        call json_extract_string(req%body, 'prs', prs, found)
+        if (.not. found) prs = ''
+        if (len(prs) > 4096 .or. verify(prs, '0123456789,') /= 0) then
+            call fail(res, 400, 'prs lists pull request numbers separated by commas')
+            return
+        end if
+        call receipt_record(db, id, prs, found)
+        if (.not. found) then
+            call fail(res, 409, 'no landed landing with that number')
+            return
+        end if
+        res%body = '{"recorded":true}'
+    end subroutine receipts_route
 
     logical function method_is(req, method, res)
         type(http_request_t), intent(in) :: req

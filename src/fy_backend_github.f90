@@ -19,6 +19,7 @@ module fy_backend_github
     !! an idle backend asks GitHub nothing. fy backend github setup REPO
     !! prepares a repository.
     use, intrinsic :: iso_fortran_env, only: &
+        error_unit, &
         int64, &
         output_unit
     use fy_backend, only: &
@@ -29,6 +30,8 @@ module fy_backend_github
         backend_seconds, &
         backend_time, &
         json_raw
+    use fx_json_build, only: &
+        json_escape_string
     use fy_client, only: &
         client_request
     use fy_proc, only: &
@@ -512,6 +515,7 @@ contains
         integer :: code, k, j, stat
         logical :: left
 
+        call github_receipts()
         call sweep_read(repos)
         if (size(repos) == 0) return
         cutoff = backend_time(-3600)
@@ -567,6 +571,156 @@ contains
         end do
         call sweep_write(keep)
     end subroutine github_sweep
+
+    subroutine github_receipts()
+        !! Closing receipts: for each landing the server lists as due in a
+        !! repository of the owner, comments on and closes the open pull
+        !! requests of the landed branch and records the receipt on the server
+        !! (github_receipt). A repository whose receipt fails waits for the
+        !! next sweep; the landing itself never waits for a receipt.
+        character(len=:), allocatable :: body, name, full, at
+        character(len=128), allocatable :: failed(:)
+        integer :: code, stat, j
+        logical :: ok
+
+        call client_request(sweep_server, 'GET', '/api/v1/receipts?owner='//encoded(owner), &
+            sweep_token, '', code, body, stat)
+        if (stat /= 0 .or. code /= 200) then
+            call note('receipts could not be read from the server (HTTP '//itoa(code)//')')
+            return
+        end if
+        allocate (failed(0))
+        do j = 1, 100
+            at = 'receipts['//itoa(j)//'].'
+            if (len(json_raw(body, at//'id')) == 0) exit
+            full = json_raw(body, at//'repository')
+            if (index(full, '/') < 2) cycle
+            if (lower(full(1:index(full, '/') - 1)) /= lower(owner)) cycle
+            name = full(index(full, '/') + 1:)
+            if (any(failed == name)) cycle
+            call github_receipt(json_raw(body, at//'id'), name, json_raw(body, at//'branch'), &
+                json_raw(body, at//'commit'), json_raw(body, at//'url'), &
+                json_raw(body, at//'finished'), ok)
+            if (.not. ok) failed = [failed, [character(len=128) :: name]]
+        end do
+    end subroutine github_receipts
+
+    subroutine github_receipt(landing, repo, branch, commit, url, finished, ok)
+        !! The receipt of one landing of `branch` as `commit` in OWNER/`repo`:
+        !! its open pull requests (head OWNER:BRANCH, or the one an ingested
+        !! change external/github/PR/HEAD came from) get a comment that names
+        !! the commit and are closed, never merged, once GitHub's main has
+        !! the commit. A comment that already names it is not repeated, so a
+        !! receipt cut short is finished by a later sweep.
+        character(len=*), intent(in) :: landing, repo, branch, commit, url, finished
+        logical, intent(out) :: ok
+        character(len=:), allocatable :: token, base, answer, num, prs, text, rest
+        character(len=24), allocatable :: pulls(:)
+        integer :: k, code
+
+        ok = .false.
+        code = 0
+        token = repo_token(repo)
+        if (len(token) == 0) then
+            call failure('no token')
+            return
+        end if
+        base = '/repos/'//owner//'/'//repo
+        allocate (pulls(0))
+        if (index(branch, 'external/github/') == 1) then
+            rest = branch(17:)
+            num = rest(1:max(0, index(rest, '/') - 1))
+            if (len(num) == 0 .or. verify(num, '0123456789') /= 0) then
+                ok = record('')
+                return
+            end if
+            call gh('GET', base//'/pulls/'//num, token, '', code, answer)
+            if (code == 200) then
+                if (json_raw(answer, 'state') == 'open') pulls = [character(len=24) :: num]
+            else if (code /= 404) then
+                call failure('pull request '//num)
+                return
+            end if
+        else
+            call gh('GET', base//'/pulls?state=open&per_page=100&head='// &
+                encoded(owner//':'//branch), token, '', code, answer)
+            if (code /= 200) then
+                call failure('the open pull requests of '//branch)
+                return
+            end if
+            do k = 1, 100
+                num = json_raw(answer, '['//itoa(k)//'].number')
+                if (len(num) == 0) exit
+                if (lower(json_raw(answer, '['//itoa(k)//'].head.label')) /= &
+                    lower(owner//':'//branch)) cycle
+                pulls = [pulls, [character(len=24) :: num]]
+            end do
+        end if
+        prs = ''
+        if (size(pulls) > 0) then
+            call gh('GET', base//'/compare/'//commit//'...main', token, '', code, answer)
+            if (code /= 200 .or. (json_raw(answer, 'status') /= 'ahead' .and. &
+                json_raw(answer, 'status') /= 'identical')) then
+                call failure('GitHub''s main does not have the commit yet')
+                return
+            end if
+        end if
+        text = 'Landed as '//commit//' on main through fortyard'
+        if (len(url) > 0) text = text//': '//url
+        text = text//'. GitHub mirrors main from fortyard, so this pull request is closed '// &
+            'without a merge here.'
+        do k = 1, size(pulls)
+            num = trim(pulls(k))
+            call gh('GET', base//'/issues/'//num//'/comments?per_page=100&since='// &
+                encoded(finished), token, '', code, answer)
+            if (code /= 200) then
+                call failure('the comments of pull request '//num)
+                return
+            end if
+            if (index(answer, 'Landed as '//commit) == 0) then
+                call gh('POST', base//'/issues/'//num//'/comments', token, &
+                    '{"body":"'//json_escape_string(text)//'"}', code, answer)
+                if (code /= 201) then
+                    call failure('a comment on pull request '//num)
+                    return
+                end if
+            end if
+            call gh('PATCH', base//'/pulls/'//num, token, '{"state":"closed"}', code, answer)
+            if (code /= 200) then
+                call failure('closing pull request '//num)
+                return
+            end if
+            call note('closed '//owner//'/'//repo//'#'//num//', landed as '//commit)
+            if (len(prs) > 0) prs = prs//','
+            prs = prs//num
+        end do
+        ok = record(prs)
+
+    contains
+
+        logical function record(closed)
+            character(len=*), intent(in) :: closed
+            character(len=:), allocatable :: reply
+            integer :: s
+            call client_request(sweep_server, 'POST', '/api/v1/receipts/'//landing, sweep_token, &
+                '{"prs":"'//closed//'"}', code, reply, s)
+            record = s == 0 .and. code == 200
+            if (.not. record) call failure('the server''s record')
+        end function record
+
+        subroutine failure(what)
+            character(len=*), intent(in) :: what
+            call note('the receipt of landing '//landing//' in '//owner//'/'//repo// &
+                ' waits for the next sweep: '//what//' (HTTP '//itoa(code)//')')
+        end subroutine failure
+
+    end subroutine github_receipt
+
+    subroutine note(text)
+        character(len=*), intent(in) :: text
+        write (error_unit, '(a)') 'fy backend github: '//text
+        flush (error_unit)
+    end subroutine note
 
     function sweep_path() result(path)
         !! The sweep list: a file in $TMPDIR (else /tmp), shared by the

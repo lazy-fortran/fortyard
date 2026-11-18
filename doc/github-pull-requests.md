@@ -25,9 +25,8 @@ fy change diff NUMBER --repo REPO
 fy change land NUMBER --repo REPO
 ```
 
-After a successful landing and mirror push, comment on the GitHub PR with the
-landed commit and close it. Do not merge it on GitHub. Proposal listing and
-automatic closing receipts remain part of milestone M10.
+Do not merge the pull request on GitHub. The GitHub backend sends the
+[closing receipt](#closing-receipts).
 
 The API is `POST /api/v1/repos/REPO/ingest` with the body
 `{"pr":"PR","head":"FULL_SHA","approve_execution":true}`. Missing, false or
@@ -37,3 +36,30 @@ same current head returns the existing change.
 
 The MCP tool `ingest` takes `repo`, `number`, `head` and the boolean
 `approve_execution`. It has the same approval and import checks as the CLI.
+
+## Closing receipts
+
+The GitHub backend (`fy backend github`, see
+[Operating the GitHub backend](github-backend.md)) closes the pull requests of
+landed branches. At its start and every ten minutes it asks the server for the
+landings of the last 14 days that have no receipt yet, in primary repositories
+whose upstream belongs to its `--owner`. For a landing of branch `B` as commit
+`C` in `OWNER/NAME` it handles:
+
+- every open pull request whose head is `OWNER:B`, and
+- for an ingested change (branch `external/github/PR/HEAD`), pull request `PR`.
+
+Each gets one comment `Landed as C on main through fortyard: URL.`, with `URL`
+the change's page when the server has `FY_PUBLIC_URL` or `FY_URL`, and is
+closed, never merged. Nothing is touched until GitHub's `main` contains `C`.
+The backend then records the receipt on the server, so a restart sends nothing
+twice, and a comment that already names `C` is not repeated. A failed request
+is logged and retried at the next sweep. The landing never waits for its
+receipt. A pull request from a fork with the same branch name stays open. The
+backend's GitHub token needs Pull requests (read and write) and Contents
+(read) on the repository for its receipts.
+
+The server's routes need the runner or admin scope:
+`GET /api/v1/receipts?owner=OWNER` lists the due receipts and
+`POST /api/v1/receipts/N` with `{"prs":"435,436"}` records the receipt of
+landing `N`. Proposal listing remains part of milestone M10.
