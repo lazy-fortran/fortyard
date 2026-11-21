@@ -16,6 +16,7 @@ program fy
         gitlab_backend_main, &
         gitlab_backend_t, &
         gitlab_setup
+    use fy_follow_tools, only: follow_tools_trigger
     use fy_build_info, only: &
         FY_COMMIT, &
         FY_VERSION
@@ -84,6 +85,13 @@ program fy
     command = arg(1)
     ! Asking for help never runs a command: `fy land --help` once landed.
     if (wants_help()) command = 'help'
+    ! Keeps the installed fy and fo at main, in the background; not from the
+    ! long-running server and runner processes.
+    select case (command)
+    case ('serve', 'runner', 'executor')
+    case default
+        call follow_tools_trigger()
+    end select
     select case (command)
     case ('admin')
         call cmd_admin()
