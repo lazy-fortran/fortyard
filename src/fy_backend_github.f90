@@ -1068,7 +1068,14 @@ contains
         text = text//'          if [ "$kind" = verify ]; then'//NL
         text = text//'            fo build && FO_TEST_RERUN=1 fo test'//NL
         text = text//'          else'//NL
-        text = text//'            fo build && fo test'//NL
+        ! The cases the landing affects, as on fortyard's own runners.
+        text = text//'            fo build || exit 1'//NL
+        text = text//'            if git rev-parse -q --verify HEAD^ >/dev/null &&'// &
+            ' fo test --help 2>/dev/null | grep -q -- --since; then'//NL
+        text = text//'              fo test --since HEAD^'//NL
+        text = text//'            else'//NL
+        text = text//'              fo test'//NL
+        text = text//'            fi'//NL
         text = text//'          fi'//NL
     end function github_workflow
 

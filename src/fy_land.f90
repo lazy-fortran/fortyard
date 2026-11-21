@@ -897,7 +897,8 @@ contains
 
     subroutine land_check(work, out, code, verify, limit, timed_out, grace, output, nightly)
         !! The check of a landing commit checked out in `work`: an executable
-        !! .fortyard/check, else fo build and fo test for an fpm project
+        !! .fortyard/check, else fo build and fo test of the cases the landing
+        !! affects for an fpm project
         !! (applications built, so tests may run them); under a memory cap when systemd can
         !! give one. `out` is its output (folded as fold() says; the sink set
         !! with land_set_live hears of it while it grows), `code` its exit
@@ -976,7 +977,13 @@ contains
                     code = 0
                     return
                 end if
-                cmd = [character(len=1024) :: 'sh', '-c', 'fo build && fo test']
+                ! The cases the landing affects: its first parent is the main
+                ! it lands on. A fo without --since, or a first commit, runs
+                ! them all; verification and nightly runs stay complete.
+                cmd = [character(len=1024) :: 'sh', '-c', 'fo build && '// &
+                    'if git rev-parse -q --verify HEAD^ >/dev/null && '// &
+                    'fo test --help 2>/dev/null | grep -q -- --since; '// &
+                    'then fo test --since HEAD^; else fo test; fi']
             end if
         end if
         ! A sandbox the host provides (FY_CHECK_WRAP, e.g. srt with its
