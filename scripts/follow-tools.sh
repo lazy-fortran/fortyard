@@ -11,14 +11,24 @@
 set -eu
 home=${FY_TOOLS_HOME:-$HOME/.cache/fy-tools}
 mkdir -p "$home"
+# A network home (AFS, NFS) takes no flock and builds slowly: the lock and
+# the clones and build trees then live on local disk.
+local_dir=
+if [ "$(uname -s)" = Linux ]; then
+    case $(stat -f -c %T "$home" 2>/dev/null) in
+    afs | nfs* | cifs | smb* | fuse*) local_dir=/var/tmp/$(id -un)-fy-tools ;;
+    esac
+fi
+lock_dir=${local_dir:-$home}
+mkdir -p "$lock_dir"
 # flock frees the lock with its holder, however that ends. Without it
 # (macOS) mkdir is the atomic step, and a lock older than an hour is left by
 # a killed run.
 if command -v flock >/dev/null 2>&1; then
-    exec 9>"$home/lock.flock"
+    exec 9>"$lock_dir/lock.flock"
     flock -n 9 || exit 0
 else
-    lock=$home/lock
+    lock=$lock_dir/lock
     if ! mkdir "$lock" 2>/dev/null; then
         [ -n "$(find "$lock" -maxdepth 0 -mmin +60 2>/dev/null)" ] || exit 0
         rm -rf "$lock"
@@ -28,19 +38,20 @@ else
 fi
 : > "$home/checked"
 
-# Clones and build trees stay on local disk: on a network home (AFS, NFS)
-# src links to a directory in /var/tmp, recreated when that was cleared.
-if [ "$(uname -s)" = Linux ]; then
-    case $(stat -f -c %T "$home" 2>/dev/null) in
-    afs | nfs* | cifs | smb* | fuse*)
-        local_src=/var/tmp/$(id -un)-fy-tools-src
-        mkdir -p "$local_src"
-        if [ "$(readlink "$home/src" 2>/dev/null)" != "$local_src" ]; then
-            rm -rf "$home/src"
-            ln -s "$local_src" "$home/src"
+# On a network home src links to local disk (recreated when /var/tmp was
+# cleared); the paths fo and fy look at stay the same.
+if [ -n "$local_dir" ]; then
+    local_src=$local_dir/src
+    mkdir -p "$local_src"
+    if [ "$(readlink "$home/src" 2>/dev/null)" != "$local_src" ]; then
+        # AFS keeps files in use; move the old tree aside and remove what it
+        # lets go.
+        if [ -e "$home/src" ] || [ -L "$home/src" ]; then
+            mv "$home/src" "$home/src.old.$$"
+            rm -rf "$home/src.old.$$" 2>/dev/null || true
         fi
-        ;;
-    esac
+        ln -s "$local_src" "$home/src"
+    fi
 fi
 
 bin=${FY_TOOLS_BIN:-}
@@ -64,15 +75,25 @@ follow() { # repository, tool
     git -C "$src" fetch -q origin main || return 1
     head=$(git -C "$src" rev-parse FETCH_HEAD)
     [ "$head" = "$(cat "$home/$tool.commit" 2>/dev/null)" ] && [ -x "$bin/$tool" ] && return 0
-    [ -e "$home/failed-$tool-$head" ] && return 0
+    # A commit that failed to build is tried again after a day, in case the
+    # host was at fault.
+    [ -n "$(find "$home/failed-$tool-$head" -mmin -1440 2>/dev/null)" ] && return 0
     git -C "$src" checkout -q --force --detach "$head"
     git -C "$src" clean -q -fdx -e build
     echo "$(date) $tool $head: building" >> "$log"
-    if command -v fo >/dev/null 2>&1; then
-        (cd "$src" && fo build) >> "$log" 2>&1 || { : > "$home/failed-$tool-$head"; return 1; }
+    builder="fo build"
+    command -v fo >/dev/null 2>&1 || builder="fpm build"
+    status=0
+    (cd "$src" && $builder) >> "$log" 2>&1 || status=$?
+    # A build stopped by a signal is not a failure of the commit.
+    [ "$status" -gt 128 ] && return 1
+    if [ "$status" -ne 0 ]; then
+        : > "$home/failed-$tool-$head"
+        return 1
+    fi
+    if [ "$builder" = "fo build" ]; then
         built=$src/build/fo/app/$tool
     else
-        (cd "$src" && fpm build) >> "$log" 2>&1 || { : > "$home/failed-$tool-$head"; return 1; }
         built=$(ls -t "$src"/build/*/app/"$tool" 2>/dev/null | head -1)
     fi
     if [ ! -x "$built" ] || ! "$built" --version >> "$log" 2>&1; then
@@ -84,11 +105,11 @@ follow() { # repository, tool
     echo "$head" > "$home/$tool.commit"
     echo "$(date) $tool $head: installed in $bin" >> "$log"
 }
-status=0
+result=0
 for tool in ${FY_TOOLS:-fo fy}; do
     case $tool in
-    fo) follow fo fo || status=1 ;;
-    fy) follow fortyard fy || status=1 ;;
+    fo) follow fo fo || result=1 ;;
+    fy) follow fortyard fy || result=1 ;;
     esac
 done
-exit $status
+exit $result
