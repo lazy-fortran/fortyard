@@ -155,14 +155,16 @@ module fy_land
         'esac; done); if [ -n "$miss" ]; then '// &
         'git fetch -q --no-tags --no-write-fetch-head "$1" $miss 2>/dev/null || exit 0; '// &
         'out=$(sent); fi; [ -z "$out" ] || printf "%s\n" "$out"'
-    !! fo fmt --check on the Fortran files the landing adds or changes, except
-    !! those matched by a pattern in .fortyard/format-exclude (one shell pattern
-    !! a line), for code that follows another project's style. The formatter
-    !! reads files, so these and the project files it looks for are written
-    !! from the object store into the empty current directory, through an
-    !! index of their own that leaves the bare repository as it is. Names are
-    !! split at line ends only, so one with a space is one file.
-    character(len=*), parameter :: FORMAT_CHECK = IN_REPO// &
+    !! fo fmt on the Fortran files the landing adds or changes, except those
+    !! matched by a pattern in .fortyard/format-exclude (one shell pattern a
+    !! line), for code that follows another project's style. The files and the
+    !! project files the formatter looks for are written from the object store
+    !! into the empty current directory through an index of their own, which
+    !! then takes the formatted files. Prints the tree with them and the files
+    !! that changed, or nothing when none did or the formatter failed: the
+    !! build reports a file it cannot parse. Names are split at line ends only,
+    !! so one with a space is one file.
+    character(len=*), parameter :: FORMAT_FIX = IN_REPO// &
         'ex=$(g cat-file -p "$2:.fortyard/format-exclude" 2>/dev/null); '// &
         'files=$(g -c core.quotePath=false diff --name-only --diff-filter=AMR "$1" "$2" -- '// &
         '"*.f90" "*.F90" "*.f" "*.F" | while IFS= read -r f; do '// &
@@ -173,8 +175,14 @@ module fy_land
         'case "$cfg" in *fpm.toml*|*CMakeLists.txt*) ;; *) exit 0;; esac; '// &
         'export GIT_INDEX_FILE="$PWD/.fy-index"; g read-tree "$2" && '// &
         'printf "%s\n" "$files" "$cfg" | tr "\n" "\0" | g --work-tree="$PWD" checkout-index -z '// &
-        '--stdin --prefix="$PWD/" 2>&1 || exit 1; unset GIT_INDEX_FILE; rm -f .fy-index; '// &
-        'IFS="'//new_line('a')//'"; set -f; fo fmt --check $files 2>&1'
+        '--stdin --prefix="$PWD/" >/dev/null 2>&1 || exit 0; '// &
+        'IFS="'//new_line('a')//'"; set -f; fo fmt $files >/dev/null 2>&1 || exit 0; '// &
+        'changed=; for f in $files; do new=$(g hash-object -w -- "$f") || exit 0; '// &
+        'old=$(g rev-parse "$2:$f"); [ "$new" = "$old" ] && continue; '// &
+        'mode=$(g ls-tree "$2" -- "$f" | cut -d" " -f1); '// &
+        'g update-index --cacheinfo "$mode,$new,$f" || exit 0; '// &
+        'changed="$changed$f'//new_line('a')//'"; done; [ -n "$changed" ] || exit 0; '// &
+        'g write-tree && printf "%s" "$changed"'
 
     !! Where the output of a check that runs here is announced while it grows;
     !! none: the check runs to its end first.
@@ -308,7 +316,7 @@ contains
         procedure(proceed_i), optional :: proceed
         logical :: passed
         character(len=:), allocatable :: runner_log
-        character(len=:), allocatable :: out, subjects, message, num
+        character(len=:), allocatable :: out, subjects, message, num, note
         ! Fixed length: gfortran overflows typed array constructors around
         ! deferred-length strings.
         character(len=1024) :: range, author_name, author_mail
@@ -488,6 +496,26 @@ contains
             if (len(base_url) == 0) message = message//new_line('a')
             message = message//new_line('a')//'Landing: '//ident
         end if
+        ! A merge is checked for what differs from the merged history only.
+        against = EMPTY_TREE
+        if (has_main) against = base
+        if (len_trim(merged) > 0) against = merged
+        ! The changed Fortran files are formatted here, as the local pre-commit
+        ! hook asks for, so no landing fails for formatting.
+        ! The script is longer than the usual argument length.
+        call run([character(len=len(FORMAT_FIX)) :: 'sh', '-c', FORMAT_FIX, 'format', &
+            against, tree, absolute(repo)], work//'/files')
+        if (status == 0 .and. len_trim(out) > 0) then
+            tree = first_line(out)
+            ! The note goes above the trailers, which stay last.
+            k = max(1, index(out, new_line('a')))
+            note = new_line('a')//new_line('a')//'Formatted by fortyard (fo fmt):'// &
+                new_line('a')//bulleted(trim_trailing(out(k + 1:)))
+            k = index(message, new_line('a')//new_line('a')//'Change: ', back=.true.)
+            if (k == 0) k = index(message, new_line('a')//'Landing: ', back=.true.)
+            if (k == 0) k = len(message) + 1
+            message = message(1:k - 1)//note//message(k:)
+        end if
         call write_file(work//'/LANDING_MSG', message//new_line('a'))
         if (len_trim(merged) > 0) then
             ! The merge as it was resolved, on main and the merged commit, by the
@@ -518,22 +546,12 @@ contains
         end if
         made = first_line(out)
 
-        ! A merge is checked for what differs from the merged history only.
-        against = EMPTY_TREE
-        if (has_main) against = base
-        if (len_trim(merged) > 0) against = merged
         ! What local pre-commit hooks check, checked again on the landing commit,
         ! so nothing that skipped them reaches main.
         call run([character(len=1024) :: 'sh', '-c', SIZE_CHECK, 'size-check', against, made, &
             repo], '')
         if (status /= 0 .or. len_trim(out) > 0) then
             log = 'Files over the size limit (allow them in .fortyard/allow-large):'//new_line('a')//out
-            return
-        end if
-        call run([character(len=1024) :: 'sh', '-c', FORMAT_CHECK, 'format-check', against, &
-            made, absolute(repo)], work//'/files')
-        if (status /= 0) then
-            log = 'Changed Fortran files need formatting (run fo fmt):'//new_line('a')//out
             return
         end if
 

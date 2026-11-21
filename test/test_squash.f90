@@ -250,13 +250,23 @@ program test_squash
         'printf "module  n\nimplicit none\n  end module n\n" > "src/bad one.f90" && '//git// &
         'add -A && '//git//'commit -q -m "Add an untidy module" && git push -q yard HEAD:bad')
     call land_branch(repo, scratch, 'demo', 'bad', '21@t', '', '', commit, log, ok, check=.false.)
-    call check(.not. ok .and. index(log, 'Changed Fortran files need formatting') == 1 .and. &
-        index(log, 'bad one.f90') > 0 .and. index(log, 'not in the cache') == 0, &
-        'an unformatted file is refused by name: '//log)
-    call run(in//'printf "src/bad*\n" > .fortyard/format-exclude && '//git//'add -A && '//git// &
-        'commit -q -m "Exclude it" && git push -q yard HEAD:bad')
-    call land_branch(repo, scratch, 'demo', 'bad', '21@t', '', '', commit, log, ok, check=.false.)
-    call check(ok, 'a pattern in format-exclude lets it land: '//log)
+    call check(ok, 'an unformatted file lands: '//log)
+    call run(bare//'show "main:src/bad one.f90"')
+    call check(out == 'module  n'//new_line('a')//'    implicit none'//new_line('a')// &
+        'end module n'//new_line('a'), 'it lands as fo fmt formats it: '//out)
+    call run(bare//'log -1 --format=%B main')
+    call check(index(out, 'Formatted by fortyard (fo fmt):'//new_line('a')//'- src/bad one.f90') > 0 &
+        .and. index(out, 'Formatted by fortyard') < index(out, 'Landing: '), &
+        'the message names it above the trailers: '//out)
+    call run(in//'git fetch -q yard main && git checkout -q -B odd FETCH_HEAD && '// &
+        'printf "src/odd*\n" > .fortyard/format-exclude && '// &
+        'printf "module  o\nimplicit none\n  end module o\n" > src/odd.f90 && '//git// &
+        'add -A && '//git//'commit -q -m "Add an excluded module" && git push -q yard HEAD:odd')
+    call land_branch(repo, scratch, 'demo', 'odd', '22@t', '', '', commit, log, ok, check=.false.)
+    call check(ok, 'a file matched by format-exclude lands: '//log)
+    call run(bare//'show main:src/odd.f90')
+    call check(out == 'module  o'//new_line('a')//'implicit none'//new_line('a')// &
+        '  end module o'//new_line('a'), 'unformatted: '//out)
     call run('find '//scratch//' 2>/dev/null')
     call check(len(out) == 0, 'the files written for the checks are removed: '//out)
 

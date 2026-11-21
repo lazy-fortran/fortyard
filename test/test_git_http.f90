@@ -235,8 +235,8 @@ program test_git_http
     reply = get('/api/v1/jobs/5')
     call check(index(reply, 'merge onto an older main') > 0, 'a merge onto an older main is refused')
 
-    ! Changed Fortran files need formatting, except those .fortyard/format-exclude
-    ! matches.
+    ! Changed Fortran files are formatted on landing, except those
+    ! .fortyard/format-exclude matches.
     call execute_command_line(git//'-C '//work//'-clone fetch -q origin main && '//git//'-C '// &
         work//'-clone checkout -q -B style origin/main && touch '//work//'-clone/CMakeLists.txt'// &
         ' && mkdir -p '//work//'-clone/ext && printf "program p\nx=1\nend program\n" > '//work// &
@@ -244,14 +244,21 @@ program test_git_http
         '-clone commit -q -m "Foreign style" && '//git//'-C '//work//'-clone push -q '//url// &
         ' HEAD:style', exitstat=stat)
     reply = post('/api/v1/repos/demo/land', '{"branch":"style"}')
-    call wait_landing(6, 'failed')
-    reply = get('/api/v1/jobs/6')
-    call check(index(reply, 'need formatting') > 0, 'an unformatted Fortran file is refused')
-    call execute_command_line('printf "ext/*\n" > '//work//'-clone/.fortyard/format-exclude && '// &
+    call wait_landing(6, 'landed')
+    call execute_command_line(git//'-C '//work//'-clone fetch -q origin main && '//git// &
+        '-C '//work//'-clone show origin/main:ext/p.f90 | grep -qx "x=1"', exitstat=stat)
+    call check(stat /= 0, 'an unformatted Fortran file lands formatted')
+    call execute_command_line(git//'-C '//work//'-clone checkout -q -B foreign origin/main && '// &
+        'printf "ext/*\n" > '//work//'-clone/.fortyard/format-exclude && '// &
+        'printf "program q\nx=1\nend program\n" > '//work//'-clone/ext/q.f90 && '// &
         git//'-C '//work//'-clone add -A && '//git//'-C '//work//'-clone commit -q -m '// &
-        '"Exclude ext" && '//git//'-C '//work//'-clone push -q '//url//' HEAD:style', exitstat=stat)
-    reply = post('/api/v1/repos/demo/land', '{"branch":"style"}')
+        '"Exclude ext" && '//git//'-C '//work//'-clone push -q '//url//' HEAD:foreign', &
+        exitstat=stat)
+    reply = post('/api/v1/repos/demo/land', '{"branch":"foreign"}')
     call wait_landing(7, 'landed')
+    call execute_command_line(git//'-C '//work//'-clone fetch -q origin main && '//git// &
+        '-C '//work//'-clone show origin/main:ext/q.f90 | grep -qx "x=1"', exitstat=stat)
+    call check(stat == 0, 'a file format-exclude matches lands as it is')
 
     call proc_kill(sup, SIGTERM)
     call proc_wait(sup, stat)
