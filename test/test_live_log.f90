@@ -86,6 +86,8 @@ program test_live_log
     call getcwd(cwd)
     call proc_setenv('GIT_CONFIG_GLOBAL', '/dev/null')
     call proc_setenv('GIT_CONFIG_NOSYSTEM', '1')
+    ! runners ask for work every 100 ms instead of 5 s
+    call proc_setenv('FY_RUNNER_POLL_MS', '100')
     call execute_command_line('rm -rf '//data//' '//work//' '//remote//' && mkdir -p '//data// &
         '/tmp '//remote, exitstat=stat)
     ! The runner's work trees are its own, not those of other tests.

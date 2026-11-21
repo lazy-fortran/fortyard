@@ -120,7 +120,7 @@ program test_runner_split
 
     ! Controller and executor, each with its container's environment.
     call proc_start([character(len=4096) :: 'sh', '-c', 'exec env -i '//env//' HOME='//home// &
-        ' FY_RUNNER='//home//' TMPDIR='//home//'/tmp '//fy//' runner --server http://'//base// &
+        ' FY_RUNNER_POLL_MS=100 FY_RUNNER='//home//' TMPDIR='//home//'/tmp '//fy//' runner --server http://'//base// &
         ' --token-file '//home//'/token --data '//home//'/data --executor '//shared], &
         top//'/controller.log', ctl)
     call proc_start([character(len=4096) :: 'sh', '-c', 'exec env -i '//env//' HOME='//shared// &
@@ -145,7 +145,7 @@ program test_runner_split
 
     ! The same check inside the runner: the token is within its reach.
     call proc_start([character(len=4096) :: 'sh', '-c', 'exec env -i '//env//' HOME='//home// &
-        ' FY_RUNNER='//home//' TMPDIR='//home//'/tmp '//fy//' runner --server http://'//base// &
+        ' FY_RUNNER_POLL_MS=100 FY_RUNNER='//home//' TMPDIR='//home//'/tmp '//fy//' runner --server http://'//base// &
         ' --token-file '//home//'/token --data '//home//'/data'], top//'/runner.log', ctl)
     call execute_command_line(git//'-C '//work//' fetch -q '//url//' main && '//git//'-C '// &
         work//' checkout -q -B second FETCH_HEAD && printf "two\n" >> '//work//'/README && '// &
@@ -163,7 +163,7 @@ program test_runner_split
     ! its live log; the runner takes it again and it lands. Without the stop
     ! the first run would hold the runner for ten minutes.
     call proc_start([character(len=4096) :: 'sh', '-c', 'exec env -i '//env//' HOME='//home// &
-        ' FY_RUNNER='//home//' TMPDIR='//home//'/tmp '//fy//' runner --server http://'//base// &
+        ' FY_RUNNER_POLL_MS=100 FY_RUNNER='//home//' TMPDIR='//home//'/tmp '//fy//' runner --server http://'//base// &
         ' --token-file '//home//'/token --data '//home//'/data --executor '//shared], &
         top//'/controller.log', ctl)
     call proc_start([character(len=4096) :: 'sh', '-c', 'exec env -i '//env//' HOME='//shared// &

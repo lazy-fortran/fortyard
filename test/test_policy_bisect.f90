@@ -34,6 +34,8 @@ program test_policy_bisect
     integer :: lfd, port, stat, sup, run, i, k
     logical :: exists
 
+    ! runners ask for work every 100 ms instead of 5 s
+    call proc_setenv('FY_RUNNER_POLL_MS', '100')
     sup = 0
     run = 0
     call proc_setenv('GIT_CONFIG_GLOBAL', '/dev/null')

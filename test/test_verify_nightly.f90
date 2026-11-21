@@ -55,6 +55,8 @@ program test_verify_nightly
     character(len=4096) :: cwd
     integer :: lfd, port, stat, sup, run, mac, i, k
 
+    ! runners ask for work every 100 ms instead of 5 s
+    call proc_setenv('FY_RUNNER_POLL_MS', '100')
     sup = 0
     run = 0
     mac = 0

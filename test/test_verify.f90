@@ -40,6 +40,8 @@ program test_verify
     integer :: lfd, port, stat, sup, run, mac, smtp, i, k
     logical :: exists
 
+    ! runners ask for work every 100 ms instead of 5 s
+    call proc_setenv('FY_RUNNER_POLL_MS', '100')
     sup = 0
     run = 0
     mac = 0

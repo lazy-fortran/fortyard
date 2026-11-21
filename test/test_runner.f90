@@ -36,6 +36,8 @@ program test_runner
     integer :: lfd, port, stat, sup, run, run2, i
     logical :: exists
 
+    ! runners ask for work every 100 ms instead of 5 s
+    call proc_setenv('FY_RUNNER_POLL_MS', '100')
     sup = 0
     run = 0
     ! The runners' git must not use the machine's configuration, such as a

@@ -182,9 +182,22 @@ contains
                 call egress_put('')
                 cycle
             end if
-            call proc_sleep_ms(5000)
+            call proc_sleep_ms(poll_ms())
         end do
     end subroutine remote_main
+
+    integer function poll_ms() result(ms)
+        !! Pause between asks for work while idle: 5 s, or FY_RUNNER_POLL_MS
+        !! (tests, which would otherwise wait out a pause per runner start).
+        character(len=16) :: v
+        integer :: n, stat
+        ms = 5000
+        call get_environment_variable('FY_RUNNER_POLL_MS', v, n, stat)
+        if (stat == 0 .and. n > 0) then
+            read (v(1:n), *, iostat=stat) ms
+            if (stat /= 0 .or. ms < 10) ms = 5000
+        end if
+    end function poll_ms
 
     subroutine release_checks(server, token, ok)
         !! A starting runner hands back the checks it held when it stopped
