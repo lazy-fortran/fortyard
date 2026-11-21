@@ -239,10 +239,10 @@ contains
             '                      put the fixed pipeline on the project''s protected', &
             '                        branch config and make it the project''s CI/CD file', &
         ! landing and pushing
-            '  land [BRANCH] [--repo NAME] [--no-push] [--no-wait]', &
-            '                      push branch BRANCH (HEAD when there is none), land it', &
-            '                      on main after its check', &
-            '                      passed and follow it to the end (admin)', &
+            '  land [BRANCH] [--repo NAME] [--no-push] [--wait]', &
+            '                      push branch BRANCH (HEAD when there is none) and queue', &
+            '                      its landing on main after its check; --wait follows', &
+            '                      it to the end (admin)', &
             '  land [BRANCH] --urgent', &
             '                      land before every landing not yet in a candidate,', &
             '                      in a candidate of its own (admin)', &
@@ -267,7 +267,7 @@ contains
             '                      the diff of a version, or between versions W and V', &
             '  change comment N [-m TEXT]   comment (TEXT or standard input)', &
             '  change edit N [--title T] [--description-file F|-]', &
-            '  change land N [--no-wait]    land the change and follow it', &
+            '  change land N [--wait]       land the change; --wait follows it', &
             '  change close N, change reopen N', &
             '  change review N     ask the review agent for a review of the change', &
             '  change reviewed N   a person reviewed it; clears its flag (admin)', &
@@ -284,7 +284,7 @@ contains
             '  jobs [REPO] [--kind landing|test|verify] [--state STATE]', &
             '                      running, waiting and recent jobs (landings and', &
             '                      verifications of main), each with its change', &
-            '  verify [REPO] [--no-wait]', &
+            '  verify [REPO] [--wait]', &
             '                      verify main''s newest commit with the full suite', &
             '  job ID [--wait|--follow]', &
             '                      a job''s state, change, checks and log; --wait', &
@@ -813,10 +813,12 @@ contains
     end subroutine cmd_ingest
 
     subroutine cmd_land()
-        !! fy land [BRANCH] [--repo NAME] [--no-push] [--no-wait]: pushes the
+        !! fy land [BRANCH] [--repo NAME] [--no-push] [--wait]: pushes the
         !! checkout's branch BRANCH, or HEAD when there is no branch of that name,
-        !! to BRANCH (default: the current branch), queues its
-        !! landing and follows it to the end; the exit status tells the outcome.
+        !! to BRANCH (default: the current branch) and queues its landing. Work
+        !! goes on meanwhile (land first, check later); --wait follows the
+        !! landing to the end and the exit status tells the outcome. --no-wait,
+        !! the former opt-out, is still accepted.
         !! The repository is the one of a remote on the server, unless --repo
         !! names it. The form fy land REPO BRANCH lands a branch already pushed.
         !! --urgent (admin) lands before the others; --cancel ID cancels landing ID
@@ -852,8 +854,7 @@ contains
         id = cli_field(body, 'landing')
         write (output_unit, '(a)') 'landing '//id//' of '//repo//' '//branch//' queued'
         flush (output_unit)
-        if (flag('--no-wait')) return
-        call follow_job(cfg, id)
+        if (flag('--wait')) call follow_job(cfg, id)
     end subroutine cmd_land
 
     subroutine cancel_landing(cfg)
@@ -1224,8 +1225,8 @@ contains
     end function scratch_file
 
     subroutine cmd_verify()
-        !! fy verify [REPO] [--no-wait]: verifies main's newest commit with the
-        !! repository's full suite and follows it.
+        !! fy verify [REPO] [--wait]: verifies main's newest commit with the
+        !! repository's full suite; --wait follows it.
         type(config_t) :: cfg
         character(len=:), allocatable :: body, repo, id
         integer :: code, stat
@@ -1240,7 +1241,7 @@ contains
         id = cli_field(body, 'job')
         write (output_unit, '(a)') 'verification '//id//' of '//repo//' main queued'
         flush (output_unit)
-        if (.not. flag('--no-wait')) call follow_job(cfg, id)
+        if (flag('--wait')) call follow_job(cfg, id)
     end subroutine cmd_verify
 
     subroutine cmd_alerts()
@@ -1621,7 +1622,7 @@ contains
             write (output_unit, '(a)') 'landing '//cli_field(body, 'landing')//' of #'//n// &
                 ' queued'
             flush (output_unit)
-            if (.not. flag('--no-wait')) call follow_job(cfg, cli_field(body, 'landing'))
+            if (flag('--wait')) call follow_job(cfg, cli_field(body, 'landing'))
         case default
             write (error_unit, '(a)') 'fy: usage: fy change list|view|diff|comment|edit|'// &
                 'land|close|reopen|review|reviewed'

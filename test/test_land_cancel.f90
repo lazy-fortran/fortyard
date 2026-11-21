@@ -73,7 +73,7 @@ program test_land_cancel
         'commit -q -m Start && '//git//'remote add yard '//server//'/demo.git && '//git// &
         'checkout -q -b start', exitstat=stat)
     call pass()
-    call run(in//fy//' land')
+    call run(in//fy//' land --wait')
     call check(stat == 0, 'a first landing: '//out)
     line = next_run()
     call run(in//'git -c credential.helper= -c "credential.helper=!'//fy// &

@@ -103,7 +103,7 @@ program test_job
         ' && '//git//'add -A && '//git//'commit -q -m Start && '//git// &
         'remote add yard '//server//'/demo.git && '//git//'checkout -q -b start', &
         exitstat=stat)
-    call run(in//fy//' land')
+    call run(in//fy//' land --wait')
     call check(stat == 0, 'a first landing: '//out)
 
     ! Change #2: its first version fails the check (job 2), its second lands
@@ -112,11 +112,11 @@ program test_job
         ' git-credential" fetch -q yard main && git checkout -q -b feature FETCH_HEAD && '// &
         'printf "two\n" >> README && touch BROKEN && '//git//'add -A && '//git// &
         'commit -q -m "Add a line" -m "Change-Id: I0123abcd" && '//fy//' push && '//fy// &
-        ' change land 2')
+        ' change land 2 --wait')
     call check(stat /= 0 .and. index(out, 'change #2') > 0 .and. index(out, 'failed') > 0, &
         'the first entry of change #2 fails its check: '//out)
     call run(in//'git rm -q -f BROKEN && '//git//'commit -q --amend --no-edit && '//fy// &
-        ' push && '//fy//' change land 2')
+        ' push && '//fy//' change land 2 --wait')
     call check(stat == 0 .and. index(out, 'landed as') > 0, 'its second entry lands: '//out)
 
     ! The API: both jobs name the change, and are two entries of it.

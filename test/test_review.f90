@@ -88,14 +88,14 @@ program test_review
         ' && '//git//'add -A && '//git//'commit -q -m Start && '//git// &
         'remote add yard '//server//'/demo.git && '//git//'checkout -q -b start', &
         exitstat=stat)
-    call run(in//fy//' land')
+    call run(in//fy//' land --wait')
     call check(stat == 0, 'a first landing: '//out)
 
     ! A landed change is reviewed, and the model's flag puts it on the list.
     call run(in//'git -c credential.helper= -c "credential.helper=!'//fy// &
         ' git-credential" fetch -q yard main && git checkout -q -b feature FETCH_HEAD && '// &
         'printf "two\n" >> README && '//git//'commit -q -am "Add a line" && '//fy// &
-        ' push && '//fy//' change land 2')
+        ' push && '//fy//' change land 2 --wait')
     call check(stat == 0 .and. index(out, 'landed as') > 0, 'a change lands: '//out)
     call wait_for('review: ai-reviewed')
     call check(index(out, 'review: ai-reviewed, flagged for a person: numerics changed') > 0 .and. &

@@ -65,7 +65,7 @@ program test_queue
         ' && '//git//'add -A && '//git//'commit -q -m Start && '//git// &
         'remote add yard '//server//'/demo.git && '//git//'checkout -q -b start', &
         exitstat=stat)
-    call run(in//fy//' land')
+    call run(in//fy//' land --wait')
     call check(stat == 0, 'a first landing: '//out)
     call run(in//'git -c credential.helper= -c "credential.helper=!'//fy// &
         ' git-credential" fetch -q yard main')

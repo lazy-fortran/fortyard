@@ -76,7 +76,7 @@ program test_cli
         git//'-C '//work//' remote add yard '//server//'/demo.git && '//git//'-C '//work// &
         ' checkout -q -b first', exitstat=stat)
     call check(stat == 0, 'a checkout with a remote on the server')
-    call run('cd '//work//' && '//env//fy//' land')
+    call run('cd '//work//' && '//env//fy//' land --wait')
     call check(stat == 0 .and. index(out, 'landing 1 of demo first queued') > 0 .and. &
         index(out, 'landed as ') > 0, 'fy land pushes the branch and follows it: '//out)
 
@@ -86,7 +86,7 @@ program test_cli
     call check(stat == 0, 'git fetches through fy''s credential helper: '//out)
     call execute_command_line(git//'-C '//work//' rm -q README && '//git//'-C '// &
         work//' commit -q -m Broken', exitstat=stat)
-    call run('cd '//work//' && '//env//fy//' land broken')
+    call run('cd '//work//' && '//env//fy//' land broken --wait')
     call check(stat /= 0 .and. index(out, 'landing 2 failed') > 0 .and. &
         index(out, 'check ran') > 0, 'a failed landing exits 1 with the check''s output: '//out)
 

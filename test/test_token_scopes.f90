@@ -80,7 +80,7 @@ program test_token_scopes
         ' && '//git//'add -A && '//git//'commit -q -m Start && '//git// &
         'remote add yard '//server//'/demo.git && '//git//'checkout -q -b start', &
         exitstat=stat)
-    call run(in//fy//' land')
+    call run(in//fy//' land --wait')
     call check(stat == 0, 'an administrator still pushes and lands: '//out)
     call api(admin, 'GET', '/api/v1/jobs/1', '')
     call check(index(out, '"session":"bootstrap"') > 0, 'the job names the token: '//out)
@@ -153,9 +153,9 @@ program test_token_scopes
         index(out, '"session":"agent-l"}]}') > 0, &
         'the change names who pushed its version and who landed it: '//out)
 
-    ! write and land: fy land pushes, queues and follows with one token.
+    ! write and land: fy land --wait pushes, queues and follows with one token.
     call run(in//fetch_main//'git checkout -q -b wl1 FETCH_HEAD && printf "b\n" > B && '//git//'add B && '// &
-        git//'commit -q -m "By both" && FY_TOKEN='//both//' '//fy//' land')
+        git//'commit -q -m "By both" && FY_TOKEN='//both//' '//fy//' land --wait')
     call check(stat == 0, 'a token with write and land pushes and lands: '//out)
     call api(both, 'GET', '/api/v1/repos/demo/changes/4', '')
     call check(index(out, '"state":"landed"') > 0 .and. count_of(out, '"session":"agent-wl"') == 3, &

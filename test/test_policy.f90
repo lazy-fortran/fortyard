@@ -83,7 +83,7 @@ program test_policy
         ' && '//git//'add -A && '//git//'commit -q -m Start && '//git// &
         'remote add yard '//server//'/demo.git && '//git//'checkout -q -b start', &
         exitstat=stat)
-    call run(in//fy//' land')
+    call run(in//fy//' land --wait')
     call check(stat == 0, 'a first landing: '//out)
 
     ! The command shows and sets the policy; setting it needs the admin scope.
@@ -166,7 +166,7 @@ program test_policy
         lines(count) == 5, 'a candidate of two is not checked: '//out//read_all(count))
     call fetch()
     call run(in//'git checkout -q -b fix FETCH_HEAD && git rm -q BAD && '//git// &
-        'commit -q -m "Remove BAD" && '//fy//' land')
+        'commit -q -m "Remove BAD" && '//fy//' land --wait')
     call check(stat == 0, 'main is repaired: '//out)
     call run(in//fy//' repo policy demo tests=full batch=8')
     call fetch()
@@ -178,23 +178,23 @@ program test_policy
     call run(in//fy//' repo policy demo review=before')
     call fetch()
     n = pushed('r1', 'R1')
-    call run(in//fy//' change land '//n)
+    call run(in//fy//' change land '//n//' --wait')
     call check(stat /= 0 .and. index(out, 'review=before') > 0 .and. &
         index(out, 'change #'//n//' is not reviewed yet') > 0, &
         'an unreviewed change is not queued: '//out)
     call run(in//'git checkout -q -b wip/x FETCH_HEAD && printf "x\n" > W && '//git// &
-        'add W && '//git//'commit -q -m "Add W" && '//fy//' land')
+        'add W && '//git//'commit -q -m "Add W" && '//fy//' land --wait')
     call check(stat /= 0 .and. index(out, 'has no change to review') > 0, &
         'a branch without a change is not queued: '//out)
-    call run(in//fy//' change reviewed '//n//' && '//fy//' change land '//n)
+    call run(in//fy//' change reviewed '//n//' && '//fy//' change land '//n//' --wait')
     call check(stat == 0 .and. index(out, 'landed as') > 0, 'a reviewed change lands: '//out)
     call fetch()
     n = pushed('r2', 'R2')
     call run(in//fy//' change reviewed '//n//' && '//git//'commit -q --amend -m "Add R2 again"'// &
-        ' && '//fy//' push && '//fy//' change land '//n)
+        ' && '//fy//' push && '//fy//' change land '//n//' --wait')
     call check(stat /= 0 .and. index(out, 'is not reviewed yet') > 0, &
         'a new version needs its own review: '//out)
-    call run(in//fy//' change reviewed '//n//' && '//fy//' change land '//n)
+    call run(in//fy//' change reviewed '//n//' && '//fy//' change land '//n//' --wait')
     call check(stat == 0 .and. index(out, 'landed as') > 0, 'and lands once reviewed: '//out)
     ! The review is of one version: a branch put back to an earlier version,
     ! which nobody reviewed, does not land.
@@ -203,7 +203,7 @@ program test_policy
     call run(in//'first=$(git rev-parse HEAD) && git rm -q R3 && printf "x\n" > R4 && '//git// &
         'add R4 && '//git//'commit -q --amend -m "Add R4" && '//fy//' push && '//fy// &
         ' change reviewed '//n//' && git reset -q --hard $first && '//fy//' push && '//fy// &
-        ' change land '//n)
+        ' change land '//n//' --wait')
     call check(stat /= 0 .and. index(out, 'is not the reviewed version') > 0, &
         'an earlier version does not land on the review of a later one: '//out)
     ! A version pushed while the reviewed one waits in the queue does not
@@ -249,7 +249,7 @@ program test_policy
     call run(in//fy//' repo policy demo review=after unreviewed_limit=1')
     call fetch()
     n = pushed('u1', 'U1')
-    call run(in//fy//' change land '//n)
+    call run(in//fy//' change land '//n//' --wait')
     call check(stat /= 0 .and. index(out, 'unreviewed_limit=1') > 0, &
         'landing is refused at the limit: '//out)
     read (n, *) last
@@ -257,15 +257,15 @@ program test_policy
         write (num, '(i0)') i
         call run(in//fy//' change reviewed '//trim(num))
     end do
-    call run(in//fy//' change land '//n)
+    call run(in//fy//' change land '//n//' --wait')
     call check(stat == 0 .and. index(out, 'landed as') > 0, &
         'a change lands when the others are reviewed: '//out)
     call fetch()
     n = pushed('u2', 'U2')
-    call run(in//fy//' change land '//n)
+    call run(in//fy//' change land '//n//' --wait')
     call check(stat /= 0 .and. index(out, '1 change(s) of demo') > 0, &
         'the landed change counts until it is reviewed: '//out)
-    call run(in//fy//' repo policy demo unreviewed_limit=0 && '//fy//' change land '//n)
+    call run(in//fy//' repo policy demo unreviewed_limit=0 && '//fy//' change land '//n//' --wait')
     call check(stat == 0 .and. index(out, 'landed as') > 0, 'no limit, no refusal: '//out)
 
     call proc_kill(sup, SIGTERM)
@@ -449,7 +449,7 @@ contains
         cmd = 'git checkout -q -b '//name//' FETCH_HEAD && printf "x\n" > '//file//' && '// &
             git//'add '//file//' && '//git//'commit -q -m "Add '//file// &
             merge(' slow', '     ', name(1:1) == 's')//'" && '//fy//' land'
-        if (.not. present(wait)) cmd = cmd//' --no-wait'
+        if (present(wait)) cmd = cmd//' --wait'
     end function branch
 
     function pushed(name, file) result(number)

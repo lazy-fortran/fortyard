@@ -66,10 +66,10 @@ program test_audit
         ' && '//git//'add -A && '//git//'commit -q -m Start && '//git// &
         'remote add yard '//server//'/demo.git && '//git//'checkout -q -b start', &
         exitstat=stat)
-    call run(in//fy//' land')
+    call run(in//fy//' land --wait')
     call check(stat == 0, 'a landing that passes: '//out)
     call run(in//'git checkout -q -b broken start && git rm -q README && '//git// &
-        'commit -q -m Broken && '//fy//' land')
+        'commit -q -m Broken && '//fy//' land --wait')
     call check(stat /= 0 .and. index(out, 'failed') > 0, 'a landing that fails: '//out)
 
     call run(in//'git checkout -q -b other start && printf "x\n" > X && '//git//'add X && '// &

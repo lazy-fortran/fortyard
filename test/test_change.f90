@@ -63,7 +63,7 @@ program test_change
         ' && '//git//'add -A && '//git//'commit -q -m Start && '//git// &
         'remote add yard '//server//'/demo.git && '//git//'checkout -q -b start', &
         exitstat=stat)
-    call run(in//fy//' land')
+    call run(in//fy//' land --wait')
     call check(stat == 0, 'a first landing: '//out)
 
     ! A branch already there, as a mirror brings them, is not what the push asks to review.
@@ -111,7 +111,7 @@ program test_change
     call run(in//fy//' change reopen 3 && '//fy//' change list')
     call check(index(out, 'Other') > 0, 'a reopened change is listed again: '//out)
 
-    call run(in//fy//' change land 2')
+    call run(in//fy//' change land 2 --wait')
     call check(stat == 0 .and. index(out, 'landed as') > 0, 'fy change land: '//out)
     call run('git --git-dir='//data//'/repos/demo.git log -1 --format=%B main')
     call check(index(out, 'Add lines (#2)') == 1 .and. index(out, 'Why it is needed.') > 0 .and. &
@@ -156,7 +156,7 @@ program test_change
         ' git-credential" fetch -q yard main && git checkout -q -b broken FETCH_HEAD && '// &
         'git rm -q README && '//git//'commit -q -m "Remove the README" && '//fy//' push')
     call check(stat == 0 .and. index(out, 'change #8') > 0, 'a change that fails its check: '//out)
-    call run(in//fy//' change land 8')
+    call run(in//fy//' change land 8 --wait')
     call check(stat /= 0, 'its landing fails: '//out)
     call run(in//fy//' change list --attention needs-author')
     call check(index(out, '8       needs author') > 0 .and. index(out, 'Later') == 0, &
