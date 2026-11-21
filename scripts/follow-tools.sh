@@ -9,6 +9,9 @@
 # FY_TOOLS       the tools to follow (default "fo fy"); fortyard is private on
 #                GitHub, so hosts without access follow fo only
 set -eu
+# fo before lazy-fortran/fo#436 writes its 10 s progress line into the output it
+# parses (the archive member list), which fails a build on a slow host.
+export FO_HEARTBEAT_SECONDS=0
 home=${FY_TOOLS_HOME:-$HOME/.cache/fy-tools}
 mkdir -p "$home"
 # A network home (AFS, NFS) takes no flock and builds slowly: the lock and
