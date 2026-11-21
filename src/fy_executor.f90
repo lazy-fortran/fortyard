@@ -410,6 +410,9 @@ contains
             call proc_run([character(len=1024) :: 'sh', '-c', &
                 '{ [ -d "$2/.git" ] || { rm -rf "$2" && mkdir -p "$(dirname "$2")" && '// &
                 'git clone --quiet --shared "$1" "$2"; }; } && cd "$2" && '// &
+            ! origin/main as main is now (the work tree is kept), so that a check
+            ! can diff the candidate against it; a repository without main skips it
+                '{ git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main || :; } && '// &
                 'git fetch --quiet origin "$3" && git checkout --quiet --force FETCH_HEAD && '// &
                 'git clean -ffdxq -e /build/ 2>&1', 'checkout', src, w, r], out, stat, 65536)
             if (stat /= 0) then

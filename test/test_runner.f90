@@ -75,7 +75,7 @@ program test_runner
 
     url = 'http://x:'//admin//'@'//base//'/demo.git'
     call execute_command_line('git init -q -b main '//work//' && mkdir '//work//'/.fortyard'// &
-        ' && printf "hello\n" > '//work//'/README && printf "#!/bin/sh\necho runner says hi\n'// &
+        ' && printf "hello\n" > '//work//'/README && printf "#!/bin/sh\necho runner says hi\necho origin main \$(git rev-parse -q --verify origin/main)\n'// &
         'mkdir -p build && echo x >> build/count && echo checks seen \$(wc -l < build/count)\n'// &
         'test -f README\n" > '//work//'/.fortyard/check && chmod +x '//work//'/.fortyard/check'// &
         ' && '//git//'-C '//work//' add -A && '//git//'-C '//work//' commit -q -m "First" && '// &
@@ -101,6 +101,12 @@ program test_runner
     call check(index(reply, 'rerun from an empty build directory') > 0 .and. &
         index(reply, 'checks seen 1') > 0, 'a failure is confirmed from an empty build directory')
     call check(index(reply, 'runner disk:') > 0, 'the check log reports the runner''s disk use')
+    ! the kept work tree's origin/main is main as it is now, not as it was
+    ! when the work tree was cloned, so a check can diff against it
+    call execute_command_line('git --git-dir='//data//'/repos/demo.git rev-parse main > '// &
+        data//'/main.sha', exitstat=stat)
+    call check(index(reply, 'origin main '//read_line(data//'/main.sha')) > 0, &
+        'the check sees the current main as origin/main: '//reply)
 
     call proc_kill(run, SIGTERM)
     call proc_wait(run, stat)
@@ -177,6 +183,20 @@ program test_runner
     print '(a)', 'runner: all checks passed'
 
 contains
+
+    function read_line(path) result(line)
+        character(*), intent(in) :: path
+        character(len=:), allocatable :: line
+        character(len=256) :: buf
+        integer :: u, ios
+        buf = ''
+        open (newunit=u, file=path, action='read', iostat=ios)
+        if (ios == 0) then
+            read (u, '(a)', iostat=ios) buf
+            close (u)
+        end if
+        line = trim(buf)
+    end function read_line
 
     function newest_check() result(text)
         !! State and log of the newest check.
