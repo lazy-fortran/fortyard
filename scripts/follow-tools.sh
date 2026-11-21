@@ -28,6 +28,21 @@ else
 fi
 : > "$home/checked"
 
+# Clones and build trees stay on local disk: on a network home (AFS, NFS)
+# src links to a directory in /var/tmp, recreated when that was cleared.
+if [ "$(uname -s)" = Linux ]; then
+    case $(stat -f -c %T "$home" 2>/dev/null) in
+    afs | nfs* | cifs | smb* | fuse*)
+        local_src=/var/tmp/$(id -un)-fy-tools-src
+        mkdir -p "$local_src"
+        if [ "$(readlink "$home/src" 2>/dev/null)" != "$local_src" ]; then
+            rm -rf "$home/src"
+            ln -s "$local_src" "$home/src"
+        fi
+        ;;
+    esac
+fi
+
 bin=${FY_TOOLS_BIN:-}
 if [ -z "$bin" ]; then
     current=$(command -v fo 2>/dev/null || true)
