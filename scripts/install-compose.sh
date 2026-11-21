@@ -55,9 +55,13 @@ SSH
 # ssh refuses a configuration others may write, also through an inherited ACL.
 setfacl -b "$home/bin/ssh_config" 2>/dev/null || true
 chmod 644 "$home/bin/ssh_config"
+# fo and fy at main for the lander (install-tools-follower.sh with
+# FY_TOOLS_IMAGE fills it).
+tools=${FY_TOOLS_BIN_DIR:-$(dirname "${home%/}")/fortyard-tools/bin}
+mkdir -p "$tools"
 sed -e "s|@IMAGE@|$image|" -e "s|@BASE@|$base|g" -e "s|@UID@|$(id -u):$(id -g)|g" \
     -e "s|@PUBLIC_URL@|$public|" -e "s|@RELAY@|$relay|g" -e "s|@EGRESS_IMAGE@|$egress|" \
-    -e "s|@RELAY_IMAGE@|alpine/socat:1.8.0.3|" -e "s|@LEARN@|$learn|" \
+    -e "s|@RELAY_IMAGE@|alpine/socat:1.8.0.3|" -e "s|@LEARN@|$learn|" -e "s|@TOOLS@|$tools|g" \
     -e "$net" \
     "$root/deploy/compose/compose.yaml" > "$home/compose.yaml"
 run() { docker run --rm --network none --user "$(id -u):$(id -g)" -v "$home:/fy" "$image" "$@"; }

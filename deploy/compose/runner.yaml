@@ -105,11 +105,15 @@ services:
       - "@HOME@/data/mirrors:@HOME@/data/mirrors:ro"
       - "@HOME@/releases:@HOME@/releases:ro"
       - "@CACHE@:@CACHE@"
-    # Runs fy executor of the release named in the controller's hand-over.
+      # fo and fy at main, kept there by the host's follow-tools.sh.
+      - "@TOOLS@:/opt/fy-tools/bin:ro"
+    # Runs fy executor of the release named in the controller's hand-over,
+    # with the followed fo ahead of the image's.
     entrypoint:
       - /bin/sh
       - -c
       - |
+        export PATH="/opt/fy-tools/bin:$$PATH"
         w=$$1 r=$$2
         while :; do
           c=$$(sed -n 's/^commit=//p' "$$w/exchange/job" "$$w/exchange/taken" 2>/dev/null | head -n 1)

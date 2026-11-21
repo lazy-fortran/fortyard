@@ -64,6 +64,9 @@ services:
       # account for the user it runs as.
       - ./bin/ssh_config:/etc/ssh/ssh_config.d/fortyard.conf:ro
       - ./bin/passwd:/etc/passwd:ro
+      # fo and fy at main, kept there by the host's follow-tools.sh; the
+      # lander formats with this fo.
+      - "@TOOLS@:/opt/fy-tools/bin:ro"
     entrypoint: ["/fy/bin/start.sh"]
     mem_limit: 2g
     cpus: 2

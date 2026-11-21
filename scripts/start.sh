@@ -6,6 +6,8 @@
 # installed, and Docker restarts it on that release.
 set -eu
 : "${FY_HOME:?}"
+# fo and fy at main from the host's follow-tools.sh, where mounted.
+[ -d /opt/fy-tools/bin ] && export PATH="/opt/fy-tools/bin:$PATH"
 if [ "${1:-}" = runner ]; then
     exec "$FY_HOME/current/fy" runner --server "${FY_RUNNER_SERVER:-http://127.0.0.1:8740}" \
         --token-file "$FY_HOME/runner-token" --data "$FY_HOME/data" --follow "$FY_HOME/current" \

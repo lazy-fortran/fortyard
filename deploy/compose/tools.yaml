@@ -1,0 +1,34 @@
+# fo and fy at main for the fortyard containers of this host
+# (scripts/install-tools-container.sh fills in the @...@ values). It builds in
+# the toolchain image, so the binaries match the containers that mount
+# @HOME@/bin at /opt/fy-tools/bin (server and runner executors), and checks
+# main every five minutes with scripts/follow-tools.sh.
+services:
+  fortyard-tools:
+    image: "@IMAGE@"
+    container_name: fortyard-tools
+    restart: unless-stopped
+    init: true
+    user: "@UID@:@GID@"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:size=2g,exec"]
+    environment:
+      HOME: /tmp
+      TMPDIR: /tmp
+      FY_TOOLS_HOME: "@HOME@"
+      FY_TOOLS_BIN: "@HOME@/bin"
+      FO_NO_FOLLOW: "1"
+    volumes:
+      - "@HOME@:@HOME@"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        while :; do
+          sh "$$FY_TOOLS_HOME/src/fortyard/scripts/follow-tools.sh" || true
+          sleep 300
+        done
+    mem_limit: 8g
+    cpus: 4
+    pids_limit: 1024
