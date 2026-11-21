@@ -11,15 +11,21 @@
 set -eu
 home=${FY_TOOLS_HOME:-$HOME/.cache/fy-tools}
 mkdir -p "$home"
-# mkdir is atomic everywhere (macOS has no flock); a lock older than an hour
-# is left by a killed run.
-lock=$home/lock
-if ! mkdir "$lock" 2>/dev/null; then
-    [ -n "$(find "$lock" -maxdepth 0 -mmin +60 2>/dev/null)" ] || exit 0
-    rm -rf "$lock"
-    mkdir "$lock" 2>/dev/null || exit 0
+# flock frees the lock with its holder, however that ends. Without it
+# (macOS) mkdir is the atomic step, and a lock older than an hour is left by
+# a killed run.
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"$home/lock.flock"
+    flock -n 9 || exit 0
+else
+    lock=$home/lock
+    if ! mkdir "$lock" 2>/dev/null; then
+        [ -n "$(find "$lock" -maxdepth 0 -mmin +60 2>/dev/null)" ] || exit 0
+        rm -rf "$lock"
+        mkdir "$lock" 2>/dev/null || exit 0
+    fi
+    trap 'rm -rf "$lock"' EXIT INT TERM
 fi
-trap 'rm -rf "$lock"' EXIT INT TERM
 : > "$home/checked"
 
 bin=${FY_TOOLS_BIN:-}
