@@ -85,6 +85,26 @@ follow() { # repository, tool
     command -v fo >/dev/null 2>&1 || builder="fpm build"
     status=0
     (cd "$src" && $builder) >> "$log" 2>&1 || status=$?
+    # A library installed without its development link (libX.so.N but no
+    # libX.so, as without root on faepop35): link it privately, build again.
+    if [ "$status" -ne 0 ] && [ "$status" -le 128 ]; then
+        missing=$(tail -n 50 "$log" | sed -n 's/.*cannot find -l\([A-Za-z0-9_+.-]*\).*/\1/p' | sort -u)
+        linked=
+        for lib in $missing; do
+            for so in /usr/lib/x86_64-linux-gnu/lib$lib.so.* /usr/lib64/lib$lib.so.* /usr/lib/lib$lib.so.*; do
+                [ -e "$so" ] || continue
+                mkdir -p "$home/lib"
+                ln -sf "$so" "$home/lib/lib$lib.so"
+                linked=yes
+                break
+            done
+        done
+        if [ -n "$linked" ]; then
+            status=0
+            (cd "$src" && LIBRARY_PATH="$home/lib${LIBRARY_PATH:+:$LIBRARY_PATH}" $builder) \
+                >> "$log" 2>&1 || status=$?
+        fi
+    fi
     # A build stopped by a signal is not a failure of the commit.
     [ "$status" -gt 128 ] && return 1
     if [ "$status" -ne 0 ]; then
@@ -112,4 +132,10 @@ for tool in ${FY_TOOLS:-fo fy}; do
     fy) follow fortyard fy || result=1 ;;
     esac
 done
+# Timers and fo/fy run this stable copy; refresh it from the clone.
+if [ -f "$home/src/fortyard/scripts/follow-tools.sh" ] &&
+    ! cmp -s "$home/src/fortyard/scripts/follow-tools.sh" "$home/follow-tools.sh"; then
+    cp "$home/src/fortyard/scripts/follow-tools.sh" "$home/follow-tools.new.$$" &&
+        mv -f "$home/follow-tools.new.$$" "$home/follow-tools.sh"
+fi
 exit $result

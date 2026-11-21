@@ -24,8 +24,12 @@ contains
             if (status /= 0 .or. len_trim(home) == 0) return
             state = trim(home)//'/.cache/fy-tools'
         end if
-        script = state//'/src/fortyard/scripts/follow-tools.sh'
+        script = state//'/follow-tools.sh'
         inquire (file=script, exist=found)
+        if (.not. found) then
+            script = state//'/src/fortyard/scripts/follow-tools.sh'
+            inquire (file=script, exist=found)
+        end if
         if (.not. found) return
         call execute_command_line('[ -n "$(find "'//state//'/checked" -mmin -5 2>/dev/null)" ] '// &
             '|| { if command -v setsid >/dev/null 2>&1; then setsid sh "'//script// &

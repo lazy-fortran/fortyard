@@ -7,7 +7,10 @@ home=${FY_TOOLS_HOME:-$HOME/.cache/fy-tools}
 src=$home/src/fortyard
 mkdir -p "$home/src"
 [ -d "$src/.git" ] || git clone -q https://github.com/lazy-fortran/fortyard.git "$src"
-script=$src/scripts/follow-tools.sh
+# Timers run a copy outside the clone, which follow-tools.sh refreshes, so
+# a cleared or moved clone cannot leave them without a script.
+cp "$src/scripts/follow-tools.sh" "$home/follow-tools.sh"
+script=$home/follow-tools.sh
 case "$(uname -s)" in
 Darwin)
     plist=$HOME/Library/LaunchAgents/org.lazy-fortran.follow-tools.plist

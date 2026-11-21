@@ -25,6 +25,13 @@ program test_follow_tools
     call invoke('FO_NO_FOLLOW=1 ')
     call execute_command_line('sleep 1.5')
     call check(.not. exists(state//'/ran'), 'FO_NO_FOLLOW=1 starts nothing')
+    ! The stable copy beside the state is preferred to the clone's.
+    call execute_command_line('rm -f '//state//'/checked '//state//'/ran && '// &
+        'printf '': > "%s/ran-stable"; : > "%s/checked"\n'' "$PWD/'//state// &
+        '" "$PWD/'//state//'" > '//state//'/follow-tools.sh')
+    call invoke('')
+    call check(appears(state//'/ran-stable'), 'the stable copy runs')
+    call check(.not. exists(state//'/ran'), 'the clone''s copy does not')
     call execute_command_line('rm -rf '//state)
     print '(a)', 'follow_tools: all checks passed'
 
