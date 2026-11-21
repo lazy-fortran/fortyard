@@ -6,6 +6,8 @@
 #
 # FY_TOOLS_HOME  state and source clones (default ~/.cache/fy-tools)
 # FY_TOOLS_BIN   install directory (default: where fo is now, else ~/.local/bin)
+# FY_TOOLS       the tools to follow (default "fo fy"); fortyard is private on
+#                GitHub, so hosts without access follow fo only
 set -eu
 home=${FY_TOOLS_HOME:-$HOME/.cache/fy-tools}
 mkdir -p "$home"
@@ -62,6 +64,10 @@ follow() { # repository, tool
     echo "$(date) $tool $head: installed in $bin" >> "$log"
 }
 status=0
-follow fo fo || status=1
-follow fortyard fy || status=1
+for tool in ${FY_TOOLS:-fo fy}; do
+    case $tool in
+    fo) follow fo fo || status=1 ;;
+    fy) follow fortyard fy || status=1 ;;
+    esac
+done
 exit $status

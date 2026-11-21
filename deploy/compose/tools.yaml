@@ -1,8 +1,9 @@
-# fo and fy at main for the fortyard containers of this host
+# fo at main for the fortyard containers of this host
 # (scripts/install-tools-container.sh fills in the @...@ values). It builds in
-# the toolchain image, so the binaries match the containers that mount
+# the toolchain image, so the binary matches the containers that mount
 # @HOME@/bin at /opt/fy-tools/bin (server and runner executors), and checks
-# main every five minutes with scripts/follow-tools.sh.
+# main every five minutes with a copy of scripts/follow-tools.sh. fy comes
+# from the fortyard releases.
 services:
   fortyard-tools:
     image: "@IMAGE@"
@@ -19,6 +20,7 @@ services:
       FY_TOOLS_HOME: "@HOME@"
       FY_TOOLS_BIN: "@HOME@/bin"
       FO_NO_FOLLOW: "1"
+      FY_TOOLS: fo
     volumes:
       - "@HOME@:@HOME@"
     entrypoint:
@@ -26,7 +28,7 @@ services:
       - -c
       - |
         while :; do
-          sh "$$FY_TOOLS_HOME/src/fortyard/scripts/follow-tools.sh" || true
+          sh "$$FY_TOOLS_HOME/follow-tools.sh" || true
           sleep 300
         done
     mem_limit: 8g
