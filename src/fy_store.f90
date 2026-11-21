@@ -91,6 +91,7 @@ module fy_store
         store_repo_fetched, &
         store_repo_list, &
         store_repo_set_mode, &
+        store_repo_set_upstream, &
         store_repo_set_number, &
         store_repo_set_public, &
         store_schema_version, &
@@ -837,6 +838,23 @@ contains
         found = stmt_step(st) == SQLITE_ROW
         call stmt_finalize(st)
     end subroutine store_repo_set_mode
+
+    subroutine store_repo_set_upstream(db, name, upstream, found)
+        !! The URL that landings push main to (primary) or fetches follow (mirror).
+        type(db_t), intent(in) :: db
+        character(len=*), intent(in) :: name, upstream
+        logical, intent(out) :: found
+        type(stmt_t) :: st
+        integer :: stat
+
+        found = .false.
+        call db_prepare(db, 'UPDATE repos SET upstream = ?2 WHERE name = ?1 RETURNING id;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_text(st, 1, name, stat)
+        call stmt_bind_text(st, 2, upstream, stat)
+        found = stmt_step(st) == SQLITE_ROW
+        call stmt_finalize(st)
+    end subroutine store_repo_set_upstream
 
     subroutine store_repo_set_public(db, name, public, found, refused)
         !! Marks repository `name` public or private. A repository whose

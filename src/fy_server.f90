@@ -160,7 +160,8 @@ module fy_server
         repo_ref_ok, &
         repo_refs_json, &
         repo_tree_json, &
-        repo_unpublish
+        repo_unpublish, &
+        repo_use_key
     use fy_review, only: &
         review_enabled, &
         reviewer_main
@@ -218,6 +219,7 @@ module fy_server
         store_repo_fetched, &
         store_repo_list, &
         store_repo_set_mode, &
+        store_repo_set_upstream, &
         store_repo_set_number, &
         store_repo_set_public, &
         store_snapshot, &
@@ -1188,6 +1190,12 @@ contains
                 call set_mode(rest(1:len(rest) - 5))
                 return
             end if
+            if (len(rest) > 9) then
+                if (rest(len(rest) - 8:) == '/upstream') then
+                    call set_upstream(rest(1:len(rest) - 9))
+                    return
+                end if
+            end if
             if (len(rest) > 8) then
                 if (rest(len(rest) - 7:) == '/numbers') then
                     call set_number(rest(1:len(rest) - 8))
@@ -1768,6 +1776,36 @@ contains
             if (mode == 'primary') call land_hook_install(repo_path(target), status)
             res%body = '{"name":"'//json_escape_string(target)//'","mode":"'//mode//'"}'
         end subroutine set_mode
+
+        subroutine set_upstream(target)
+            !! POST /api/v1/repos/NAME/upstream {"upstream":"URL"}: where landings
+            !! push main, or fetches follow; later git calls use the
+            !! repository's deploy key when the instance holds one.
+            character(len=*), intent(in) :: target
+            character(len=:), allocatable :: url
+            logical :: ok
+
+            if (index(' '//who%scopes//' ', ' admin ') == 0) then
+                call fail(res, 403, 'changing an upstream needs the admin scope')
+                return
+            end if
+            call json_extract_string(req%body, 'upstream', url, ok)
+            if (.not. ok) url = ''
+            if (.not. upstream_ok(url)) then
+                call fail(res, 400, 'body must be {"upstream":"..."} with an https or ssh URL')
+                return
+            end if
+            call store_repo_set_upstream(db, target, url, ok)
+            if (.not. ok) then
+                call fail(res, 404, 'no such repository')
+                return
+            end if
+            inquire (file=repo_path(target)//'/HEAD', exist=ok)
+            if (ok) call repo_use_key(repo_path(target), keys_dir(), status)
+            call audit_append(db, who%account, 'repo.upstream', target, url)
+            res%body = '{"name":"'//json_escape_string(target)//'","upstream":"'// &
+                json_escape_string(url)//'"}'
+        end subroutine set_upstream
 
         subroutine set_number(target)
             !! POST /api/v1/repos/NAME/numbers {"next":"N"}: the next change or

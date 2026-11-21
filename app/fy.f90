@@ -185,6 +185,7 @@ contains
             '  repo add NAME URL   mirror a repository (https or ssh URL; admin only)', &
             '  repo create NAME    create an empty repository that takes pushes (admin)', &
             '  repo mode NAME MODE primary: take pushes; mirror: follow upstream (admin)', &
+            '  repo upstream NAME URL  where landings push main or fetches follow (admin)', &
             '  repo numbers NAME N number the next change or issue N and count on (admin)', &
             '  repo public NAME on|off', &
             '                      the repository is public, which backends= needs (admin)', &
@@ -1924,6 +1925,15 @@ contains
             call require_login(cfg)
             call client_request(cfg%server, 'POST', '/api/v1/repos/'//arg(3)//'/mode', &
                 cfg%token, '{"mode":"'//json_escape_string(arg(4))//'"}', code, body, stat)
+            call report(code, body, stat)
+        case ('upstream')
+            if (len(arg(3)) == 0 .or. len(arg(4)) == 0) then
+                write (error_unit, '(a)') 'fy: usage: fy repo upstream NAME URL'
+                call quit(2)
+            end if
+            call require_login(cfg)
+            call client_request(cfg%server, 'POST', '/api/v1/repos/'//arg(3)//'/upstream', &
+                cfg%token, '{"upstream":"'//json_escape_string(arg(4))//'"}', code, body, stat)
             call report(code, body, stat)
         case ('numbers')
             if (len(arg(3)) == 0 .or. len(arg(4)) == 0) then

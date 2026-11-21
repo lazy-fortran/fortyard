@@ -24,7 +24,8 @@ module fy_repo
         repo_ref_ok, &
         repo_refs_json, &
         repo_tree_json, &
-        repo_unpublish
+        repo_unpublish, &
+        repo_use_key
 
     integer, parameter, public :: BLOB_MAX = 1048576
     integer, parameter, public :: DIFF_MAX = 524288
@@ -273,23 +274,10 @@ contains
         character(len=*), intent(in) :: upstream, repo
         integer, intent(out) :: status
         character(len=*), intent(in), optional :: keys
-        character(len=:), allocatable :: out, name, ssh
-        logical :: exists
-        integer :: slash
+        character(len=:), allocatable :: out, ssh
 
         ssh = ''
-        exists = .false.
-        if (present(keys)) exists = len(keys) > 0
-        if (exists) then
-            slash = index(repo, '/', back=.true.)
-            name = repo(slash + 1:)
-            if (len(name) > 4) then
-                if (name(len(name) - 3:) == '.git') name = name(:len(name) - 4)
-            end if
-            inquire (file=keys//'/'//name, exist=exists)
-            if (exists) ssh = 'ssh -i '//keys//'/'//name//' -o IdentitiesOnly=yes '// &
-                '-o BatchMode=yes -o UserKnownHostsFile='//keys//'/known_hosts'
-        end if
+        if (present(keys)) ssh = key_command(repo, keys)
         if (len(ssh) == 0) then
             call proc_run([character(len=1024) :: 'env', 'GIT_TERMINAL_PROMPT=0', 'timeout', &
                 '600', 'git', 'clone', '--quiet', '--mirror', upstream, repo], out, status, 65536)
@@ -302,6 +290,39 @@ contains
         call proc_run([character(len=1024) :: 'git', '--git-dir', repo, 'config', &
             'core.sshCommand', ssh], out, status, 65536)
     end subroutine repo_clone
+
+    subroutine repo_use_key(repo, keys, status)
+        !! Later fetches and pushes of the existing repository `repo` use its
+        !! deploy key from `keys`, when that directory holds one.
+        character(len=*), intent(in) :: repo, keys
+        integer, intent(out) :: status
+        character(len=:), allocatable :: out, ssh
+
+        status = 0
+        ssh = key_command(repo, keys)
+        if (len(ssh) == 0) return
+        call proc_run([character(len=1024) :: 'git', '--git-dir', repo, 'config', &
+            'core.sshCommand', ssh], out, status, 65536)
+    end subroutine repo_use_key
+
+    function key_command(repo, keys) result(ssh)
+        !! The SSH command with the key named like `repo` in `keys`, or ''.
+        character(len=*), intent(in) :: repo, keys
+        character(len=:), allocatable :: ssh, name
+        logical :: exists
+        integer :: slash
+
+        ssh = ''
+        if (len(keys) == 0) return
+        slash = index(repo, '/', back=.true.)
+        name = repo(slash + 1:)
+        if (len(name) > 4) then
+            if (name(len(name) - 3:) == '.git') name = name(:len(name) - 4)
+        end if
+        inquire (file=keys//'/'//name, exist=exists)
+        if (exists) ssh = 'ssh -i '//keys//'/'//name//' -o IdentitiesOnly=yes '// &
+            '-o BatchMode=yes -o UserKnownHostsFile='//keys//'/known_hosts'
+    end function key_command
 
     subroutine repo_init(repo, status)
         !! An empty bare repository at `repo` that accepts pushes to its branches.

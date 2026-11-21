@@ -90,6 +90,15 @@ program test_mirror
     call check(index(reply, '"name":"fx","mode":"mirror"') > 0, 'its mode is unchanged: '//reply)
     reply = post('/api/v1/repos/demo/mode', '{"mode":"primary"}')
     call check(index(reply, 'HTTP/1.1 200') == 1, 'a cloned mirror becomes primary')
+    reply = post('/api/v1/repos/demo/upstream', '{"upstream":"https://example.invalid/demo.git"}')
+    call check(index(reply, 'HTTP/1.1 200') == 1, 'administrator sets an upstream: '//reply)
+    reply = get('/api/v1/repos')
+    call check(index(reply, '"name":"demo","mode":"primary","upstream":"https://example.invalid/demo.git"') > 0, &
+        'the new upstream is listed: '//reply)
+    reply = post('/api/v1/repos/demo/upstream', '{"upstream":"--upload-pack=x"}')
+    call check(index(reply, 'HTTP/1.1 400') == 1, 'an upstream must be an https or ssh URL')
+    reply = post('/api/v1/repos/nothere/upstream', '{"upstream":"https://example.invalid/x.git"}')
+    call check(index(reply, 'HTTP/1.1 404') == 1, 'unknown repository has no upstream')
 
     call proc_kill(sup, SIGTERM)
     call proc_wait(sup, stat)
