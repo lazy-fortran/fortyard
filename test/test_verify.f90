@@ -7,7 +7,7 @@ program test_verify
     !! passes again. Landing checks are never held up by verifications. Each
     !! report and each closing is mailed once, through an SMTP sink here.
     use, intrinsic :: iso_fortran_env, only: int64
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         sock_recv, &

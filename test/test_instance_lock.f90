@@ -1,7 +1,7 @@
 program test_instance_lock
     use fy_instance_lock, only: instance_lock, instance_unlock, instance_pending
     use fy_proc, only: proc_exit, proc_fork, proc_wait, proc_reexec, fd_close, proc_run
-    use fy_posix, only: tcp_listen, sock_close
+    use fortweb_posix, only: tcp_listen, sock_close
     implicit none
     character(len=*), parameter :: data = 'build/test_instance_lock_data'
     character(len=:), allocatable :: out, fy

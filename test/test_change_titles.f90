@@ -5,7 +5,7 @@ program test_change_titles
     !! title and list of its own, which its landing carries. Main merged into
     !! a branch leaves its title and description alone. A title edited by a
     !! person survives a new version, which still recomputes the description.
-    use fy_posix, only: tcp_listen, sock_bound_port, sock_close
+    use fortweb_posix, only: tcp_listen, sock_bound_port, sock_close
     use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, SIGTERM
     use fy_server, only: server_supervise, server_set_data_dir
     use fy_sqlite, only: db_t, db_close

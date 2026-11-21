@@ -53,7 +53,7 @@ program test_check_timeout
     use fy_land, only: land_check, land_set_live
     use test_check_timeout_live, only: first_told, live_log, live_path, live_sink, told
     use fy_policy, only: policy_get, policy_put, policy_t
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         sock_recv, &

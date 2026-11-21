@@ -5,7 +5,7 @@ program test_check_timeout_slow
     !! ended the first. Slow, since the limit is counted in minutes.
     use, intrinsic :: iso_fortran_env, only: int64
     use fy_policy, only: policy_get, policy_put, policy_t
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         sock_recv, &

@@ -2,11 +2,11 @@ module fy_git_http
     !! Git's smart HTTP protocol (clone, fetch, push) through `git http-backend`
     !! as a CGI program. Request and response bodies are passed through in
     !! blocks, so a large clone or push needs no more memory than a small one.
-    use fy_http, only: &
+    use fortweb_http, only: &
         http_chunk_size, &
         http_request_t, &
         http_status_text
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_recv, &
         sock_send_all
     use fy_proc, only: &

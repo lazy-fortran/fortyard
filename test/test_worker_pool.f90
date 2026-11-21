@@ -2,7 +2,7 @@ program test_worker_pool
     !! The server in a forked supervisor with 2 worker processes of 2 threads:
     !! idle connections must not block other clients, and killed workers must
     !! be replaced without the service going away.
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         sock_recv, &

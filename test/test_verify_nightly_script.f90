@@ -3,7 +3,7 @@ program test_verify_nightly_script
     !! .fortyard/verify nor fpm.toml but a .fortyard/nightly script (a CMake
     !! project) gets its nightly verification: the nightly run takes that
     !! script first.
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         sock_recv, &

@@ -12,7 +12,7 @@ program test_race
     !! class never races, estimates 25 % apart are not raced, and a check
     !! whose twin runs is not taken by another backend.
     use, intrinsic :: iso_fortran_env, only: int64
-    use fy_posix, only: tcp_listen, sock_bound_port, sock_close
+    use fortweb_posix, only: tcp_listen, sock_bound_port, sock_close
     use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, proc_setenv, SIGTERM
     use fy_server, only: server_supervise, server_set_data_dir, server_set_checks
     use fy_sqlite, only: db_t, db_close, db_exec, db_prepare, stmt_finalize, stmt_int, stmt_step, &

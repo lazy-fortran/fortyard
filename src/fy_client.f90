@@ -3,7 +3,7 @@ module fy_client
     !! an IPv4 address is spoken directly; a name (a container on an internal
     !! network) and an https:// server are reached through curl (as the
     !! sign-in does), so runners on other hosts can use the public address.
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_close, &
         sock_recv, &
         sock_send_all, &

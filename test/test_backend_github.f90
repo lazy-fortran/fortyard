@@ -19,8 +19,8 @@ program test_backend_github
     use, intrinsic :: iso_fortran_env, only: int64
     use fy_backend_github, only: github_configure, github_main, github_setup, github_token_file, &
         github_workflow
-    use fy_http, only: http_request_t, http_read_request, http_send_response, http_query_param
-    use fy_posix, only: &
+    use fortweb_http, only: http_request_t, http_read_request, http_send_response, http_query_param
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         sock_set_timeouts, &

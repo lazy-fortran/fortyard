@@ -2,7 +2,7 @@ program test_release
     !! A release is opened, its archive uploaded with its checksum, listed and
     !! downloaded intact; a wrong checksum or a missing scope is refused.
     use, intrinsic :: iso_fortran_env, only: int64
-    use fy_posix, only: tcp_listen, sock_close, sock_bound_port
+    use fortweb_posix, only: tcp_listen, sock_close, sock_bound_port
     use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, SIGTERM
     use fy_server, only: server_supervise, server_set_data_dir
     use fy_sqlite, only: db_t, db_close

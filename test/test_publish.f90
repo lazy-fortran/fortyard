@@ -7,7 +7,7 @@ program test_publish
     !! by the server's sweep. GET of the route names the upstream as
     !! OWNER/NAME with the check's state; a mirror's check is not published.
     use, intrinsic :: iso_fortran_env, only: int64
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         sock_recv, &

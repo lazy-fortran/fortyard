@@ -1,7 +1,7 @@
 program test_mirror
     !! A server with a data directory mirrors a repository on its own and
     !! answers the repository API from the mirror.
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         sock_recv, &

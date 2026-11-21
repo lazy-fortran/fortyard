@@ -26,7 +26,7 @@ program test_live_log
         live_length, &
         live_read, &
         live_set_dir
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         tcp_listen

@@ -6,8 +6,8 @@ program test_backend_follow
     !! and returns, so that remote-runner.sh starts the new release.
     use fy_backend, only: backend_main, backend_report
     use fy_build_info, only: FY_COMMIT
-    use fy_http, only: http_request_t, http_read_request, http_send_response
-    use fy_posix, only: sock_bound_port, sock_close, sock_set_timeouts, tcp_accept, tcp_listen
+    use fortweb_http, only: http_request_t, http_read_request, http_send_response
+    use fortweb_posix, only: sock_bound_port, sock_close, sock_set_timeouts, tcp_accept, tcp_listen
     use fy_proc, only: SIGTERM, proc_exit, proc_fork, proc_kill, proc_sleep_ms, proc_try_wait, &
         proc_wait
     implicit none

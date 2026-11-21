@@ -5,7 +5,7 @@ module fy_events
     !! that through inotify and for its client in one poll(2), so a waiting
     !! stream costs no work at all until something happens.
     use, intrinsic :: iso_c_binding
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_send_all
     implicit none
     private

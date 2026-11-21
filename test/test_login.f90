@@ -3,7 +3,7 @@ program test_login
     !! endpoint is a file:// URL, so curl returns a prepared answer offline.
     use, intrinsic :: iso_c_binding, only: c_long
     use, intrinsic :: iso_fortran_env, only: int8
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         sock_recv, &

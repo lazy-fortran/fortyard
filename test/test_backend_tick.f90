@@ -4,7 +4,7 @@ program test_backend_tick
     !! queued check of the backend's class is still taken.
     use, intrinsic :: iso_fortran_env, only: int64
     use fy_backend, only: backend_main
-    use fy_posix, only: sock_bound_port, sock_close, tcp_listen
+    use fortweb_posix, only: sock_bound_port, sock_close, tcp_listen
     use fy_proc, only: SIGTERM, proc_exit, proc_fork, proc_kill, proc_sleep_ms, proc_wait
     use fy_server, only: server_supervise, server_set_data_dir, server_set_checks
     use fy_sqlite, only: db_t, db_close, db_exec

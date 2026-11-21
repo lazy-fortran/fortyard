@@ -16,3 +16,6 @@ flags = ["-fcheck=bounds"]
 implicit-typing = false
 implicit-external = false
 source-form = "free"
+
+[dependencies]
+fortweb = { git = "https://github.com/lazy-fortran/fortweb.git", rev = "e3a0db9ce3e2b55fb90f623ea7ecfa91474fb93e" }

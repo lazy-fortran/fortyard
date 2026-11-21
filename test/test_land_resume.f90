@@ -7,7 +7,7 @@ program test_land_resume
     !! check that ran in the old process is run again. Here the test is the
     !! runner, and it stops the server and starts a new one on the same data.
     use, intrinsic :: iso_fortran_env, only: int64
-    use fy_posix, only: tcp_listen, sock_bound_port, sock_close
+    use fortweb_posix, only: tcp_listen, sock_bound_port, sock_close
     use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, proc_setenv, SIGTERM
     use fy_server, only: server_supervise, server_set_data_dir, server_set_checks
     use fy_sqlite, only: db_t, db_close, db_prepare, stmt_t, stmt_step, stmt_int, stmt_finalize, &

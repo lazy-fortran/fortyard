@@ -3,7 +3,7 @@ program test_backend_proxy
     !! own, so its requests to the server go to the proxy named in FY_PROXY,
     !! as a runner's do: a fake proxy sees them for a server whose name does
     !! not resolve.
-    use fy_posix, only: sock_bound_port, sock_close, sock_recv, sock_send_all, tcp_accept, &
+    use fortweb_posix, only: sock_bound_port, sock_close, sock_recv, sock_send_all, tcp_accept, &
         tcp_listen
     use fy_proc, only: SIGKILL, proc_exit, proc_fork, proc_kill, proc_sleep_ms, proc_wait
     implicit none

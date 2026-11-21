@@ -14,11 +14,11 @@ module fy_cache
         int64
     use fx_hash, only: &
         sha256_file
-    use fy_http, only: &
+    use fortweb_http, only: &
         http_bearer_token, &
         http_request_t, &
         http_send_response
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_recv
     use fy_sqlite, only: &
         db_t

@@ -3,7 +3,7 @@ program test_concurrent_requests
     !! send heads with many headers of different lengths and read their
     !! account back: every request is answered with the same intact text, and
     !! the worker never dies (#91: concurrent heads corrupted its heap).
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         sock_recv, &

@@ -3,7 +3,7 @@ program test_verify_unconfigured
     !! no verification a runner could run: a request already queued for it
     !! (as a history rewrite queues one) is cancelled with the reason instead
     !! of waiting for ever, and so is a new request.
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         sock_recv, &

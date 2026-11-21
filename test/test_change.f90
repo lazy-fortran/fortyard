@@ -8,7 +8,7 @@ program test_change
     !! of open changes, and a closed change can be reopened. Issues share the
     !! numbers. fy change list filters by state, review and attention, also
     !! over every repository.
-    use fy_posix, only: tcp_listen, sock_bound_port, sock_close
+    use fortweb_posix, only: tcp_listen, sock_bound_port, sock_close
     use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, SIGTERM
     use fy_server, only: server_supervise, server_set_data_dir
     use fy_sqlite, only: db_t, db_close, db_exec

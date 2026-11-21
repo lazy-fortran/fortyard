@@ -5,7 +5,7 @@ program test_runner_claim_lost
     !! check runs instead of waiting as running until it is taken as lost.
     !! Both the runner beside the server (a data directory with repos/) and
     !! the remote runner do so.
-    use fy_posix, only: sock_bound_port, sock_close, sock_recv, sock_send_all, &
+    use fortweb_posix, only: sock_bound_port, sock_close, sock_recv, sock_send_all, &
         sock_set_timeouts, tcp_accept, tcp_listen
     use fy_proc, only: SIGKILL, proc_kill, proc_start, proc_wait
     implicit none

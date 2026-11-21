@@ -1,7 +1,7 @@
 program test_server_roundtrip
     !! Real sockets in one thread: the client's request waits in the kernel
     !! until the server accepts and answers it.
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         sock_recv, &

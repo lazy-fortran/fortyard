@@ -1,5 +1,5 @@
 program test_rewrite_source
-    use fy_posix, only: sock_bound_port, sock_close, sock_recv, sock_send_all, &
+    use fortweb_posix, only: sock_bound_port, sock_close, sock_recv, sock_send_all, &
         tcp_accept, tcp_connect, tcp_listen
     use fy_proc, only: proc_run, proc_setenv
     use fy_rewrite_store, only: rewrite_store

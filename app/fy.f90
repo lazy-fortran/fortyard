@@ -54,7 +54,7 @@ program fy
         POLICY_KEYS, &
         policy_set, &
         policy_t
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         activated_listen_fd, &
         sock_bound_port, &
         tcp_listen

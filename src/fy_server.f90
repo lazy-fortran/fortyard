@@ -76,7 +76,7 @@ module fy_server
     use fy_git_http, only: &
         git_http_route, &
         git_http_serve
-    use fy_http, only: &
+    use fortweb_http, only: &
         http_basic_password, &
         http_bearer_token, &
         http_cookie, &
@@ -125,7 +125,7 @@ module fy_server
         policy_queue, &
         policy_refusal, &
         policy_t
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_close, &
         sock_recv, &
         sock_set_timeouts, &

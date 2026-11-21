@@ -7,7 +7,7 @@ program test_alerts
     use, intrinsic :: iso_fortran_env, only: int64
     use fy_alert, only: alert_delivery_json, alert_json, alert_list, alert_ready, alert_t
     use fy_cli, only: cli_table
-    use fy_http, only: http_parse_head, http_request_t
+    use fortweb_http, only: http_parse_head, http_request_t
     use fy_server, only: response_t, route, server_set_data_dir
     use fy_sqlite, only: db_t, db_close, db_exec, db_open
     use fy_store, only: store_open, store_bootstrap, store_repo_add, store_repo_fetched, &

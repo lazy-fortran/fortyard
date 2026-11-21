@@ -3,7 +3,7 @@ program test_review
     !! from its diff; the review becomes a comment of the account review-agent,
     !! and a change the model flags is listed for a person until one marks it
     !! reviewed. An answer without the closing FLAG line is never published.
-    use fy_posix, only: tcp_listen, sock_bound_port, sock_close
+    use fortweb_posix, only: tcp_listen, sock_bound_port, sock_close
     use fy_proc, only: &
         SIGTERM, &
         proc_exit, &

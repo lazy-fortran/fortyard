@@ -7,7 +7,7 @@ program test_runner
     !! an empty one before it is reported. While one repository's check runs,
     !! another repository lands, and a second landing of the first waits.
     use, intrinsic :: iso_fortran_env, only: int64
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         sock_recv, &

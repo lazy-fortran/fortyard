@@ -3,7 +3,7 @@ program test_policy_bisect
     !! main is reported once, without further runs and without blaming a
     !! change; with bisect=on, the commit that broke it is found.
     use, intrinsic :: iso_fortran_env, only: int64
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         sock_recv, &

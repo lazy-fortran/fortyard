@@ -1,5 +1,5 @@
 program test_http_parse
-    use fy_http, only: &
+    use fortweb_http, only: &
         HTTP_MAX_BODY, &
         http_bearer_token, &
         http_parse_head, &

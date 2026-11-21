@@ -1,7 +1,7 @@
 program test_ingest
     use, intrinsic :: iso_fortran_env, only: int64
     use fy_client, only: client_request
-    use fy_posix, only: tcp_listen, sock_bound_port, sock_close
+    use fortweb_posix, only: tcp_listen, sock_bound_port, sock_close
     use fy_proc, only: proc_fork, proc_exit, proc_kill, proc_wait, proc_sleep_ms, &
         proc_setenv, SIGTERM
     use fy_server, only: server_supervise, server_set_data_dir

@@ -4,7 +4,7 @@ program test_verify_cancel
     !! ends cancelled and its check is withdrawn, so no runner or backend
     !! takes it again. A token with only the land scope cannot cancel it.
     use, intrinsic :: iso_fortran_env, only: int64
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         sock_recv, &

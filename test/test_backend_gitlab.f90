@@ -26,12 +26,12 @@ program test_backend_gitlab
         gitlab_backend_main, &
         gitlab_backend_t, &
         gitlab_setup
-    use fy_http, only: &
+    use fortweb_http, only: &
         http_bearer_token, &
         http_read_request, &
         http_request_t, &
         http_send_response
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         sock_recv, &

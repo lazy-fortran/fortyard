@@ -9,7 +9,7 @@ program test_job
     !! every line of the log.
     use, intrinsic :: iso_fortran_env, only: &
         int64
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         tcp_listen

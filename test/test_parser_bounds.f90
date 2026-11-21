@@ -6,7 +6,7 @@ program test_parser_bounds
     !! string anywhere in this corpus stops the program.
     use fx_json_parse, only: json_extract_string
     use fy_change, only: change_sync
-    use fy_http, only: &
+    use fortweb_http, only: &
         HTTP_MAX_HEAD, &
         http_basic_password, &
         http_bearer_token, &
@@ -18,7 +18,7 @@ program test_parser_bounds
         http_query_param, &
         http_request_t
     use fy_git_http, only: git_http_route, git_http_copy_chunked
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         sock_recv, &

@@ -4,7 +4,7 @@ program test_verify_parallel
     !! repository's verification queues its own check instead of waiting for
     !! the first to end. No runner takes them here, so both checks stay queued.
     use, intrinsic :: iso_fortran_env, only: int64
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         sock_recv, &

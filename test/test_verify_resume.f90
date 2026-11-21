@@ -6,7 +6,7 @@ program test_verify_resume
     !! the verifications it follows, as the stopped verifier may have queued
     !! one without telling them.
     use, intrinsic :: iso_fortran_env, only: int64
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         sock_recv, &

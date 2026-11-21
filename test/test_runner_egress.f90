@@ -9,7 +9,7 @@ program test_runner_egress
     !! an executor, in which the check runs itself, leaves the file alone.
     !! The server is a fake that hands out one check, whose repository is
     !! missing, so its checkout fails at once.
-    use fy_posix, only: sock_bound_port, sock_close, sock_recv, sock_send_all, &
+    use fortweb_posix, only: sock_bound_port, sock_close, sock_recv, sock_send_all, &
         sock_set_timeouts, tcp_accept, tcp_listen
     use fy_proc, only: SIGKILL, proc_kill, proc_setenv, proc_sleep_ms, proc_start, proc_wait
     implicit none

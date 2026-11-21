@@ -9,7 +9,7 @@ program test_verify_nightly
     !! by FY_VERIFY_NOW, so the server is restarted with another time between
     !! the phases. A nightly check runs .fortyard/nightly, other checks do not.
     use, intrinsic :: iso_fortran_env, only: int64
-    use fy_posix, only: &
+    use fortweb_posix, only: &
         sock_bound_port, &
         sock_close, &
         sock_recv, &

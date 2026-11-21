@@ -6,7 +6,7 @@ program test_stats
     !! answered within the budget of doc/inspection.md.
     use, intrinsic :: iso_fortran_env, only: int64
     use fy_cli, only: cli_stats
-    use fy_http, only: http_parse_head, http_request_t
+    use fortweb_http, only: http_parse_head, http_request_t
     use fy_server, only: response_t, route
     use fy_sqlite, only: db_t, db_close, db_exec
     use fy_stats, only: stats_days_ok, stats_json

@@ -4,7 +4,7 @@ program test_runner_reach
     !! fortyard is resolved the same way), and with FY_PROXY set it sends an
     !! https:// server's requests to that proxy, so a runner on an internal
     !! network without DNS gets through.
-    use fy_posix, only: sock_bound_port, sock_close, sock_recv, sock_send_all, &
+    use fortweb_posix, only: sock_bound_port, sock_close, sock_recv, sock_send_all, &
         sock_set_timeouts, tcp_accept, tcp_listen
     use fy_proc, only: SIGKILL, proc_kill, proc_setenv, proc_start, proc_wait
     implicit none
