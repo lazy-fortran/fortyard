@@ -8,6 +8,7 @@ module fy_time
     private
 
     public :: &
+        active_check_time, &
         ago, &
         day_of, &
         duration, &
@@ -17,6 +18,20 @@ module fy_time
         when
 
 contains
+
+    function active_check_time(queued, started) result(s)
+        character(len=*), intent(in) :: queued, started
+        character(len=:), allocatable :: s
+        integer :: waited
+
+        if (started == '') then
+            s = 'waiting for a runner for '//duration(seconds_since(queued))
+        else
+            s = 'running for '//duration(seconds_since(started))
+            waited = seconds_between(queued, started)
+            if (waited > 0) s = s//' · queued for '//duration(waited)
+        end if
+    end function active_check_time
 
     function ago(stamp) result(s)
         !! How long ago an ISO 8601 time was ("5 minutes ago"); the date when

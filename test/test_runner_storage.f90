@@ -21,4 +21,11 @@ program test_runner_storage
         'test -f '//root//'/fy-work/recent/payload && test ! -e '//root//'/tmp/stale && '// &
         'test -f '//root//'/exchange/job', exitstat=stat)
     if (stat /= 0) error stop 'collection did not preserve recent work and pending jobs'
+
+    call execute_command_line('if test -r /proc/self/stat && command -v timeout >/dev/null; then '// &
+        'export FY_RUNNER_WORK="$PWD/'//root//'" FY_CHECK_WRAP=nested '// &
+        'FY_RUNNER_RETAIN_MIB=1 FY_RUNNER_ACTIVE_MIB=2 FY_RUNNER_RESERVE_MIB=0; '// &
+        'guard="$PWD/scripts/runner-storage.sh"; cd "$FY_RUNNER_WORK/fy-work/recent" && '// &
+        'timeout -k 1 5 sh "$guard" run sh -c ''test -z "${FY_CHECK_WRAP+x}"''; fi', exitstat=stat)
+    if (stat /= 0) error stop 'storage wrapper leaked into the check'
 end program test_runner_storage

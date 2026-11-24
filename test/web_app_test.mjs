@@ -758,13 +758,31 @@ try {
     if (log.live && log.text.includes('first line')) break;
     await sleep(50);
   }
+  // This server runs the check itself. Add a runner record for its jobs pages.
+  const clockDb = (sql) => execFileSync('sqlite3', [join(data, 'd', 'fortyard.db'), sql]);
+  const clockRef = `refs/fortyard/checks/${fourth}`;
+  clockDb(`INSERT INTO checks (repo, ref, state, created_at, queued_at)
+    VALUES ('work', '${clockRef}', 'queued', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-6 hours'),
+    strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-7 seconds'));`);
+  await load('/jobs/' + fourth);
+  check(await evaluate(hasText('waiting')) && await adopted() && await evaluate(hasText('waiting')),
+    'an active job waiting on a runner shows as waiting');
+  clockDb(`UPDATE checks SET state = 'running', runner = 'runner-test',
+    claimed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+    queued_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-7 seconds')
+    WHERE ref = '${clockRef}';`);
+  const hasAttemptClock = `[...document.querySelectorAll('.fui')].some((e) =>
+    /running for \\d+ s · queued for 7 s/.test(e.textContent))`;
   await load('/jobs/' + fourth);
   check(await waitFor(`${logText}.endsWith('    1  first line')`) && await jobState(fourth) === 'running' &&
     await evaluate(hasText('· live')) && await evaluate(`!!document.getElementById('L1')`),
     'the page of a running job shows the lines its check wrote so far, each with its address');
+  check(await evaluate(hasAttemptClock), 'the job page shows the current run and its own queue wait');
   await load('/jobs?repo=work');
   check(await waitFor(`[...document.querySelectorAll('[data-box="row-j${fourth}"] .fui')].some((e) => e.textContent === 'first line')`),
     'the jobs list shows the last line of a running job');
+  check(await evaluate(hasAttemptClock), 'the jobs list shows the current run and its own queue wait');
+  clockDb(`DELETE FROM checks WHERE ref = '${clockRef}';`);
   await load('/jobs/' + fourth);
   await until(`window.Module && typeof Module._fortui_web_step === 'function'`, 'WebAssembly running');
   await evaluate(`performance.setResourceTimingBufferSize(100000)`);

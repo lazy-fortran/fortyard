@@ -45,6 +45,7 @@ module fy_runner
 
     !! Appends are at most this long; the server takes bodies up to 1 MiB.
     integer, parameter :: LIVE_CHUNK = 524288
+    integer, parameter :: LIVE_PROBE_SECONDS = 10
     !! The check whose output is sent while it runs: server, token, number,
     !! the bytes the server has, the offset at which the output file of the
     !! current run starts, the length of that file, and the line between a
@@ -52,6 +53,7 @@ module fy_runner
     !! take appends (an older release, or the check is no longer ours).
     character(len=:), allocatable :: live_server, live_token, live_id, live_between
     integer(int64) :: live_sent = 0, live_base = 0, live_have = 0
+    integer(int64) :: live_contact = 0
     logical :: streaming = .false.
     !! The server no longer counts the check that runs as this runner's.
     logical :: withdrawn = .false.
@@ -402,6 +404,7 @@ contains
             live_between = ''
             streaming = .true.
             withdrawn = .false.
+            call system_clock(live_contact)
             call executor_run(exec_dir, id, repo, trim(src), ref, work, kind == 'verify' .or. &
                 kind == 'nightly', limit, runner_class, .false., out, code, timed_out, build, state, send_live, &
                 check_withdrawn, taken_hook=egress_open, nightly=kind == 'nightly')
@@ -444,15 +447,11 @@ contains
         end function outcome
 
         subroutine report_timeout()
-            !! An error, not a result: the server queues the check again, and
-            !! fails the landing with the reason timeout at the second one. The
-            !! output comes first, as in the live log.
+            !! The server decides whether to retry the timeout.
             call land_set_live()
             write (minutes, '(i0)') limit/60
             out = live_outcome(out, 'The time limit ('//trim(minutes)//' min) ended the check:'// &
-                ' the runner stopped it and every process it started. A time limit is no'// &
-                ' verdict on the change; a second one fails the landing or verification with'// &
-                ' the reason timeout.')
+                ' the runner stopped the check and its processes before it reported a result.')
             call client_request(server, 'POST', '/api/v1/checks/'//id//'/result', token, &
                 '{"error":"timeout","log":"'//json_escape_string(out)//'"}', code, body, stat)
         end subroutine report_timeout
@@ -524,6 +523,7 @@ contains
 
         if (.not. streaming) return
         write (num, '(i0)') live_sent
+        call system_clock(live_contact)
         call client_request(live_server, 'POST', '/api/v1/checks/'//live_id//'/log?offset='// &
             trim(num), live_token, bytes, code, body, stat)
         if (stat /= 0 .or. code >= 500) return
@@ -550,6 +550,13 @@ contains
     end subroutine post_live
 
     logical function check_withdrawn()
+        integer(int64) :: now, rate
+
+        ! A quiet check must receive a cancellation without another log line.
+        if (streaming) then
+            call system_clock(now, rate)
+            if (now - live_contact >= LIVE_PROBE_SECONDS * rate) call post_live('')
+        end if
         check_withdrawn = withdrawn
     end function check_withdrawn
 

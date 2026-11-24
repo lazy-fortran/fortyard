@@ -44,6 +44,7 @@ module fy_job_view
         stream_count_of, &
         stream_open
     use fy_time, only: &
+        active_check_time, &
         duration, &
         seconds_between, &
         seconds_since
@@ -71,7 +72,8 @@ module fy_job_view
     !! line that stands for lines left out).
     integer, allocatable :: line_from(:), line_to(:), line_no(:)
     character(len=:), allocatable :: job_number, job_kind, repo, branch, account, state, queued, &
-        started, finished, commit, change_title, next_state, log_text, stored_log
+        started, finished, commit, change_title, next_state, log_text, stored_log, &
+        check_queued, check_started
     integer :: change = 0, entry = 0, entries = 0, next = 0, error_line = 0
     integer :: stream = 0, seen = 0, logs_seen = 0
     !! The job whose event stream is open, and the job the pending log
@@ -215,13 +217,19 @@ contains
         else
             call text(repo//' · '//branch, size=BODY, id="subject")
         end if
-        call text(state, size=BODY, style=UI_HEADING, tone=state_tone(state, entry == entries), &
+        what = state
+        if (check_queued /= '' .and. check_started == '') what = 'waiting'
+        call text(what, size=BODY, style=UI_HEADING, tone=state_tone(state, entry == entries), &
             id="state")
         if (entries > 1) call text("entry "//ui_str(entry)//" of "//ui_str(entries), size=BODY, &
             id="entry")
         select case (state)
         case ('running')
-            what = 'running for '//duration(seconds_since(started))
+            if (check_queued /= '') then
+                what = active_check_time(check_queued, check_started)
+            else
+                what = 'running for '//duration(seconds_since(started))
+            end if
         case ('queued')
             what = 'waiting for '//duration(seconds_since(queued))
         case default
@@ -689,6 +697,8 @@ contains
         state = ''
         queued = ''
         started = ''
+        check_queued = ''
+        check_started = ''
         finished = ''
         commit = ''
         change_title = ''
@@ -732,6 +742,8 @@ contains
                     case ('state'); state = ev%string_val
                     case ('queued'); queued = ev%string_val
                     case ('started'); started = ev%string_val
+                    case ('check_queued'); check_queued = ev%string_val
+                    case ('check_started'); check_started = ev%string_val
                     case ('finished'); finished = ev%string_val
                     case ('commit'); commit = ev%string_val
                     case ('title'); change_title = ev%string_val

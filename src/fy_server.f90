@@ -2874,7 +2874,13 @@ contains
                 return
             end if
             before = max(0_int64, live_length(key))
-            call live_append(key, offset, req%body, length, stat)
+            stat = 0
+            length = before
+            if (len(req%body) > 0) then
+                call live_append(key, offset, req%body, length, stat)
+            else if (offset > length) then
+                stat = 1
+            end if
             write (num, '(i0)') length
             if (stat == 1) then
                 res%code = 409
@@ -3087,6 +3093,7 @@ contains
             type(landing_t), intent(in) :: j
             logical, intent(in) :: with_log
             character(len=:), allocatable :: s, runner, next_state, key
+            character(len=:), allocatable :: check_queued, check_started
             type(check_t), allocatable :: checks(:)
             integer(int64) :: next
             integer :: c
@@ -3105,6 +3112,24 @@ contains
             call store_job_checks(db, j, checks)
             runner = ''
             if (size(checks) > 0) runner = checks(size(checks))%runner
+            check_queued = ''
+            check_started = ''
+            if (j%state == 'running') then
+                do c = 1, size(checks)
+                    if (checks(c)%state /= 'queued') cycle
+                    if (check_queued == '' .or. checks(c)%queued < check_queued) &
+                        check_queued = checks(c)%queued
+                end do
+                do c = 1, size(checks)
+                    if (checks(c)%state /= 'running' .or. checks(c)%claimed == '') cycle
+                    if (check_started /= '' .and. checks(c)%claimed >= check_started) cycle
+                    check_queued = checks(c)%queued
+                    check_started = checks(c)%claimed
+                    runner = checks(c)%runner
+                end do
+                if (check_queued /= '' .and. check_started == '') runner = ''
+            end if
+            s = s//',"check_queued":"'//check_queued//'","check_started":"'//check_started//'"'
             s = s//',"runner":'//string(runner, len(runner) > 0)//',"checks":['
             do c = 1, size(checks)
                 if (c > 1) s = s//','
@@ -3112,7 +3137,7 @@ contains
                 s = s//'{"id":'//trim(num)//',"attempt":'//itoa(c)//',"kind":"'//j%kind// &
                     '","state":"'//checks(c)%state//'","runner":'// &
                     string(checks(c)%runner, len(checks(c)%runner) > 0)//',"queued":"'// &
-                    checks(c)%created//'","started":'// &
+                    checks(c)%queued//'","started":'// &
                     string(checks(c)%claimed, len(checks(c)%claimed) > 0)//',"finished":'// &
                     string(checks(c)%finished, len(checks(c)%finished) > 0)//',"wait":'// &
                     number(checks(c)%wait, 0)//',"run":'//number(checks(c)%run, 0)// &

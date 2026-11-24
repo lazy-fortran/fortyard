@@ -43,6 +43,7 @@ module fy_jobs_view
         stream_count_of, &
         stream_open
     use fy_time, only: &
+        active_check_time, &
         ago, &
         duration, &
         epoch, &
@@ -61,7 +62,7 @@ module fy_jobs_view
     type :: job_t
         integer :: id = 0
         character(len=:), allocatable :: repo, branch, account, state, queued, started, &
-            finished, commit, kind, title, runner, log_tail
+            finished, commit, kind, title, runner, log_tail, check_queued, check_started
         !! The number of its change, and which of the change's entries it is.
         integer :: change = 0, entry = 0, entries = 0
     end type job_t
@@ -297,12 +298,14 @@ contains
     subroutine job_row(k, narrow)
         integer, intent(in) :: k
         logical, intent(in) :: narrow
-        character(len=:), allocatable :: what, when_text, href
+        character(len=:), allocatable :: what, when_text, href, label
 
         associate (j => jobs(k))
             call column_begin(4.0, id="row-j"//ui_str(j%id))
             call row_begin(10.0, id="jobline")
-            call text(j%state, size=12.0, id="state", style=UI_HEADING, &
+            label = j%state
+            if (j%check_queued /= '' .and. j%check_started == '') label = 'waiting'
+            call text(label, size=12.0, id="state", style=UI_HEADING, &
                 tone=state_tone(j%state, j%entry == j%entries))
             href = route_href(R_JOB, '', ui_str(j%id))
             if (link("job", "job "//ui_str(j%id), href, key=j%id, size=BODY, style=UI_HEADING)) &
@@ -319,7 +322,11 @@ contains
             call row_end()
             select case (j%state)
             case ('running')
-                when_text = 'running for '//duration(seconds_since(j%started))
+                if (j%check_queued /= '') then
+                    when_text = active_check_time(j%check_queued, j%check_started)
+                else
+                    when_text = 'running for '//duration(seconds_since(j%started))
+                end if
             case ('queued')
                 when_text = 'waiting for '//duration(seconds_since(j%queued))
             case default
@@ -470,6 +477,8 @@ contains
                     case ('state'); j%state = ev%string_val
                     case ('queued'); j%queued = ev%string_val
                     case ('started'); j%started = ev%string_val
+                    case ('check_queued'); j%check_queued = ev%string_val
+                    case ('check_started'); j%check_started = ev%string_val
                     case ('finished'); j%finished = ev%string_val
                     case ('commit'); j%commit = ev%string_val
                     end select
@@ -512,6 +521,8 @@ contains
             j%state = ''
             j%queued = ''
             j%started = ''
+            j%check_queued = ''
+            j%check_started = ''
             j%finished = ''
             j%commit = ''
             j%kind = ''

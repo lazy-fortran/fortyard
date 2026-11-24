@@ -174,7 +174,7 @@ module fy_store
         !! are -1 while the check has not got that far.
         integer(int64) :: id = 0
         integer :: wait = -1, run = -1
-        character(len=:), allocatable :: state, runner, created, claimed, finished
+        character(len=:), allocatable :: state, runner, created, claimed, finished, queued
     end type check_t
 
     character(len=*), parameter :: NOW = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
@@ -1404,9 +1404,12 @@ contains
         ! A UNION, not an OR: with an OR SQLite reads every check of the repository.
         call db_prepare(db, "SELECT id, state, coalesce(runner, ''), created_at,"// &
             " coalesce(claimed_at, ''), coalesce(finished_at, ''),"// &
-            " coalesce(CAST(strftime('%s', claimed_at) - strftime('%s', created_at)"// &
-            " AS INTEGER), -1), coalesce(CAST(strftime('%s', finished_at) -"// &
-            " strftime('%s', claimed_at) AS INTEGER), -1) FROM checks WHERE id IN"// &
+            " CASE WHEN queued_at > claimed_at THEN -1 ELSE coalesce(CAST(strftime('%s',"// &
+            " claimed_at) - strftime('%s', coalesce(queued_at, created_at)) AS INTEGER), -1) END,"// &
+            " coalesce(CAST(strftime('%s', finished_at) -"// &
+            " strftime('%s', claimed_at) AS INTEGER), -1), coalesce(CASE WHEN claimed_at IS NULL"// &
+            " OR queued_at <= claimed_at THEN queued_at END, created_at)"// &
+            ' FROM checks WHERE id IN'// &
             ' (SELECT id FROM checks WHERE repo = ?1 AND ref IN'// &
             " ('refs/fortyard/checks/' || ?2, 'refs/fortyard/queue/' || ?2,"// &
             " 'refs/fortyard/verify/' || ?2)"// &
@@ -1423,6 +1426,7 @@ contains
             c%finished = stmt_text(st, 5)
             c%wait = int(stmt_int(st, 6))
             c%run = int(stmt_int(st, 7))
+            c%queued = stmt_text(st, 8)
             checks = [checks, c]
         end do
         call stmt_finalize(st)
@@ -1869,9 +1873,9 @@ contains
     subroutine store_check_error(db, id, log, timeout, state, found, runner, lost_grace)
         !! A running check ended without a verdict: its runner failed or was
         !! lost, or with `timeout` the check reached its time limit. It is
-        !! queued again, except at its second timeout, which ends it in the
-        !! state "timeout". `log` goes before its log (LOG_FIRST); `state` is
-        !! the new one.
+        !! queued again, except when a nightly check times out or another
+        !! check times out twice. `log` goes before its log (LOG_FIRST);
+        !! `state` is the new one.
         !! With `runner`, only while that runner holds the check, so a runner
         !! taken as lost cannot speak for a later claim. With `lost_grace`,
         !! only when the claim is older than twice its time limit (a failure
@@ -1888,8 +1892,8 @@ contains
         logical, intent(out) :: found
         character(len=*), intent(in), optional :: runner
         integer, intent(in), optional :: lost_grace
-        !! The attempt ends here rather than going back to the queue.
-        character(len=*), parameter :: ENDS = '(twin < id OR ?2 = 1 AND timeouts >= 1)'
+        character(len=*), parameter :: TIMED_OUT = "(?2 = 1 AND (kind = 'nightly' OR timeouts >= 1))"
+        character(len=*), parameter :: ENDS = '(twin < id OR '//TIMED_OUT//')'
         character(len=:), allocatable :: only
         type(stmt_t) :: st
         integer :: stat
@@ -1903,13 +1907,14 @@ contains
             ' 2*coalesce(time_limit, 3600) + ?5'
         ! SET reads the row as it was, so `timeouts` there is the count before.
         call db_prepare(db, 'UPDATE checks SET timeouts = timeouts + ?2, log = '// &
-            LOG_FIRST//", state = CASE WHEN twin < id THEN 'cancelled' WHEN ?2 = 1 AND"// &
-            " timeouts >= 1 THEN 'timeout' ELSE 'queued' END, runner = CASE WHEN "//ENDS//' THEN'// &
+            LOG_FIRST//", state = CASE WHEN twin < id THEN 'cancelled' WHEN "//TIMED_OUT// &
+            " THEN 'timeout' ELSE 'queued' END, runner = CASE WHEN "//ENDS//' THEN'// &
             ' runner END, claimed_at = CASE WHEN '//ENDS//' THEN claimed_at END,'// &
             ' ran_class = CASE WHEN '//ENDS//' THEN ran_class END, started_at = CASE'// &
             ' WHEN '//ENDS//' THEN started_at END,'// &
-            ' finished_at = CASE WHEN '//ENDS//' THEN '//NOW//' END, queued_at ='// &
-            ' '//NOW//" WHERE id = ?1 AND state = 'running'"//only//' RETURNING state;', st, stat)
+            ' finished_at = CASE WHEN '//ENDS//' THEN '//NOW//' END, queued_at = CASE WHEN '// &
+            ENDS//' THEN queued_at ELSE '//NOW//" END WHERE id = ?1 AND state = 'running'"// &
+            only//' RETURNING state;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_int(st, 1, id, stat)
         call stmt_bind_int(st, 2, int(merge(1, 0, timeout), int64), stat)

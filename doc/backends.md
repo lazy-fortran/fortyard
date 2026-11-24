@@ -173,9 +173,9 @@ A nightly check runs `.fortyard/nightly`, else `.fortyard/verify`, else, for
 an fpm project, every test with the slow ones (`fo test --all`) run again; on
 the GitHub and GitLab backends it runs as a verification. At most
 `FY_NIGHTLY_SLOTS` (default 2) nightly checks run on a runner class at once,
-so landings at night still find a runner. A class may be verified both after
-each landing and at night (`verify_on=linux,linux@nightly`), the nightly run
-then taking the slow tier.
+so landings at night still find a runner. A nightly check ends on its first
+timeout. With `verify_on=linux,linux@nightly`, Linux verifies each landing and
+runs the slow tier at night.
 
 ## The GitHub backend
 

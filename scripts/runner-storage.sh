@@ -93,6 +93,8 @@ watch_space &
 watcher=$!
 trap 'kill -KILL "$watcher" 2>/dev/null || true' EXIT
 status=0
+# The outer guard also covers runners started by a check.
+unset FY_CHECK_WRAP
 "$@" || status=$?
 kill -KILL "$watcher" 2>/dev/null || true
 wait "$watcher" 2>/dev/null || true

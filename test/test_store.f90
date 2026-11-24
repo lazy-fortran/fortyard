@@ -224,6 +224,8 @@ contains
         !! Only the runner that holds a check reports it, and one is lost only
         !! past twice the limit of its claim.
         character(len=:), allocatable :: state, log
+        type(landing_t) :: job
+        type(check_t), allocatable :: attempts(:)
         integer(int64) :: first
         integer :: age, limit
 
@@ -281,6 +283,22 @@ contains
         call store_check_add(db, 'a', 'refs/v', first, stat, kind='verify')
         call store_check_claim(db, 'r1', id, repo, ref, found, limit=limit)
         call check(found .and. limit == 21600, 'a verification is given six hours')
+        call store_check_add(db, 'a', 'refs/fortyard/verify/1', first, stat, kind='nightly')
+        call store_check_claim(db, 'r2', id, repo, ref, found)
+        call check(found .and. id == first, 'the nightly is claimed')
+        call db_exec(db, "UPDATE checks SET created_at = '2026-01-01T00:00:00Z',"// &
+            " queued_at = '2026-01-01T06:00:00Z', claimed_at = '2026-01-01T06:00:07Z'"// &
+            " WHERE ref = 'refs/fortyard/verify/1';", stat)
+        call check(stat == 0, 'the first attempt predates the latest queue entry')
+        call store_check_error(db, id, 'nightly timeout', .true., state, found)
+        call check(found .and. state == 'timeout', 'nightly ends on its first timeout')
+        job%id = 1
+        job%repo = 'a'
+        call store_job_checks(db, job, attempts)
+        call check(size(attempts) == 1, 'the job retains its ended check')
+        call check(attempts(1)%wait == 7, 'waiting is measured from the latest queue entry')
+        call store_check_claim(db, 'r2', id, repo, ref, found)
+        call check(.not. found, 'a nightly timeout is not claimed again')
         call db_close(db)
     end subroutine errors_and_timeouts
 

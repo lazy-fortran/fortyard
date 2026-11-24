@@ -175,7 +175,8 @@ program test_runner_split
         'm=$(cd ../.. && pwd)/third-ran', &
         'if [ -e "$m" ]; then echo "second run"; exit 0; fi', &
         'touch "$m"', &
-        'i=0; while [ $i -lt 600 ]; do echo "first run $i"; i=$((i+1)); sleep 1; done'])
+        'echo "first run is ready"', &
+        'sleep 600'])
     call execute_command_line(git//'-C '//work//' add -A && '//git//'-C '//work// &
         ' commit -q -m Third && '//git//'-C '//work//' push -q '//url//' HEAD:third', &
         exitstat=stat)
@@ -183,10 +184,10 @@ program test_runner_split
     reply = post('/api/v1/repos/demo/land', '{"branch":"third"}')
     do i = 1, 1200
         reply = get('/api/v1/jobs/3/log')
-        if (index(reply, 'first run 2') > 0) exit
+        if (index(reply, 'first run is ready') > 0) exit
         call proc_sleep_ms(100)
     end do
-    call check(index(reply, 'first run 2') > 0, 'the first run sends its log: '//reply)
+    call check(index(reply, 'first run is ready') > 0, 'the first run sends its log: '//reply)
     reply = exchange('POST /api/v1/checks/release HTTP/1.1'//CRLF//'Authorization: Bearer '// &
         runner//CRLF//'Content-Type: application/json'//CRLF//'Content-Length: 2'//CRLF//CRLF// &
         '{}')
@@ -196,7 +197,7 @@ program test_runner_split
     call check(index(reply, 'second run') > 0, 'the check ran again and passed: '//reply)
     call execute_command_line('grep -q "no longer this runner" '//top//'/controller.log', &
         exitstat=stat)
-    call check(stat == 0, 'the controller had the first run stopped')
+    call check(stat == 0, 'the controller stopped the first run while it was silent')
     call stop(ctl)
     call stop(ex)
     call stop(sup)

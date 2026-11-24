@@ -566,9 +566,8 @@ contains
                 end if
                 k = j
                 if (one == 'timeout') then
-                    ! Ended at its time limit twice: no verdict, but nothing more to wait for.
                     text = live_outcome(text, 'Reason: timeout. The verification reached its'// &
-                        ' time limit a second time and was ended by the runner.')
+                        ' time limit and was ended by the runner.')
                 else if (one == 'lost') then
                     text = 'No runner reported a result.'
                 end if
