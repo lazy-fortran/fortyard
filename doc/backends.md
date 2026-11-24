@@ -340,6 +340,12 @@ narrower list.
   and reports; the **executor** runs the check with no token, read-only root,
   no capabilities, limits on CPU, memory and processes, and the executor
   allowlist. Code under check has no way to the runner token.
+- **Runner storage.** Each standalone Docker executor keeps up to 16 GiB of
+  rebuildable work between successful checks and evicts the least recently used
+  workspaces first. It clears job scratch between checks. During a check it
+  samples disk usage and stops the check above 24 GiB of work or below 20 GiB
+  of free space. `FY_RUNNER_RETAIN_MIB`, `FY_RUNNER_ACTIVE_MIB`, and
+  `FY_RUNNER_RESERVE_MIB` configure these limits when installing the runner.
 - **Credentials by role.** Server: deploy keys (one repository each) and the
   client registration of its TU Graz login. GitHub backend: the App key.
   GitLab backend: its project tokens. No personal token, Kerberos ticket or

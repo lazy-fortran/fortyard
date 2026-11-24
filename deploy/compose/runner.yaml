@@ -14,6 +14,9 @@
 # everything the executor mounts, so code under check cannot change them. The
 # controller alone writes @EGRESS@/extra: the extra hosts of the check it
 # runs, which the executor proxy reads.
+x-logging: &logging
+  driver: json-file
+  options: {max-size: "10m", max-file: "3"}
 x-egress: &egress
   image: "@EGRESS_IMAGE@"
   restart: unless-stopped
@@ -26,10 +29,7 @@ x-egress: &egress
   mem_limit: 256m
   cpus: 1
   pids_limit: 128
-  # Every request is logged on standard output; Docker keeps 30 MB of it.
-  logging:
-    driver: json-file
-    options: {max-size: "10m", max-file: "3"}
+  logging: *logging
 services:
   fortyard-runner:
     image: "@IMAGE@"
@@ -69,6 +69,7 @@ services:
     mem_limit: 1g
     cpus: 1
     pids_limit: 256
+    logging: *logging
     networks: [control]
     depends_on: [fortyard-control]
   fortyard-executor:
@@ -86,6 +87,11 @@ services:
     environment:
       HOME: /tmp
       TMPDIR: "@HOME@/work/tmp"
+      FY_CHECK_WRAP: /opt/runner-storage run
+      FY_RUNNER_WORK: "@HOME@/work"
+      FY_RUNNER_RETAIN_MIB: "@RETAIN_MIB@"
+      FY_RUNNER_ACTIVE_MIB: "@ACTIVE_MIB@"
+      FY_RUNNER_RESERVE_MIB: "@RESERVE_MIB@"
       # Bounded caches that persist between checks (ccache and fo evict the
       # oldest entries themselves). Runners of one host share them, as both
       # take concurrent users; base_dir lets their work trees share hits.
@@ -105,6 +111,7 @@ services:
       - "@HOME@/data/mirrors:@HOME@/data/mirrors:ro"
       - "@HOME@/releases:@HOME@/releases:ro"
       - "@CACHE@:@CACHE@"
+      - "@HOME@/bin/runner-storage.sh:/opt/runner-storage:ro"
       # fo and fy at main, kept there by the host's follow-tools.sh.
       - "@TOOLS@:/opt/fy-tools/bin:ro"
     # Runs fy executor of the release named in the controller's hand-over,
@@ -115,6 +122,7 @@ services:
       - |
         export PATH="/opt/fy-tools/bin:$$PATH"
         w=$$1 r=$$2
+        /opt/runner-storage collect
         while :; do
           c=$$(sed -n 's/^commit=//p' "$$w/exchange/job" "$$w/exchange/taken" 2>/dev/null | head -n 1)
           d=$$(grep -l "^commit=$$c" "$$r"/*/RELEASE 2>/dev/null | head -n 1)
@@ -133,6 +141,7 @@ services:
     cpus: "@CPUS@"
     cpu_shares: @SHARES@
     pids_limit: 2048
+    logging: *logging
     networks: [exec]
   # The executor's way to packages and sources (executor list).
   fortyard-egress:
