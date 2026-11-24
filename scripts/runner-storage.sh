@@ -29,10 +29,16 @@ free_kib() {
         END { if (!found) exit 1 }'
 }
 
+permit_removal() {
+    # Fo seals its cached build generations with read-only directories.
+    find "$1" -xdev -type d -uid "$(id -u)" ! -perm -0700 -exec chmod u+rwx -- {} \;
+}
+
 collect() {
     keep=$1
     [ ! -L "$trees" ] && [ ! -L "$scratch" ] || return 1
     mkdir -p "$trees" "$scratch" || return 1
+    permit_removal "$scratch" || return 1
     find "$scratch" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || return 1
     used=$(used_kib) || return 1
     free=$(free_kib) || return 1
@@ -44,6 +50,7 @@ collect() {
         done
         [ -n "$oldest" ] || break
         printf 'runner storage: evicting workspace %s\n' "${oldest##*/}"
+        permit_removal "$oldest" || return 1
         rm -rf -- "$oldest" || return 1
         used=$(used_kib) || return 1
         free=$(free_kib) || return 1

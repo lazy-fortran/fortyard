@@ -4,12 +4,14 @@ program test_runner_storage
     character(len=*), parameter :: root = 'build/test_runner_storage'
     integer :: stat
 
-    call execute_command_line('mkdir -p '//root//'/fy-work/old '//root//'/fy-work/recent '// &
-        root//'/tmp '//root//'/exchange && '// &
+    call execute_command_line('mkdir -p '//root//'/fy-work/old/frozen '//root//'/fy-work/recent '// &
+        root//'/tmp/stale '//root//'/exchange && '// &
         'dd if=/dev/zero of='//root//'/fy-work/old/payload bs=1024 count=800 2>/dev/null && '// &
         'dd if=/dev/zero of='//root//'/fy-work/recent/payload bs=1024 count=800 2>/dev/null && '// &
         'touch -t 200001010000 '//root//'/fy-work/old && '// &
-        'touch '//root//'/tmp/stale '//root//'/exchange/job', exitstat=stat)
+        'touch '//root//'/tmp/stale/artifact '//root//'/fy-work/old/frozen/artifact '// &
+        root//'/exchange/job && chmod 555 '//root//'/tmp/stale '//root//'/fy-work/old/frozen', &
+        exitstat=stat)
     if (stat /= 0) error stop 'could not create the runner storage fixture'
 
     call execute_command_line('FY_RUNNER_WORK='//root// &
