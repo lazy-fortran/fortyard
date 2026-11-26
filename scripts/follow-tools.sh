@@ -9,6 +9,11 @@
 # FY_TOOLS       the tools to follow (default "fo fy"); fortyard is private on
 #                GitHub, so hosts without access follow fo only
 set -eu
+# Started from a Git hook, the caller's GIT_DIR and GIT_INDEX_FILE would make
+# the git calls below act on the committing checkout instead of our clones.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX GIT_SHALLOW_FILE GIT_GRAFT_FILE \
+    GIT_IMPLICIT_WORK_TREE GIT_NAMESPACE
 # fo before lazy-fortran/fo#436 writes its 10 s progress line into the output it
 # parses (the archive member list), which fails a build on a slow host.
 export FO_HEARTBEAT_SECONDS=0
