@@ -1,6 +1,6 @@
 name = "fortyard"
 version = "0.1.0"
-license = "proprietary"
+license = "MIT"
 author = "Christopher Albert"
 maintainer = "albert@tugraz.at"
 description = "Self-hosted Fortran forge"
