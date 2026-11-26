@@ -185,6 +185,7 @@ module fy_server
         store_check_cancel, &
         store_check_raced, &
         store_check_claim, &
+        store_check_shard, &
         store_check_error, &
         store_check_finish, &
         store_check_get, &
@@ -2676,7 +2677,8 @@ contains
             ! The hosts the runner controller opens on its executor's proxy.
             call policy_get(db, repo, pol)
             res%body = '{"id":'//trim(num)//',"repo":"'//repo//'","ref":"'//ref//'","kind":"'// &
-                kind//'","timeout":'//trim(limit)//',"egress":"'// &
+                kind//'","shard":"'//store_check_shard(db, id)//'","timeout":'//trim(limit)// &
+                ',"egress":"'// &
                 json_escape_string(pol%egress)//'","private":'// &
                 trim(merge('false', 'true ', pol%public))//'}'
             return

@@ -177,6 +177,16 @@ so landings at night still find a runner. A nightly check ends on its first
 timeout. With `verify_on=linux,linux@nightly`, Linux verifies each landing and
 runs the slow tier at night.
 
+## Split verifications
+
+A suite that does not fit one check's time limit is split with
+`verify_shards=N` (1 to 16): each verification of `main`, nightly or not, queues
+N checks per class, and check K runs with `FORTYARD_SHARD=K/N`. The default
+commands then run `fo test --partition cost:K/N`, which balances the tests'
+declared time limits over the shards; a repository's own `.fortyard/verify` or
+`.fortyard/nightly` reads the variable itself. The verification passes when
+every shard passes, and a failure names its shard.
+
 ## The GitHub backend
 
 **The server pushes, the backend only reads.** For a check given to a GitHub

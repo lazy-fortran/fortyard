@@ -193,6 +193,14 @@ contains
             'CREATE TABLE github_receipts (landing INTEGER PRIMARY KEY, prs TEXT NOT NULL,'// &
             ' sent_at TEXT NOT NULL);')
 
+        ! Split verifications (policy verify_shards): a verification of main
+        ! queues one check per shard K/N on each class, and the check's runner
+        ! hands its shard to the check as FORTYARD_SHARD. '' for an unsplit
+        ! check.
+        call migration_add(list, 'verify-shards', &
+            "ALTER TABLE checks ADD COLUMN shard TEXT NOT NULL DEFAULT '';"// &
+            'ALTER TABLE repos ADD COLUMN policy_verify_shards INTEGER NOT NULL DEFAULT 1;')
+
     end subroutine migrations_registry
 
 end module fy_migrations

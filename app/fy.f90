@@ -207,6 +207,9 @@ contains
             '                      verify_on=CLASS[,CLASS...]  runner classes each', &
             '                        verification of main runs on (default linux)', &
             '                        CLASS@nightly: verified on its own once a night', &
+            '                      verify_shards=N  each verification of main runs as N', &
+            '                        checks per class, check K with FORTYARD_SHARD=K/N', &
+            '                        (default 1; up to 16)', &
             '                      backends=github,gitlab  external backends its checks', &
             '                        may run on (public repositories only; empty: none)', &
             '                      egress=DOMAIN[,DOMAIN...]  hosts its checks reach', &

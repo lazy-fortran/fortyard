@@ -243,7 +243,7 @@ contains
     subroutine run_one(server, token, data_dir, claim, remote)
         character(len=*), intent(in) :: server, token, data_dir, claim
         logical, intent(in), optional :: remote
-        character(len=:), allocatable :: repo, ref, out, body, work, id, kept, kind, state
+        character(len=:), allocatable :: repo, ref, out, body, work, id, kept, kind, state, shard
         character(len=16) :: minutes
         character(len=256) :: tmp
         ! Fixed length: gfortran overflows typed array constructors around
@@ -256,6 +256,9 @@ contains
         call json_extract_string(claim, 'ref', ref, found)
         call json_extract_string(claim, 'kind', kind, found)
         if (.not. found) kind = 'check'
+        ! The part K/N of a split verification; '' for a whole check.
+        call json_extract_string(claim, 'shard', shard, found)
+        if (.not. found) shard = ''
         s = index(claim, '"id":') + 5
         e = s
         do while (e <= len(claim))
@@ -328,6 +331,7 @@ contains
             ! A failure is confirmed from an empty build directory before it
             ! is reported, so stale build state can never fail a landing.
             call proc_run([character(len=1024) :: 'touch', w], body, stat, 4096)
+            call proc_setenv('FORTYARD_SHARD', shard)
             ! The output goes to the server while the check runs.
             live_server = server
             live_token = token
@@ -407,7 +411,7 @@ contains
             call system_clock(live_contact)
             call executor_run(exec_dir, id, repo, trim(src), ref, work, kind == 'verify' .or. &
                 kind == 'nightly', limit, runner_class, .false., out, code, timed_out, build, state, send_live, &
-                check_withdrawn, taken_hook=egress_open, nightly=kind == 'nightly')
+                check_withdrawn, taken_hook=egress_open, nightly=kind == 'nightly', shard=shard)
             if (.not. outcome()) return
             if (code /= 0 .and. build) then
                 kept = out
@@ -420,7 +424,8 @@ contains
                 live_base = live_base + live_have + len(live_between, int64)
                 call executor_run(exec_dir, id, repo, trim(src), ref, work, kind == 'verify' .or. &
                     kind == 'nightly', limit, runner_class, .true., out, code, timed_out, build, state, send_live, &
-                    check_withdrawn, taken_hook=egress_open, nightly=kind == 'nightly')
+                    check_withdrawn, taken_hook=egress_open, nightly=kind == 'nightly', &
+                    shard=shard)
                 out = kept//live_between//out
                 if (.not. outcome()) return
             end if

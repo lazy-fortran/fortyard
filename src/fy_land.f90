@@ -102,6 +102,10 @@ module fy_land
     integer, parameter :: LIVE_EVERY_MS = 2000
     character(len=*), parameter :: NO_CHECK = 'Not checked: the policy of the repository sets tests=none.'
     !! git's empty tree, the base of a first landing.
+    !! The part of a split verification (FORTYARD_SHARD=K/N) that a default
+    !! verification runs; nothing for a whole one.
+    character(len=*), parameter :: SHARD_PART = &
+        '${FORTYARD_SHARD:+ --partition cost:$FORTYARD_SHARD}'
     character(len=*), parameter :: EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
     !! The value of a ref that does not exist yet.
     character(len=*), parameter :: NO_COMMIT = '0000000000000000000000000000000000000000'
@@ -915,7 +919,10 @@ contains
         !! output grows in that file, which is kept, instead of a temporary one.
         !! With `nightly` (and `verify`) the nightly run: .fortyard/nightly,
         !! else .fortyard/verify, else for an fpm project every test, the slow
-        !! ones included, run again.
+        !! ones included, run again. A shard of a split verification (the
+        !! environment variable FORTYARD_SHARD=K/N) runs part K of N of these
+        !! tests (fo test --partition cost:K/N); a repository's own script
+        !! reads the variable itself.
         character(len=*), intent(in) :: work
         character(len=:), allocatable, intent(out) :: out
         integer, intent(out) :: code
@@ -958,10 +965,11 @@ contains
                     code = 0
                     return
                 end if
-                cmd = [character(len=1024) :: 'sh', '-c', 'fo build && FO_TEST_RERUN=1 fo test']
+                cmd = [character(len=1024) :: 'sh', '-c', 'fo build && FO_TEST_RERUN=1 fo test'// &
+                    SHARD_PART]
                 if (present(nightly)) then
                     if (nightly) cmd = [character(len=1024) :: 'sh', '-c', &
-                        'fo build && FO_TEST_RERUN=1 fo test --all']
+                        'fo build && FO_TEST_RERUN=1 fo test --all'//SHARD_PART]
                 end if
             end if
         else

@@ -474,15 +474,17 @@ contains
 
     subroutine run(db, repo, git_dir, commit, request, track, classes)
         !! Verifies `commit` on a runner of each of `classes`, as job `request`
-        !! or a new one of `track` (a nightly class, or '').
+        !! or a new one of `track` (a nightly class, or ''); with the policy's
+        !! verify_shards N > 1 as N checks per class, shards 1/N to N/N.
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: repo, git_dir, commit, track, classes
         integer(int64), intent(in) :: request
         type(stmt_t) :: st
         integer(int64) :: id, check
-        character(len=:), allocatable :: ref, out, on
+        character(len=:), allocatable :: ref, out, on, shard
         character(len=24) :: num
-        integer :: stat, status, k
+        type(policy_t) :: pol
+        integer :: stat, status, k, part
 
         id = request
         if (id > 0) then
@@ -506,11 +508,16 @@ contains
         write (num, '(i0)') id
         ref = 'refs/fortyard/verify/'//trim(num)
         call git(git_dir, [character(len=256) :: 'update-ref', ref, commit], out, status)
+        call policy_get(db, repo, pol)
         on = classes//','
         do while (len(on) > 1)
             k = index(on, ',')
-            call store_check_add(db, repo, ref, check, stat, kind=trim(merge('nightly', 'verify ', &
-                len(track) > 0)), class=on(1:k - 1))
+            do part = 1, pol%verify_shards
+                shard = ''
+                if (pol%verify_shards > 1) shard = itoa(part)//'/'//itoa(pol%verify_shards)
+                call store_check_add(db, repo, ref, check, stat, kind=trim(merge('nightly', &
+                    'verify ', len(track) > 0)), class=on(1:k - 1), shard=shard)
+            end do
             on = on(k + 1:)
         end do
         call events_notify('checks')
@@ -528,13 +535,13 @@ contains
         integer(int64), intent(in) :: id
         character(len=:), allocatable :: state, log, out, one, text
         integer(int64), allocatable :: checks(:)
-        character(len=32), allocatable :: classes(:)
+        character(len=32), allocatable :: classes(:), shards(:)
         character(len=24) :: num
         integer :: age, status, k, j
         logical :: waiting
 
         write (num, '(i0)') id
-        call checks_of(db, 'refs/fortyard/verify/'//trim(num), checks, classes)
+        call checks_of(db, 'refs/fortyard/verify/'//trim(num), checks, classes, shards)
         done = .false.
         state = ''
         log = ''
@@ -573,8 +580,12 @@ contains
                 end if
                 state = 'failed'
                 log = text
-                if (size(checks) > 1) log = live_outcome(log, 'On the runner class '// &
-                    trim(classes(j))//'.')
+                if (len_trim(shards(j)) > 0) then
+                    log = live_outcome(log, 'In shard '//trim(shards(j))//' on the runner class '// &
+                        trim(classes(j))//'.')
+                else if (size(checks) > 1) then
+                    log = live_outcome(log, 'On the runner class '//trim(classes(j))//'.')
+                end if
             end do
             if (waiting) return
         end if
@@ -596,26 +607,31 @@ contains
         done = .true.
     end function settle
 
-    subroutine checks_of(db, ref, ids, classes)
-        !! The runner checks queued for `ref`, one per class, oldest first;
-        !! a twin is read with the check it raced (store_check_get).
+    subroutine checks_of(db, ref, ids, classes, shards)
+        !! The runner checks queued for `ref`, one per class and shard, oldest
+        !! first; a twin is read with the check it raced (store_check_get).
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: ref
         integer(int64), allocatable, intent(out) :: ids(:)
         character(len=32), allocatable, intent(out) :: classes(:)
+        character(len=32), allocatable, intent(out), optional :: shards(:)
+        character(len=32), allocatable :: parts(:)
         type(stmt_t) :: st
         integer :: stat
 
-        allocate (ids(0), classes(0))
-        call db_prepare(db, 'SELECT id, class FROM checks WHERE ref = ?1 AND'// &
+        allocate (ids(0), classes(0), parts(0))
+        if (present(shards)) allocate (shards(0))
+        call db_prepare(db, 'SELECT id, class, shard FROM checks WHERE ref = ?1 AND'// &
             ' coalesce(twin, id) >= id ORDER BY id;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, ref, stat)
         do while (stmt_step(st) == SQLITE_ROW)
             ids = [ids, stmt_int(st, 0)]
             classes = [classes, [character(len=32) :: stmt_text(st, 1)]]
+            parts = [parts, [character(len=32) :: stmt_text(st, 2)]]
         end do
         call stmt_finalize(st)
+        if (present(shards)) shards = parts
     end subroutine checks_of
 
     subroutine report(db, repo, git_dir, culprit, good, base, track, bisect)

@@ -316,6 +316,13 @@ contains
         call check(len(error) > 0, 'a nightly class named twice is refused')
         call policy_set(p, 'verify_on', 'linux,linux', error)
         call check(len(error) > 0, 'a class named twice is refused')
+        call policy_set(p, 'verify_shards', '0', error)
+        call check(len(error) > 0, 'verify_shards=0 is refused')
+        call policy_set(p, 'verify_shards', '17', error)
+        call check(len(error) > 0, 'more than 16 shards are refused')
+        call policy_from_json(p, '{"verify_shards":4}', error)
+        call check(len(error) == 0 .and. p%verify_shards == 4, 'JSON sets verify_shards: '//error)
+        p%verify_shards = 1
         call policy_set(p, 'bisect', 'maybe', error)
         call check(len(error) > 0, 'bisect=maybe is refused')
         call policy_set(p, 'review', 'never', error)
@@ -349,7 +356,7 @@ contains
         call policy_get(db, 'unit', p)
         call check(found .and. policy_json('unit', p) == '{"name":"unit","tests":"affected",'// &
             '"review":"after","bisect":"off","batch":4,"unreviewed_limit":3,"check_timeout":90,'// &
-            '"verify_on":"linux","backends":"","egress":"","public":false}', &
+            '"verify_on":"linux","verify_shards":1,"backends":"","egress":"","public":false}', &
             'a policy is stored: '//policy_json('unit', p))
         call policy_get(db, 'demo', p)
         call check(p%tests == 'full' .and. p%batch == 8, 'for its repository only')

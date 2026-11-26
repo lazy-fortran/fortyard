@@ -50,6 +50,7 @@ module fy_store
         store_account_find, &
         store_bootstrap, &
         store_check_add, &
+        store_check_shard, &
         store_check_cancel, &
         store_check_raced, &
         store_check_claim, &
@@ -1502,20 +1503,21 @@ contains
         call stmt_finalize(st)
     end function store_jobs_state
 
-    subroutine store_check_add(db, repo, ref, id, stat, kind, class)
+    subroutine store_check_add(db, repo, ref, id, stat, kind, class, shard)
         !! Queues a check of `ref` in `repo` for a runner: of a landing ("check",
         !! the default) or a verification of main ("verify"), on a runner of
-        !! `class` (default linux).
+        !! `class` (default linux), as part `shard` (K/N) of a split
+        !! verification or whole (default).
         type(db_t), intent(in) :: db
         character(len=*), intent(in) :: repo, ref
         integer(int64), intent(out) :: id
         integer, intent(out) :: stat
-        character(len=*), intent(in), optional :: kind, class
+        character(len=*), intent(in), optional :: kind, class, shard
         type(stmt_t) :: st
 
         id = 0
-        call db_prepare(db, 'INSERT INTO checks (repo, ref, created_at, kind, class) VALUES (?1,'// &
-            ' ?2, '//NOW//', ?3, ?4) RETURNING id;', st, stat)
+        call db_prepare(db, 'INSERT INTO checks (repo, ref, created_at, kind, class, shard)'// &
+            ' VALUES (?1, ?2, '//NOW//', ?3, ?4, ?5) RETURNING id;', st, stat)
         if (stat /= SQLITE_OK) return
         call stmt_bind_text(st, 1, repo, stat)
         call stmt_bind_text(st, 2, ref, stat)
@@ -1529,6 +1531,11 @@ contains
         else
             call stmt_bind_text(st, 4, 'linux', stat)
         end if
+        if (present(shard)) then
+            call stmt_bind_text(st, 5, shard, stat)
+        else
+            call stmt_bind_text(st, 5, '', stat)
+        end if
         stat = 1
         if (stmt_step(st) == SQLITE_ROW) then
             id = stmt_int(st, 0)
@@ -1536,6 +1543,22 @@ contains
         end if
         call stmt_finalize(st)
     end subroutine store_check_add
+
+    function store_check_shard(db, id) result(shard)
+        !! The shard K/N of check `id`, '' for a whole check.
+        type(db_t), intent(in) :: db
+        integer(int64), intent(in) :: id
+        character(len=:), allocatable :: shard
+        type(stmt_t) :: st
+        integer :: stat
+
+        shard = ''
+        call db_prepare(db, 'SELECT shard FROM checks WHERE id = ?1;', st, stat)
+        if (stat /= SQLITE_OK) return
+        call stmt_bind_int(st, 1, id, stat)
+        if (stmt_step(st) == SQLITE_ROW) shard = stmt_text(st, 0)
+        call stmt_finalize(st)
+    end function store_check_shard
 
     subroutine store_landing_check(db, ids, check)
         !! Check `check` decides the landings `ids`, the members of a candidate.
@@ -1775,9 +1798,10 @@ contains
         repo = ''
         ref = ''
         if (present(limit)) limit = 0
-        call db_prepare(db, 'INSERT INTO checks (repo, ref, created_at, kind, class, state,'// &
-            ' runner, ran_class, claimed_at, started_at, time_limit, twin) SELECT c.repo, c.ref, '// &
-            NOW//", c.kind, c.class, 'running', ?1, ?2, "//NOW//', '//NOW//", CASE WHEN c.kind IN"// &
+        call db_prepare(db, 'INSERT INTO checks (repo, ref, created_at, kind, class, shard,'// &
+            ' state, runner, ran_class, claimed_at, started_at, time_limit, twin) SELECT c.repo,'// &
+            ' c.ref, '//NOW//", c.kind, c.class, c.shard, 'running', ?1, ?2, "//NOW//', '//NOW// &
+            ", CASE WHEN c.kind IN"// &
             " ('verify', 'nightly') THEN 21600 ELSE coalesce((SELECT 60*policy_check_timeout FROM repos WHERE"// &
             ' name = c.repo), 3600) END, c.id FROM checks c WHERE c.id = ?3 AND c.state ='// &
             " 'queued' AND c.twin IS NULL AND NOT EXISTS (SELECT 1 FROM checks t WHERE t.twin ="// &

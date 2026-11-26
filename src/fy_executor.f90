@@ -133,7 +133,7 @@ module fy_executor
 contains
 
     subroutine executor_run(dir, id, repo, src, ref, work, verify, limit, class, rerun, &
-            out, code, timed_out, build, state, sink, cancel, waits, taken_hook, nightly)
+            out, code, timed_out, build, state, sink, cancel, waits, taken_hook, nightly, shard)
         !! The controller's side: has the executor at `dir` check `ref` of
         !! `repo` (fetched from `src`, a path the executor sees as well) in
         !! `work`, or with `rerun` run the check again in `work` without its
@@ -146,7 +146,8 @@ contains
         !! directory after the check. `waits`: the seconds of TAKE_SECONDS,
         !! LATE_CANCEL and LATE_LOST instead of those. `taken_hook`
         !! is called when the executor has taken the check, which it does only
-        !! when no other runs there.
+        !! when no other runs there. `shard`: the part K/N of a split
+        !! verification, which the check sees as FORTYARD_SHARD.
         character(len=*), intent(in) :: dir, id, repo, src, ref, work, class
         logical, intent(in) :: verify, rerun
         integer, intent(in) :: limit
@@ -158,7 +159,8 @@ contains
         integer, intent(in), optional :: waits(3)
         procedure(executor_taken_i), optional :: taken_hook
         logical, intent(in), optional :: nightly
-        character(len=:), allocatable :: status, nonce, fdpath, kind_name
+        character(len=*), intent(in), optional :: shard
+        character(len=:), allocatable :: status, nonce, fdpath, kind_name, part
         character(len=24) :: num
         integer(int64) :: start, now, rate, began, told, used
         integer :: fd, xfd, rc, stat, take, cancel_after, lost_after
@@ -174,6 +176,8 @@ contains
         if (present(nightly)) then
             if (nightly) kind_name = 'nightly'
         end if
+        part = ''
+        if (present(shard)) part = shard
         take = TAKE_SECONDS
         cancel_after = LATE_CANCEL
         lost_after = LATE_LOST
@@ -200,7 +204,7 @@ contains
             new_line('a')//'work='//absolute(work)//new_line('a')//'kind='// &
             trim(kind_name)//new_line('a')//'limit='//trim(num)// &
             new_line('a')//'class='//class//new_line('a')//'rerun='//merge('1', '0', rerun)// &
-            new_line('a'))
+            new_line('a')//'shard='//part//new_line('a'))
         fd = -1
         fdpath = ''
         taken = .false.
@@ -398,6 +402,7 @@ contains
         r = field(job, 'ref')
         limit = number(field(job, 'limit'), 3600)
         call proc_setenv('FORTYARD_RUNNER_CLASS', field(job, 'class'))
+        call proc_setenv('FORTYARD_SHARD', field(job, 'shard'))
         timed_out = .false.
         write (error_unit, '(a)') 'fy executor: '//field(job, 'kind')//' of '// &
             field(job, 'repo')//' '//field(job, 'ref')
