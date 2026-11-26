@@ -1,5 +1,7 @@
 # fortyard
 
+**Retired on 2026-11-26 and no longer developed.** The repositories it hosted are developed on GitHub again, with pull requests and GitHub's merge queue. This repository is kept as a record of the experiment.
+
 fortyard is a self-hosted forge for Fortran projects: git hosting, CI with
 [fo](https://github.com/lazy-fortran/fo), code review, a merge queue, issues, a
 shared binary build cache, and AI agents that implement and review changes. It
